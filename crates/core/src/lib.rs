@@ -3,6 +3,7 @@ pub mod confinement;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod ops;
 pub mod pause;
 pub mod pipeline;
 pub mod sensitive;

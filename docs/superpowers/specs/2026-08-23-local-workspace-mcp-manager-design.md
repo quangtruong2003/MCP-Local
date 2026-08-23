@@ -227,6 +227,7 @@ Structured error codes surfaced as `isError: true` tool results with `{ code, me
 | `INVALID_PATCH` | anchor missing/ambiguous |
 | `FILE_CHANGED_SINCE_READ` | revision mismatch |
 | `RESULT_TOO_LARGE` | bounds exceeded without truncation possible |
+| `INVALID_ARGUMENT` | malformed client input (bad regex/glob, >8 read_files paths) |
 | `IO_ERROR` | filesystem failure (OS message included) |
 
 Codes are stable strings — ChatGPT can react to them conversationally ("ask the user to enable write access").

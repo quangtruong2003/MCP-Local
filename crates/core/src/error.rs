@@ -16,6 +16,7 @@ pub enum ErrorCode {
     FileChangedSinceRead,
     ResultTooLarge,
     IoError,
+    InvalidArgument,
 }
 
 impl ErrorCode {
@@ -33,6 +34,7 @@ impl ErrorCode {
             Self::FileChangedSinceRead => "FILE_CHANGED_SINCE_READ",
             Self::ResultTooLarge => "RESULT_TOO_LARGE",
             Self::IoError => "IO_ERROR",
+            Self::InvalidArgument => "INVALID_ARGUMENT",
         }
     }
 }
@@ -105,6 +107,7 @@ mod tests {
         );
         assert_eq!(ErrorCode::ResultTooLarge.as_str(), "RESULT_TOO_LARGE");
         assert_eq!(ErrorCode::IoError.as_str(), "IO_ERROR");
+        assert_eq!(ErrorCode::InvalidArgument.as_str(), "INVALID_ARGUMENT");
     }
 
     #[test]
