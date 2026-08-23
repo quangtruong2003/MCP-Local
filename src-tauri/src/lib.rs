@@ -23,6 +23,9 @@ pub fn run() {
             );
             let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
             app.manage(AppState { core, port });
+            // Must be managed before any tunnel::spawn/stop/status access
+            // (app.state::<TunnelHandle>() panics when unmanaged).
+            app.manage(tunnel::TunnelHandle::default());
             println!("MCP server: http://127.0.0.1:{port}/mcp");
             // Restore persisted tunnel settings and auto-start the sidecar
             // if one was configured. Spawn failures are surfaced as a

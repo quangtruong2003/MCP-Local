@@ -154,20 +154,18 @@ pub fn configure_tunnel(
     tunnel_id: String,
     api_key: String,
 ) -> Result<(), String> {
+    // Always stop any running sidecar first — even when the new config is
+    // empty (disabling the tunnel must not leave a stale process bridged).
+    tunnel::stop(&app);
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    settings::save(
-        &dir,
-        &settings::Settings {
-            tunnel_id,
-            tunnel_api_key: api_key,
-        },
-    )?;
-    // Reload from disk so spawn uses exactly what was persisted.
-    let saved = settings::load(&dir)?;
+    let saved = settings::Settings {
+        tunnel_id,
+        tunnel_api_key: api_key,
+    };
+    settings::save(&dir, &saved)?;
     if saved.tunnel_id.is_empty() {
         return Ok(());
     }
-    tunnel::stop(&app);
     tunnel::spawn(&app, &saved.tunnel_id, &saved.tunnel_api_key, state.port)
 }
 

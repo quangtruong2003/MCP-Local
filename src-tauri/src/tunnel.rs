@@ -9,6 +9,11 @@
 //! without verifying the control-plane handshake. Real health polling (the
 //! sidecar exposes `--health.listen-addr` / `--health.url-file`) is future
 //! work; until then `Connected` means "process running", nothing more.
+//!
+//! Known limitation (MVP): teardown only runs on the normal exit path
+//! (`RunEvent::ExitRequested`). If the app hard-crashes or is force-killed,
+//! the sidecar is orphaned and keeps bridging. A Windows Job Object (kill-on-
+//! close) or equivalent OS-level process binding is the future mitigation.
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -30,6 +35,7 @@ pub enum TunnelStatus {
     Error(String),
 }
 
+#[derive(Default)]
 pub struct TunnelHandle {
     pub child: Mutex<Option<Child>>,
     pub status: Mutex<TunnelStatus>,
