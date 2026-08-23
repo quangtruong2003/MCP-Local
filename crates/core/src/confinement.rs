@@ -9,6 +9,9 @@ pub fn resolve(target: &Path) -> std::io::Result<PathBuf> {
         return Ok(p);
     }
     let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    if let Some(name) = target.file_name() {
+        suffix.push(name.to_os_string());
+    }
     for anc in target.ancestors().skip(1) {
         match dunce::canonicalize(anc) {
             Ok(base) => {
@@ -147,5 +150,42 @@ mod tests {
         let (_d, root) = setup();
         let p = ensure_inside(&root, &root).unwrap();
         assert_eq!(p, dunce::canonicalize(&root).unwrap());
+    }
+
+    #[test]
+    fn resolve_keeps_full_tail_for_nonexistent_nested_path() {
+        let (_d, root) = setup();
+        let target = root.join("sub").join("new").join("f.txt");
+        let p = resolve(&target).unwrap();
+        assert!(p.ends_with(std::path::Path::new("new").join("f.txt").as_path()));
+    }
+
+    #[test]
+    fn resolve_single_component_tail_is_preserved() {
+        let (_d, root) = setup();
+        let target = root.join("notes.md");
+        let canonical_root = dunce::canonicalize(&root).unwrap();
+        let p = ensure_inside(&root, &target).unwrap();
+        assert_eq!(p, canonical_root.join("notes.md"));
+    }
+
+    #[test]
+    fn sibling_prefix_directory_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().join("ws");
+        let evil = dir.path().join("ws-evil");
+        fs::create_dir_all(ws.join("sub")).unwrap();
+        fs::create_dir_all(&evil).unwrap();
+        fs::write(evil.join("file.txt"), "secret").unwrap();
+        let e = ensure_inside(&ws, &evil.join("file.txt")).unwrap_err();
+        assert_eq!(e.code, ErrorCode::PathOutsideWorkspace);
+    }
+
+    #[test]
+    fn exact_canonical_root_is_inside() {
+        let (_d, root) = setup();
+        let canonical = dunce::canonicalize(&root).unwrap();
+        let p = ensure_inside(&root, &canonical).unwrap();
+        assert_eq!(p, canonical);
     }
 }
