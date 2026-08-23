@@ -1,0 +1,17 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Local Workspace MCP Manager",
+  "version": "0.1.0",
+  "identifier": "com.local.workspace-mcp-manager",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [{ "title": "Local Workspace MCP Manager", "width": 900, "height": 700 }],
+    "security": { "csp": null }
+  },
+  "bundle": { "active": true, "targets": ["nsis"] }
+}

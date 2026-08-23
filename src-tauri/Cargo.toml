@@ -1,0 +1,18 @@
+[package]
+name = "local-workspace-mcp-manager"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lc_core = { path = "../crates/core", package = "core" }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+axum = "0.8"
+rmcp = { version = "3.1", features = ["server", "transport-streamable-http-server", "macros"] }
+schemars = "1"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
