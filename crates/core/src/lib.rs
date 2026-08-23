@@ -3,6 +3,7 @@ pub mod confinement;
 pub mod db;
 pub mod error;
 pub mod models;
+pub mod sensitive;
 pub mod workspace_repo;
 
 /// Shared services handed to both the MCP server and Tauri commands.

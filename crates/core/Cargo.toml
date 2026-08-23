@@ -10,6 +10,7 @@ thiserror.workspace = true
 uuid.workspace = true
 time.workspace = true
 dunce = "1"
+globset = "0.4"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
