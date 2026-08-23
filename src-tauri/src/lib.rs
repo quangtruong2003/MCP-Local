@@ -1,6 +1,7 @@
 mod commands;
 pub mod server;
 pub mod settings;
+pub mod tunnel;
 
 use std::sync::Arc;
 use tauri::Manager;
@@ -23,6 +24,19 @@ pub fn run() {
             let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
             app.manage(AppState { core, port });
             println!("MCP server: http://127.0.0.1:{port}/mcp");
+            // Restore persisted tunnel settings and auto-start the sidecar
+            // if one was configured. Spawn failures are surfaced as a
+            // tunnel-status Error event (inside spawn) rather than
+            // blocking startup.
+            let settings = settings::load(&dir).unwrap_or_default();
+            if !settings.tunnel_id.is_empty() {
+                let _ = tunnel::spawn(
+                    app.handle(),
+                    &settings.tunnel_id,
+                    &settings.tunnel_api_key,
+                    port,
+                );
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -33,7 +47,15 @@ pub fn run() {
             commands::set_paused,
             commands::recent_audit,
             commands::server_status,
+            commands::configure_tunnel,
+            commands::stop_tunnel,
+            commands::tunnel_status,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("build tauri app")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                tunnel::stop(app_handle);
+            }
+        });
 }

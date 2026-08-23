@@ -13,5 +13,9 @@
     "windows": [{ "title": "Local Workspace MCP Manager", "width": 900, "height": 700 }],
     "security": { "csp": null }
   },
-  "bundle": { "active": true, "targets": ["nsis"] }
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "externalBin": ["binaries/tunnel-client", "binaries/cloudflared"]
+  }
 }

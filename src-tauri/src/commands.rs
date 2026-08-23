@@ -5,9 +5,9 @@
 //! JSON (stable `code` + `message`).
 
 use serde::Serialize;
-use tauri::State;
+use tauri::{Manager, State};
 
-use crate::AppState;
+use crate::{settings, tunnel, AppState};
 use lc_core::{audit, error::CoreError, models::AuditEvent, workspace_repo};
 
 fn err_string(e: CoreError) -> String {
@@ -144,4 +144,44 @@ pub fn server_status(state: State<'_, AppState>) -> Status {
         port: state.port,
         paused: state.core.pause.is_paused(),
     }
+}
+
+/// Persists tunnel credentials and (re)starts the sidecar.
+#[tauri::command]
+pub fn configure_tunnel(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    tunnel_id: String,
+    api_key: String,
+) -> Result<(), String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    settings::save(
+        &dir,
+        &settings::Settings {
+            tunnel_id,
+            tunnel_api_key: api_key,
+        },
+    )?;
+    // Reload from disk so spawn uses exactly what was persisted.
+    let saved = settings::load(&dir)?;
+    if saved.tunnel_id.is_empty() {
+        return Ok(());
+    }
+    tunnel::stop(&app);
+    tunnel::spawn(&app, &saved.tunnel_id, &saved.tunnel_api_key, state.port)
+}
+
+/// Stops the sidecar; persisted settings are left untouched so the user can
+/// re-enable later without re-entering credentials.
+#[tauri::command]
+pub fn stop_tunnel(app: tauri::AppHandle) {
+    tunnel::stop(&app);
+}
+
+/// Current sidecar status as serialized `TunnelStatus` JSON.
+#[tauri::command]
+pub fn tunnel_status(app: tauri::AppHandle) -> String {
+    let handle = app.state::<crate::tunnel::TunnelHandle>();
+    let status = handle.status.lock().unwrap().clone();
+    serde_json::to_string(&status).unwrap_or_else(|_| "\"stopped\"".into())
 }

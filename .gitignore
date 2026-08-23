@@ -6,3 +6,5 @@ dist
 *.db-shm
 settings.json
 .superpowers/
+# Vendored sidecar binaries (download step documented in README)
+src-tauri/binaries/*.exe
