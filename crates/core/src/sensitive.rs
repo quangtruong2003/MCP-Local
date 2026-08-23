@@ -1,4 +1,4 @@
-use globset::{Glob, GlobSet, GlobSetBuilder};
+use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use std::path::Path;
 
 /// Glob patterns (matched against workspace-relative paths) for files that
@@ -30,11 +30,17 @@ impl SensitiveMatcher {
     pub fn new() -> Self {
         let mut fb = GlobSetBuilder::new();
         for p in FILE_PATTERNS {
-            fb.add(Glob::new(p).unwrap());
+            // Case-insensitive: Windows/macOS filesystems are case-insensitive.
+            fb.add(GlobBuilder::new(p).case_insensitive(true).build().unwrap());
         }
         let mut db = GlobSetBuilder::new();
         for name in BLOCKED_DIR_NAMES {
-            db.add(Glob::new(&format!("**/{name}")).unwrap());
+            db.add(
+                GlobBuilder::new(&format!("**/{name}"))
+                    .case_insensitive(true)
+                    .build()
+                    .unwrap(),
+            );
         }
         Self {
             files: fb.build().unwrap(),
@@ -44,13 +50,16 @@ impl SensitiveMatcher {
 
     /// `rel` must be relative to the workspace root. Checks the full relative
     /// path AND every ancestor directory (so `node_modules/x/y` is caught by
-    /// the `node_modules` dir rule).
+    /// the `node_modules` dir rule). Separators are normalized to `/` before
+    /// matching so Windows-style `\` paths match the same as `/` paths on any
+    /// platform.
     pub fn is_blocked(&self, rel: &Path) -> bool {
         for anc in rel.ancestors() {
             if anc.as_os_str().is_empty() {
                 break;
             }
-            if self.files.is_match(anc) || self.dirs.is_match(anc) {
+            let normalized = anc.to_string_lossy().replace('\\', "/");
+            if self.files.is_match(&normalized) || self.dirs.is_match(&normalized) {
                 return true;
             }
         }
@@ -111,5 +120,20 @@ mod tests {
     fn normal_files_allowed() {
         assert!(!m().is_blocked(Path::new("src/main.rs")));
         assert!(!m().is_blocked(Path::new("README.md")));
+    }
+
+    #[test]
+    fn backslash_separated_paths_blocked() {
+        // Windows callers build relative paths with PathBuf, producing `\`.
+        assert!(m().is_blocked(Path::new(r"sub\dir\.env")));
+        assert!(m().is_blocked(Path::new(r"web\node_modules\pkg\index.js")));
+    }
+
+    #[test]
+    fn case_variant_names_blocked() {
+        // Windows filesystems are case-insensitive.
+        assert!(m().is_blocked(Path::new("Node_Modules/pkg/index.js")));
+        assert!(m().is_blocked(Path::new(".ENV")));
+        assert!(m().is_blocked(Path::new("SERVER.PEM")));
     }
 }
