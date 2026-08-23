@@ -9,6 +9,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 time.workspace = true
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile.workspace = true

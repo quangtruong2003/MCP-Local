@@ -47,7 +47,11 @@ pub struct CoreError {
 
 impl CoreError {
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), detail: None }
+        Self {
+            code,
+            message: message.into(),
+            detail: None,
+        }
     }
 
     pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
@@ -56,6 +60,12 @@ impl CoreError {
     }
 
     pub fn io(e: std::io::Error) -> Self {
+        Self::new(ErrorCode::IoError, e.to_string())
+    }
+}
+
+impl From<rusqlite::Error> for CoreError {
+    fn from(e: rusqlite::Error) -> Self {
         Self::new(ErrorCode::IoError, e.to_string())
     }
 }
@@ -78,12 +88,21 @@ mod tests {
         assert_eq!(ErrorCode::WorkspaceNotFound.as_str(), "WORKSPACE_NOT_FOUND");
         assert_eq!(ErrorCode::ReadDisabled.as_str(), "READ_DISABLED");
         assert_eq!(ErrorCode::WriteDisabled.as_str(), "WRITE_DISABLED");
-        assert_eq!(ErrorCode::PathOutsideWorkspace.as_str(), "PATH_OUTSIDE_WORKSPACE");
-        assert_eq!(ErrorCode::SensitiveFileBlocked.as_str(), "SENSITIVE_FILE_BLOCKED");
+        assert_eq!(
+            ErrorCode::PathOutsideWorkspace.as_str(),
+            "PATH_OUTSIDE_WORKSPACE"
+        );
+        assert_eq!(
+            ErrorCode::SensitiveFileBlocked.as_str(),
+            "SENSITIVE_FILE_BLOCKED"
+        );
         assert_eq!(ErrorCode::FileNotFound.as_str(), "FILE_NOT_FOUND");
         assert_eq!(ErrorCode::FileExists.as_str(), "FILE_EXISTS");
         assert_eq!(ErrorCode::InvalidPatch.as_str(), "INVALID_PATCH");
-        assert_eq!(ErrorCode::FileChangedSinceRead.as_str(), "FILE_CHANGED_SINCE_READ");
+        assert_eq!(
+            ErrorCode::FileChangedSinceRead.as_str(),
+            "FILE_CHANGED_SINCE_READ"
+        );
         assert_eq!(ErrorCode::ResultTooLarge.as_str(), "RESULT_TOO_LARGE");
         assert_eq!(ErrorCode::IoError.as_str(), "IO_ERROR");
     }
@@ -96,7 +115,10 @@ mod tests {
 
     #[test]
     fn io_error_maps_to_io_error_code() {
-        let e = CoreError::io(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"));
+        let e = CoreError::io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ));
         assert_eq!(e.code, ErrorCode::IoError);
     }
 }
