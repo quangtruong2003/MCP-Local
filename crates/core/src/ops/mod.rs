@@ -2,6 +2,7 @@ pub mod find_files;
 pub mod list_dir;
 pub mod read_file;
 pub mod search_text;
+pub mod write_file;
 
 use crate::error::{CoreError, ErrorCode};
 use crate::CoreServices;
