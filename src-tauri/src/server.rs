@@ -6,17 +6,18 @@
 //! one-audit-row-per-request guarantee covers requests that reach these
 //! handlers. Flagged for spec Task 15 ruling.
 
-use std::sync::Arc;
 use axum::Router;
+use lc_core::{error::CoreError, CoreServices};
 use rmcp::{
-    ServerHandler, tool, tool_handler, tool_router,
     handler::server::wrapper::Parameters,
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
+    tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        StreamableHttpService, session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpService,
     },
+    ServerHandler,
 };
-use lc_core::{CoreServices, error::CoreError};
+use std::sync::Arc;
 
 /// Serializes a CoreError as an `isError` tool result carrying the stable
 /// error code.
@@ -122,82 +123,130 @@ impl WorkspaceServer {
         Self { core }
     }
 
-    #[tool(description = "List entries of a directory inside an approved workspace",
-           annotations(read_only_hint = true))]
+    #[tool(
+        description = "List entries of a directory inside an approved workspace",
+        annotations(read_only_hint = true)
+    )]
     fn list_directory(&self, Parameters(a): Parameters<ListDirArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(&self.core, "list_directory", &a.workspace_id, false, |_, root| {
-            lc_core::ops::list_dir::list_dir(&self.core, root, &a.path, a.recursive)
-        }) {
+        match lc_core::pipeline::run_tool_audited(
+            &self.core,
+            "list_directory",
+            &a.workspace_id,
+            false,
+            |_, root| lc_core::ops::list_dir::list_dir(&self.core, root, &a.path, a.recursive),
+        ) {
             Ok(r) => ok_json(&r),
             Err(e) => err_result(&e),
         }
     }
 
-    #[tool(description = "Find files by glob pattern inside an approved workspace",
-           annotations(read_only_hint = true))]
+    #[tool(
+        description = "Find files by glob pattern inside an approved workspace",
+        annotations(read_only_hint = true)
+    )]
     fn find_files(&self, Parameters(a): Parameters<FindArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(&self.core, "find_files", &a.workspace_id, false, |_, root| {
-            lc_core::ops::find_files::find_files(&self.core, root, &a.pattern)
-        }) {
+        match lc_core::pipeline::run_tool_audited(
+            &self.core,
+            "find_files",
+            &a.workspace_id,
+            false,
+            |_, root| lc_core::ops::find_files::find_files(&self.core, root, &a.pattern),
+        ) {
             Ok(r) => ok_json(&r),
             Err(e) => err_result(&e),
         }
     }
 
-    #[tool(description = "Search text (literal or regex) across files in an approved workspace",
-           annotations(read_only_hint = true))]
+    #[tool(
+        description = "Search text (literal or regex) across files in an approved workspace",
+        annotations(read_only_hint = true)
+    )]
     fn search_text(&self, Parameters(a): Parameters<SearchArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(&self.core, "search_text", &a.workspace_id, false, |_, root| {
-            lc_core::ops::search_text::search_text(
-                &self.core,
-                root,
-                &a.query,
-                a.path_prefix.as_deref(),
-                a.case_sensitive,
-                a.is_regex,
-                a.max_results,
-            )
-        }) {
+        match lc_core::pipeline::run_tool_audited(
+            &self.core,
+            "search_text",
+            &a.workspace_id,
+            false,
+            |_, root| {
+                lc_core::ops::search_text::search_text(
+                    &self.core,
+                    root,
+                    &a.query,
+                    a.path_prefix.as_deref(),
+                    a.case_sensitive,
+                    a.is_regex,
+                    a.max_results,
+                )
+            },
+        ) {
             Ok(r) => ok_json(&r),
             Err(e) => err_result(&e),
         }
     }
 
-    #[tool(description = "Read a file (with line offset/limit). Returns sha256 revision for patching.",
-           annotations(read_only_hint = true))]
+    #[tool(
+        description = "Read a file (with line offset/limit). Returns sha256 revision for patching.",
+        annotations(read_only_hint = true)
+    )]
     fn read_file(&self, Parameters(a): Parameters<ReadArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(&self.core, "read_file", &a.workspace_id, false, |_, root| {
-            lc_core::ops::read_file::read_file(&self.core, root, &a.path, a.offset_line, a.max_lines)
-        }) {
+        match lc_core::pipeline::run_tool_audited(
+            &self.core,
+            "read_file",
+            &a.workspace_id,
+            false,
+            |_, root| {
+                lc_core::ops::read_file::read_file(
+                    &self.core,
+                    root,
+                    &a.path,
+                    a.offset_line,
+                    a.max_lines,
+                )
+            },
+        ) {
             Ok(r) => ok_json(&r),
             Err(e) => err_result(&e),
         }
     }
 
-    #[tool(description = "Read up to 8 files at once; per-file results",
-           annotations(read_only_hint = true))]
+    #[tool(
+        description = "Read up to 8 files at once; per-file results",
+        annotations(read_only_hint = true)
+    )]
     fn read_files(&self, Parameters(a): Parameters<ReadManyArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(&self.core, "read_files", &a.workspace_id, false, |_, root| {
-            lc_core::ops::read_file::read_files(&self.core, root, &a.paths)
-        }) {
+        match lc_core::pipeline::run_tool_audited(
+            &self.core,
+            "read_files",
+            &a.workspace_id,
+            false,
+            |_, root| lc_core::ops::read_file::read_files(&self.core, root, &a.paths),
+        ) {
             Ok(r) => ok_json(&r),
             Err(e) => err_result(&e),
         }
     }
 
-    #[tool(description = "Create a new file (fails if it exists)",
-           annotations(read_only_hint = false))]
+    #[tool(
+        description = "Create a new file (fails if it exists)",
+        annotations(read_only_hint = false)
+    )]
     fn create_file(&self, Parameters(a): Parameters<CreateArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(&self.core, "create_file", &a.workspace_id, true, |_, root| {
-            lc_core::ops::write_file::create_file(&self.core, root, &a.path, &a.content)
-        }) {
+        match lc_core::pipeline::run_tool_audited(
+            &self.core,
+            "create_file",
+            &a.workspace_id,
+            true,
+            |_, root| lc_core::ops::write_file::create_file(&self.core, root, &a.path, &a.content),
+        ) {
             Ok(r) => ok_json(&r),
             Err(e) => err_result(&e),
         }
     }
 
-    #[tool(description = "Replace one unique occurrence of old_string in a file. Requires base_revision from a prior read.",
-           annotations(read_only_hint = false))]
+    #[tool(
+        description = "Replace one unique occurrence of old_string in a file. Requires base_revision from a prior read.",
+        annotations(read_only_hint = false)
+    )]
     fn apply_patch(&self, Parameters(a): Parameters<PatchArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
             &self.core,
@@ -226,12 +275,11 @@ impl WorkspaceServer {
 #[tool_handler]
 impl ServerHandler for WorkspaceServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions(
-                "File access scoped to user-approved workspace folders. \
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+            "File access scoped to user-approved workspace folders. \
                  Every tool takes workspace_id. Read tools return a `revision` \
                  (sha256) that apply_patch requires as base_revision.",
-            )
+        )
     }
 }
 

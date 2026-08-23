@@ -1,10 +1,6 @@
 //! In-process client -> real axum/rmcp stack against a temp workspace.
 
-use rmcp::{
-    ServiceExt,
-    model::CallToolRequestParams,
-    transport::StreamableHttpClientTransport,
-};
+use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt};
 use std::sync::Arc;
 
 type Core = Arc<lc_core::CoreServices>;
@@ -33,13 +29,13 @@ async fn spawn_server() -> (u16, Core, tempfile::TempDir, String) {
     let core_for_server = core.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
-            Ok(
-                local_workspace_mcp_manager::server::WorkspaceServer::new(
-                    core_for_server.clone(),
-                ),
-            )
+            Ok(local_workspace_mcp_manager::server::WorkspaceServer::new(
+                core_for_server.clone(),
+            ))
         },
-        std::sync::Arc::new(rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default()),
+        std::sync::Arc::new(
+            rmcp::transport::streamable_http_server::session::local::LocalSessionManager::default(),
+        ),
         Default::default(),
     );
     let app = axum::Router::new().nest_service("/mcp", service);
@@ -69,7 +65,11 @@ fn assert_audit_row(
 ) {
     let rows = lc_core::audit::list_recent(&core.db, 100).unwrap();
     let matching: Vec<_> = rows.iter().filter(|r| r.op == op).collect();
-    assert_eq!(matching.len(), 1, "expected exactly one '{op}' row, got {matching:?}");
+    assert_eq!(
+        matching.len(),
+        1,
+        "expected exactly one '{op}' row, got {matching:?}"
+    );
     let row = matching[0];
     assert_eq!(row.decision, expected_decision);
     assert_eq!(row.error_code.as_deref(), expected_error_code);
@@ -89,19 +89,34 @@ async fn full_read_write_roundtrip_over_mcp() {
 
     // list_directory sees the seeded file
     let res = client
-        .call_tool(CallToolRequestParams::new("list_directory").with_arguments(serde_json::json!({ "workspace_id": ws_id, "path": "." })
-                    .as_object().unwrap().clone()))
+        .call_tool(
+            CallToolRequestParams::new("list_directory").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "path": "." })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
         .await
         .unwrap();
     assert!(!res.is_error.unwrap_or(false));
     let text = serde_json::to_string(&res).unwrap();
-    assert!(text.contains("hello.txt"), "listing missing hello.txt: {text}");
+    assert!(
+        text.contains("hello.txt"),
+        "listing missing hello.txt: {text}"
+    );
     assert_audit_row(&core, "list_directory", &ws_id, "allow", None);
 
     // read_file returns a revision
     let res = client
-        .call_tool(CallToolRequestParams::new("read_file").with_arguments(serde_json::json!({ "workspace_id": ws_id, "path": "hello.txt" })
-                    .as_object().unwrap().clone()))
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "path": "hello.txt" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
         .await
         .unwrap();
     // The revision lives inside the tool's JSON payload in content[0].text.
@@ -118,12 +133,18 @@ async fn full_read_write_roundtrip_over_mcp() {
 
     // apply_patch rewrites using that revision
     let res = client
-        .call_tool(CallToolRequestParams::new("apply_patch").with_arguments(serde_json::json!({
+        .call_tool(
+            CallToolRequestParams::new("apply_patch").with_arguments(
+                serde_json::json!({
                     "workspace_id": ws_id, "path": "hello.txt",
                     "old_string": "world", "new_string": "there",
                     "base_revision": rev
                 })
-                .as_object().unwrap().clone()))
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
         .await
         .unwrap();
     assert!(
@@ -152,12 +173,16 @@ async fn audit_rows_record_denials() {
 
     // Unknown workspace -> error row with NULL workspace_id.
     let res = client
-        .call_tool(CallToolRequestParams::new("read_file").with_arguments(serde_json::json!({
-            "workspace_id": "ghost", "path": "x"
-        })
-        .as_object()
-        .unwrap()
-        .clone()))
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({
+                    "workspace_id": "ghost", "path": "x"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
         .await
         .unwrap();
     assert!(res.is_error.unwrap_or(false));
@@ -165,27 +190,30 @@ async fn audit_rows_record_denials() {
     // Write on a read-only workspace -> deny row carrying the workspace id.
     lc_core::workspace_repo::update_capabilities(&core.db, &ws_id, true, false).unwrap();
     let res = client
-        .call_tool(CallToolRequestParams::new("create_file").with_arguments(serde_json::json!({
-            "workspace_id": ws_id, "path": "new.txt", "content": "hi"
-        })
-        .as_object()
-        .unwrap()
-        .clone()))
+        .call_tool(
+            CallToolRequestParams::new("create_file").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_id, "path": "new.txt", "content": "hi"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
         .await
         .unwrap();
     assert!(res.is_error.unwrap_or(false));
 
     let rows = lc_core::audit::list_recent(&core.db, 100).unwrap();
-    let by_op = |op: &str| {
-        rows.iter()
-            .filter(|r| r.op == op)
-            .collect::<Vec<_>>()
-    };
+    let by_op = |op: &str| rows.iter().filter(|r| r.op == op).collect::<Vec<_>>();
 
     let not_found = by_op("read_file");
     assert_eq!(not_found.len(), 1);
     assert_eq!(not_found[0].decision, "error");
-    assert_eq!(not_found[0].error_code.as_deref(), Some("WORKSPACE_NOT_FOUND"));
+    assert_eq!(
+        not_found[0].error_code.as_deref(),
+        Some("WORKSPACE_NOT_FOUND")
+    );
     assert_eq!(not_found[0].workspace_id, None);
 
     let write_denied = by_op("create_file");
@@ -195,7 +223,10 @@ async fn audit_rows_record_denials() {
         write_denied[0].error_code.as_deref(),
         Some("WRITE_DISABLED")
     );
-    assert_eq!(write_denied[0].workspace_id.as_deref(), Some(ws_id.as_str()));
+    assert_eq!(
+        write_denied[0].workspace_id.as_deref(),
+        Some(ws_id.as_str())
+    );
 }
 
 #[tokio::test]
@@ -210,13 +241,22 @@ async fn pause_blocks_tool_calls() {
 
     core.pause.set(true);
     let res = client
-        .call_tool(CallToolRequestParams::new("list_directory").with_arguments(serde_json::json!({ "workspace_id": ws_id })
-                    .as_object().unwrap().clone()))
+        .call_tool(
+            CallToolRequestParams::new("list_directory").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
         .await
         .unwrap();
     let text = serde_json::to_string(&res).unwrap();
     assert!(res.is_error.unwrap_or(false), "paused call must be isError");
-    assert!(text.contains("ACCESS_PAUSED"), "missing ACCESS_PAUSED: {text}");
+    assert!(
+        text.contains("ACCESS_PAUSED"),
+        "missing ACCESS_PAUSED: {text}"
+    );
 }
 
 #[tokio::test]
@@ -230,8 +270,14 @@ async fn unknown_workspace_is_invalid_error_result() {
         .unwrap();
 
     let res = client
-        .call_tool(CallToolRequestParams::new("read_file").with_arguments(serde_json::json!({ "workspace_id": "nope", "path": "x.txt" })
-                    .as_object().unwrap().clone()))
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({ "workspace_id": "nope", "path": "x.txt" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
         .await
         .unwrap();
     let text = serde_json::to_string(&res).unwrap();

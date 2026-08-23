@@ -2037,6 +2037,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "core",
+ "dunce",
  "rmcp",
  "schemars 1.2.2",
  "serde",

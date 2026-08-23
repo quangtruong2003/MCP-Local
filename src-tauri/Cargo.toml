@@ -12,6 +12,7 @@ name = "local-workspace-mcp-manager"
 path = "src/main.rs"
 
 [dependencies]
+dunce = "1"
 lc_core = { path = "../crates/core", package = "core" }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
