@@ -58,9 +58,28 @@ fn extract_json(text: &str) -> serde_json::Value {
     serde_json::from_str(&s[start..=end]).unwrap()
 }
 
+/// Asserts exactly one audit row exists for `op` with the expected decision
+/// and error_code, carrying the workspace id.
+fn assert_audit_row(
+    core: &lc_core::CoreServices,
+    op: &str,
+    ws_id: &str,
+    expected_decision: &str,
+    expected_error_code: Option<&str>,
+) {
+    let rows = lc_core::audit::list_recent(&core.db, 100).unwrap();
+    let matching: Vec<_> = rows.iter().filter(|r| r.op == op).collect();
+    assert_eq!(matching.len(), 1, "expected exactly one '{op}' row, got {matching:?}");
+    let row = matching[0];
+    assert_eq!(row.decision, expected_decision);
+    assert_eq!(row.error_code.as_deref(), expected_error_code);
+    assert_eq!(row.workspace_id.as_deref(), Some(ws_id));
+    assert_eq!(row.source, "mcp");
+}
+
 #[tokio::test]
 async fn full_read_write_roundtrip_over_mcp() {
-    let (port, _core, dir, ws_id) = spawn_server().await;
+    let (port, core, dir, ws_id) = spawn_server().await;
     let client = ()
         .serve(StreamableHttpClientTransport::from_uri(format!(
             "http://127.0.0.1:{port}/mcp"
@@ -77,6 +96,7 @@ async fn full_read_write_roundtrip_over_mcp() {
     assert!(!res.is_error.unwrap_or(false));
     let text = serde_json::to_string(&res).unwrap();
     assert!(text.contains("hello.txt"), "listing missing hello.txt: {text}");
+    assert_audit_row(&core, "list_directory", &ws_id, "allow", None);
 
     // read_file returns a revision
     let res = client
@@ -94,6 +114,7 @@ async fn full_read_write_roundtrip_over_mcp() {
         .as_str()
         .unwrap()
         .into();
+    assert_audit_row(&core, "read_file", &ws_id, "allow", None);
 
     // apply_patch rewrites using that revision
     let res = client
@@ -116,6 +137,65 @@ async fn full_read_write_roundtrip_over_mcp() {
         std::fs::read_to_string(dir.path().join("ws/hello.txt")).unwrap(),
         "hello there\n"
     );
+    assert_audit_row(&core, "apply_patch", &ws_id, "allow", None);
+}
+
+#[tokio::test]
+async fn audit_rows_record_denials() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    // Unknown workspace -> error row with NULL workspace_id.
+    let res = client
+        .call_tool(CallToolRequestParams::new("read_file").with_arguments(serde_json::json!({
+            "workspace_id": "ghost", "path": "x"
+        })
+        .as_object()
+        .unwrap()
+        .clone()))
+        .await
+        .unwrap();
+    assert!(res.is_error.unwrap_or(false));
+
+    // Write on a read-only workspace -> deny row carrying the workspace id.
+    lc_core::workspace_repo::update_capabilities(&core.db, &ws_id, true, false).unwrap();
+    let res = client
+        .call_tool(CallToolRequestParams::new("create_file").with_arguments(serde_json::json!({
+            "workspace_id": ws_id, "path": "new.txt", "content": "hi"
+        })
+        .as_object()
+        .unwrap()
+        .clone()))
+        .await
+        .unwrap();
+    assert!(res.is_error.unwrap_or(false));
+
+    let rows = lc_core::audit::list_recent(&core.db, 100).unwrap();
+    let by_op = |op: &str| {
+        rows.iter()
+            .filter(|r| r.op == op)
+            .collect::<Vec<_>>()
+    };
+
+    let not_found = by_op("read_file");
+    assert_eq!(not_found.len(), 1);
+    assert_eq!(not_found[0].decision, "error");
+    assert_eq!(not_found[0].error_code.as_deref(), Some("WORKSPACE_NOT_FOUND"));
+    assert_eq!(not_found[0].workspace_id, None);
+
+    let write_denied = by_op("create_file");
+    assert_eq!(write_denied.len(), 1);
+    assert_eq!(write_denied[0].decision, "deny");
+    assert_eq!(
+        write_denied[0].error_code.as_deref(),
+        Some("WRITE_DISABLED")
+    );
+    assert_eq!(write_denied[0].workspace_id.as_deref(), Some(ws_id.as_str()));
 }
 
 #[tokio::test]

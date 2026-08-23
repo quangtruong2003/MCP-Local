@@ -1,5 +1,10 @@
 //! MCP tool server: 7 workspace-scoped file tools behind the fail-closed
 //! audit pipeline.
+//!
+//! Note: requests rmcp rejects before reaching a handler (malformed args,
+//! unknown tool names) produce a protocol error with no audit row; the
+//! one-audit-row-per-request guarantee covers requests that reach these
+//! handlers. Flagged for spec Task 15 ruling.
 
 use std::sync::Arc;
 use axum::Router;
