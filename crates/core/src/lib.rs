@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod confinement;
 pub mod db;
 pub mod error;
 pub mod models;
