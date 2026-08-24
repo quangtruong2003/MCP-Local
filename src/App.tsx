@@ -5,6 +5,7 @@ import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
 import DashboardPage from "./pages/DashboardPage";
+import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
 import type { AuditEvent, ServerStatus } from "./api";
 import { VIEW_META } from "./types";
@@ -144,6 +145,12 @@ export default function App() {
           auditEvents={auditEvents}
           server={server}
           onNavigate={setPage}
+          reportError={reportError}
+        />
+      ) : page === "workspaces" ? (
+        <WorkspacesPage
+          workspaces={workspaces}
+          onWorkspacesChanged={async () => setWorkspaces(await api.listWorkspaces())}
           reportError={reportError}
         />
       ) : (
