@@ -11,6 +11,11 @@ path = "src/lib.rs"
 name = "local-workspace-mcp-manager"
 path = "src/main.rs"
 
+[features]
+# Tauri convention: `cargo build` uses the dev server; `tauri build`
+# (or any release bundle) enables this to embed the frontend assets.
+custom-protocol = ["tauri/custom-protocol"]
+
 [dependencies]
 dunce = "1"
 lc_core = { path = "../crates/core", package = "core" }
