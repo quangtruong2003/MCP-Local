@@ -8,6 +8,7 @@ pub enum ErrorCode {
     WorkspaceNotFound,
     ReadDisabled,
     WriteDisabled,
+    ExecuteDisabled,
     PathOutsideWorkspace,
     SensitiveFileBlocked,
     FileNotFound,
@@ -26,6 +27,7 @@ impl ErrorCode {
             Self::WorkspaceNotFound => "WORKSPACE_NOT_FOUND",
             Self::ReadDisabled => "READ_DISABLED",
             Self::WriteDisabled => "WRITE_DISABLED",
+            Self::ExecuteDisabled => "EXECUTE_DISABLED",
             Self::PathOutsideWorkspace => "PATH_OUTSIDE_WORKSPACE",
             Self::SensitiveFileBlocked => "SENSITIVE_FILE_BLOCKED",
             Self::FileNotFound => "FILE_NOT_FOUND",
@@ -90,6 +92,7 @@ mod tests {
         assert_eq!(ErrorCode::WorkspaceNotFound.as_str(), "WORKSPACE_NOT_FOUND");
         assert_eq!(ErrorCode::ReadDisabled.as_str(), "READ_DISABLED");
         assert_eq!(ErrorCode::WriteDisabled.as_str(), "WRITE_DISABLED");
+        assert_eq!(ErrorCode::ExecuteDisabled.as_str(), "EXECUTE_DISABLED");
         assert_eq!(
             ErrorCode::PathOutsideWorkspace.as_str(),
             "PATH_OUTSIDE_WORKSPACE"

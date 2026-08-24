@@ -140,6 +140,21 @@ pub fn set_capabilities(
     Ok(())
 }
 
+/// Toggles a workspace's execute permission and execution mode. Read/write
+/// capabilities are untouched.
+#[tauri::command]
+pub fn set_execution_access(
+    state: State<'_, AppState>,
+    id: String,
+    can_execute: bool,
+    execution_mode: lc_core::models::ExecutionMode,
+) -> Result<(), String> {
+    lc_core::workspace_repo::update_execution_access(&state.core.db, &id, can_execute, execution_mode)
+        .map_err(err_string)?;
+    audit_ui(&state.core.db, Some(&id), "set_execution_access", None, None, None);
+    Ok(())
+}
+
 /// Removes the workspace registration; the files on disk are untouched.
 #[tauri::command]
 pub fn remove_workspace(state: State<'_, AppState>, id: String) -> Result<(), String> {

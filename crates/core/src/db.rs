@@ -51,6 +51,31 @@ CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_events
 BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
 "#;
 
+/// Adds post-v1 columns to `workspaces` only when missing (SQLite has no
+/// `ADD COLUMN IF NOT EXISTS`). Idempotent: re-opening a migrated DB is a no-op.
+fn migrate_add_columns(conn: &rusqlite::Connection) -> Result<(), CoreError> {
+    let existing: std::collections::HashSet<String> = {
+        let mut stmt = conn.prepare("PRAGMA table_info(workspaces)")?;
+        let names = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        names.into_iter().collect()
+    };
+    if !existing.contains("can_execute") {
+        conn.execute_batch(
+            "ALTER TABLE workspaces ADD COLUMN can_execute INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(CoreError::from)?;
+    }
+    if !existing.contains("execution_mode") {
+        conn.execute_batch(
+            "ALTER TABLE workspaces ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'approved_commands';",
+        )
+        .map_err(CoreError::from)?;
+    }
+    Ok(())
+}
+
 impl Database {
     /// Opens (or creates) the database at `path`, enabling WAL mode and
     /// foreign keys, and applying idempotent migrations including the
@@ -62,6 +87,7 @@ impl Database {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(CoreError::from)?;
         conn.execute_batch(MIGRATIONS).map_err(CoreError::from)?;
+        migrate_add_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
         })

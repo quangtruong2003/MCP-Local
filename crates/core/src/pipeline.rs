@@ -37,6 +37,67 @@ impl<T> Audited<T> {
     }
 }
 
+/// The capability an operation requires from its workspace.
+/// `Read`/`Write` gate filesystem tools; `Execute` gates command execution
+/// and requires only `can_execute` (read/write are not implied).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequiredCapability {
+    Read,
+    Write,
+    Execute,
+}
+
+impl RequiredCapability {
+    /// Legacy boolean mapping kept for the existing MCP call sites:
+    /// `false` -> Read-only tool, `true` -> writing tool.
+    fn from_needs_write(needs_write: bool) -> Self {
+        if needs_write {
+            Self::Write
+        } else {
+            Self::Read
+        }
+    }
+
+    fn check(self, ws: &Workspace) -> Result<(), CoreError> {
+        match self {
+            Self::Read => {
+                if !ws.can_read {
+                    return Err(CoreError::new(
+                        ErrorCode::ReadDisabled,
+                        format!("workspace '{}' has read access disabled", ws.name),
+                    ));
+                }
+                Ok(())
+            }
+            Self::Write => {
+                if !ws.can_write {
+                    return Err(CoreError::new(
+                        ErrorCode::WriteDisabled,
+                        format!("workspace '{}' has write access disabled", ws.name),
+                    ));
+                }
+                if !ws.can_read {
+                    return Err(CoreError::new(
+                        ErrorCode::ReadDisabled,
+                        format!("workspace '{}' has read access disabled", ws.name),
+                    ));
+                }
+                Ok(())
+            }
+            // Execute stands alone: it must not silently inherit read/write.
+            Self::Execute => {
+                if !ws.can_execute {
+                    return Err(CoreError::new(
+                        ErrorCode::ExecuteDisabled,
+                        format!("workspace '{}' has command execution disabled", ws.name),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
 /// Runs one tool call through the fail-closed pipeline and writes exactly one
 /// audit row:
 ///
@@ -59,15 +120,15 @@ pub fn run_tool_audited<T>(
     run_tool_audited_with_context(core, tool, workspace_id, needs_write, None, None, f)
 }
 
-/// Same fail-closed pipeline with bounded, caller-provided fallback audit
-/// context used for the prelude deny/error rows (before the op has run and can
-/// supply its own [`Audited`] metadata). `path` is a workspace-relative
-/// request path/prefix, never file content.
-pub fn run_tool_audited_with_context<T>(
+/// Capability-explicit entry point for future execution tools: same
+/// fail-closed pipeline as [`run_tool_audited_with_context`], but the caller
+/// names the required [`RequiredCapability`] directly instead of using the
+/// legacy read/write boolean mapping.
+pub fn run_tool_with_capability<T>(
     core: &CoreServices,
     tool: &str,
     workspace_id: &str,
-    needs_write: bool,
+    capability: RequiredCapability,
     path: Option<&str>,
     detail: Option<serde_json::Value>,
     f: impl FnOnce(&Workspace, &Path) -> Result<Audited<T>, CoreError>,
@@ -80,18 +141,7 @@ pub fn run_tool_audited_with_context<T>(
             ));
         }
         let ws = get_workspace(&core.db, workspace_id)?;
-        if needs_write && !ws.can_write {
-            return Err(CoreError::new(
-                ErrorCode::WriteDisabled,
-                format!("workspace '{}' has write access disabled", ws.name),
-            ));
-        }
-        if !ws.can_read {
-            return Err(CoreError::new(
-                ErrorCode::ReadDisabled,
-                format!("workspace '{}' has read access disabled", ws.name),
-            ));
-        }
+        capability.check(&ws)?;
         let root = ws.root_path.clone();
         Ok((ws, root))
     })();
@@ -99,7 +149,10 @@ pub fn run_tool_audited_with_context<T>(
     let (ws, root) = match pre {
         Ok(ok) => ok,
         Err(e) => {
-            let known_ws = matches!(e.code, ErrorCode::ReadDisabled | ErrorCode::WriteDisabled);
+            let known_ws = matches!(
+                e.code,
+                ErrorCode::ReadDisabled | ErrorCode::WriteDisabled | ErrorCode::ExecuteDisabled
+            );
             let decision = if known_ws || e.code == ErrorCode::AccessPaused {
                 "deny"
             } else {
@@ -144,14 +197,42 @@ pub fn run_tool_audited_with_context<T>(
     audited.map(|a| a.value)
 }
 
+/// Same fail-closed pipeline with bounded, caller-provided fallback audit
+/// context used for the prelude deny/error rows (before the op has run and can
+/// supply its own [`Audited`] metadata). `path` is a workspace-relative
+/// request path/prefix, never file content.
+///
+/// The boolean maps to capabilities (`false` -> Read, `true` -> Write); use
+/// [`run_tool_with_capability`] when a different capability is required.
+pub fn run_tool_audited_with_context<T>(
+    core: &CoreServices,
+    tool: &str,
+    workspace_id: &str,
+    needs_write: bool,
+    path: Option<&str>,
+    detail: Option<serde_json::Value>,
+    f: impl FnOnce(&Workspace, &Path) -> Result<Audited<T>, CoreError>,
+) -> Result<T, CoreError> {
+    run_tool_with_capability(
+        core,
+        tool,
+        workspace_id,
+        RequiredCapability::from_needs_write(needs_write),
+        path,
+        detail,
+        f,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::Database;
     use crate::error::ErrorCode;
+    use crate::models::ExecutionMode;
     use crate::pause::PauseFlag;
     use crate::sensitive::SensitiveMatcher;
-    use crate::workspace_repo::{insert_workspace, update_capabilities};
+    use crate::workspace_repo::{insert_workspace, update_capabilities, update_execution_access};
     use std::fs;
 
     fn setup() -> (CoreServices, tempfile::TempDir, String) {
@@ -176,7 +257,9 @@ mod tests {
             "list_directory",
             &ws_id,
             false,
-            |_ws, _root| -> Result<Audited<()>, CoreError> { panic!("closure must not run while paused") },
+            |_ws, _root| -> Result<Audited<()>, CoreError> {
+                panic!("closure must not run while paused")
+            },
         )
         .unwrap_err();
         assert_eq!(e.code, ErrorCode::AccessPaused);
@@ -307,10 +390,75 @@ mod tests {
     }
 
     #[test]
+    fn execute_requires_can_execute_only() {
+        let (core, _d, ws_id) = setup(); // can_execute defaults false
+        let e = run_tool_with_capability(
+            &core,
+            "run_command",
+            &ws_id,
+            RequiredCapability::Execute,
+            None,
+            None,
+            |_ws, _r| -> Result<Audited<()>, CoreError> {
+                panic!("closure must not run without execute capability")
+            },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::ExecuteDisabled);
+        let events = crate::audit::list_recent(&core.db, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].decision, "deny");
+        assert_eq!(events[0].error_code.as_deref(), Some("EXECUTE_DISABLED"));
+        assert_eq!(events[0].workspace_id.as_deref(), Some(ws_id.as_str()));
+    }
+
+    #[test]
+    fn execute_does_not_require_read_or_write() {
+        let (core, _d, ws_id) = setup();
+        // No read, no write — but execute granted. Execute stands alone.
+        update_capabilities(&core.db, &ws_id, false, false).unwrap();
+        update_execution_access(&core.db, &ws_id, true, ExecutionMode::FullPowerShell).unwrap();
+        let v = run_tool_with_capability(
+            &core,
+            "run_command",
+            &ws_id,
+            RequiredCapability::Execute,
+            None,
+            None,
+            |_ws, _r| Ok(Audited::new("ran")),
+        )
+        .unwrap();
+        assert_eq!(v, "ran");
+    }
+
+    #[test]
+    fn paused_blocks_execute_too() {
+        let (core, _d, ws_id) = setup();
+        update_execution_access(&core.db, &ws_id, true, ExecutionMode::ApprovedCommands).unwrap();
+        core.pause.set(true);
+        let e = run_tool_with_capability(
+            &core,
+            "run_command",
+            &ws_id,
+            RequiredCapability::Execute,
+            None,
+            None,
+            |_ws, _r| -> Result<Audited<()>, CoreError> { panic!("paused must win") },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::AccessPaused);
+    }
+
+    #[test]
     fn exactly_one_row_per_invocation() {
         let (core, _d, ws_id) = setup();
-        run_tool_audited(&core, "read_file", &ws_id, false, |_ws, _r| Ok(Audited::new(()))).unwrap();
-        let _ = run_tool_audited(&core, "read_file", "ghost", false, |_ws, _r| Ok(Audited::new(())));
+        run_tool_audited(&core, "read_file", &ws_id, false, |_ws, _r| {
+            Ok(Audited::new(()))
+        })
+        .unwrap();
+        let _ = run_tool_audited(&core, "read_file", "ghost", false, |_ws, _r| {
+            Ok(Audited::new(()))
+        });
         let events = crate::audit::list_recent(&core.db, 10).unwrap();
         assert_eq!(events.len(), 2);
     }

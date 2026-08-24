@@ -79,6 +79,7 @@ pub fn run() {
             commands::add_workspace,
             commands::list_workspaces,
             commands::set_capabilities,
+            commands::set_execution_access,
             commands::remove_workspace,
             commands::set_paused,
             commands::recent_audit,
