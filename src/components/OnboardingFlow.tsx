@@ -85,12 +85,17 @@ export default function OnboardingFlow({
 
   // Drives the backend; the `connection-status` event then moves the flow
   // through NeedsLogin / NeedsFunnelPermission / Online automatically.
-  function startConnection() {
+  // Resetting in `finally` keeps the stage buttons clickable once the start
+  // request settles — leaving it set would freeze NeedsLogin actions forever.
+  async function startConnection() {
     setStarting(true);
-    api.startConnection().catch((err) => {
+    try {
+      await api.startConnection();
+    } catch (err) {
       reportError(parseErrorMessage(err));
+    } finally {
       setStarting(false);
-    });
+    }
   }
 
   const step = SETUP_STEPS[stepIndex];
