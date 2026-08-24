@@ -4,7 +4,9 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build"
+    "build": "tsc && vite build",
+    "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build-tailscale-sidecar.ps1",
+    "verify": "npm run build && npm run build:sidecar"
   },
   "dependencies": {
     "@tauri-apps/api": "^2",

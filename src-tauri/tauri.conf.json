@@ -4,18 +4,32 @@
   "version": "0.1.0",
   "identifier": "com.local.workspace-mcp-manager",
   "build": {
-    "beforeDevCommand": "npm run dev",
+    "beforeDevCommand": "npm run build:sidecar && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build",
+    "beforeBuildCommand": "npm run build:sidecar && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Local Workspace MCP Manager", "width": 900, "height": 700 }],
-    "security": { "csp": null }
+    "windows": [
+      {
+        "title": "Local Workspace MCP Manager",
+        "width": 900,
+        "height": 700
+      }
+    ],
+    "security": {
+      "csp": null
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "externalBin": ["binaries/tunnel-client", "binaries/cloudflared"]
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/tailscale-funnel-sidecar",
+      "binaries/tunnel-client",
+      "binaries/cloudflared"
+    ]
   }
 }
