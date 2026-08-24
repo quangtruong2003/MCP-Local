@@ -9,6 +9,11 @@ pub enum ErrorCode {
     ReadDisabled,
     WriteDisabled,
     ExecuteDisabled,
+    CommandNotAllowed,
+    PowershellDisabled,
+    InvalidWorkingDirectory,
+    CommandTimeout,
+    ExecutionFailed,
     PathOutsideWorkspace,
     SensitiveFileBlocked,
     FileNotFound,
@@ -28,6 +33,11 @@ impl ErrorCode {
             Self::ReadDisabled => "READ_DISABLED",
             Self::WriteDisabled => "WRITE_DISABLED",
             Self::ExecuteDisabled => "EXECUTE_DISABLED",
+            Self::CommandNotAllowed => "COMMAND_NOT_ALLOWED",
+            Self::PowershellDisabled => "POWERSHELL_DISABLED",
+            Self::InvalidWorkingDirectory => "INVALID_WORKING_DIRECTORY",
+            Self::CommandTimeout => "COMMAND_TIMEOUT",
+            Self::ExecutionFailed => "EXECUTION_FAILED",
             Self::PathOutsideWorkspace => "PATH_OUTSIDE_WORKSPACE",
             Self::SensitiveFileBlocked => "SENSITIVE_FILE_BLOCKED",
             Self::FileNotFound => "FILE_NOT_FOUND",
@@ -93,6 +103,17 @@ mod tests {
         assert_eq!(ErrorCode::ReadDisabled.as_str(), "READ_DISABLED");
         assert_eq!(ErrorCode::WriteDisabled.as_str(), "WRITE_DISABLED");
         assert_eq!(ErrorCode::ExecuteDisabled.as_str(), "EXECUTE_DISABLED");
+        assert_eq!(ErrorCode::CommandNotAllowed.as_str(), "COMMAND_NOT_ALLOWED");
+        assert_eq!(
+            ErrorCode::PowershellDisabled.as_str(),
+            "POWERSHELL_DISABLED"
+        );
+        assert_eq!(
+            ErrorCode::InvalidWorkingDirectory.as_str(),
+            "INVALID_WORKING_DIRECTORY"
+        );
+        assert_eq!(ErrorCode::CommandTimeout.as_str(), "COMMAND_TIMEOUT");
+        assert_eq!(ErrorCode::ExecutionFailed.as_str(), "EXECUTION_FAILED");
         assert_eq!(
             ErrorCode::PathOutsideWorkspace.as_str(),
             "PATH_OUTSIDE_WORKSPACE"

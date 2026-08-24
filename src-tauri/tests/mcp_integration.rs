@@ -334,7 +334,13 @@ async fn path_traversal_denied_over_mcp() {
     assert!(text.contains("PATH_OUTSIDE_WORKSPACE"), "{text}");
     // Post-prelude failures are classified "error" with their code (pause and
     // capability checks are the "deny" rows) — established pipeline convention.
-    assert_audit_row(&core, "read_file", &ws_id, "error", Some("PATH_OUTSIDE_WORKSPACE"));
+    assert_audit_row(
+        &core,
+        "read_file",
+        &ws_id,
+        "error",
+        Some("PATH_OUTSIDE_WORKSPACE"),
+    );
 }
 
 /// Scenario C: sensitive files (.env) return SENSITIVE_FILE_BLOCKED.
@@ -365,7 +371,13 @@ async fn sensitive_file_blocked_over_mcp() {
     assert!(text.contains("SENSITIVE_FILE_BLOCKED"), "{text}");
     // The secret must not leak into the error payload.
     assert!(!text.contains("SECRET"), "secret leaked: {text}");
-    assert_audit_row(&core, "read_file", &ws_id, "error", Some("SENSITIVE_FILE_BLOCKED"));
+    assert_audit_row(
+        &core,
+        "read_file",
+        &ws_id,
+        "error",
+        Some("SENSITIVE_FILE_BLOCKED"),
+    );
     // The audit row must not leak the secret either: no file content in
     // path or detail (the blocked filename itself is allowed).
     let row = latest_audit_row(&core, "read_file");
@@ -404,8 +416,15 @@ async fn stale_revision_detected_over_mcp() {
         )
         .await
         .unwrap();
-    let body_text = res.content.first().and_then(|c| c.as_text().map(|t| t.text.to_string())).unwrap_or_default();
-    let rev: String = extract_json(&body_text)["revision"].as_str().unwrap().into();
+    let body_text = res
+        .content
+        .first()
+        .and_then(|c| c.as_text().map(|t| t.text.to_string()))
+        .unwrap_or_default();
+    let rev: String = extract_json(&body_text)["revision"]
+        .as_str()
+        .unwrap()
+        .into();
 
     // External edit behind ChatGPT's back.
     std::fs::write(dir.path().join("ws/hello.txt"), "externally edited\n").unwrap();
@@ -433,7 +452,436 @@ async fn stale_revision_detected_over_mcp() {
         std::fs::read_to_string(dir.path().join("ws/hello.txt")).unwrap(),
         "externally edited\n"
     );
-    assert_audit_row(&core, "apply_patch", &ws_id, "error", Some("FILE_CHANGED_SINCE_READ"));
+    assert_audit_row(
+        &core,
+        "apply_patch",
+        &ws_id,
+        "error",
+        Some("FILE_CHANGED_SINCE_READ"),
+    );
+}
+
+// ---- Task 13C: execution tools (run_command / run_powershell) ----
+
+/// Grants command execution on a workspace with the given mode.
+fn enable_execute(core: &Core, ws_id: &str, mode: lc_core::models::ExecutionMode) {
+    lc_core::workspace_repo::update_execution_access(&core.db, ws_id, true, mode).unwrap();
+}
+
+fn detail_keys(detail: &serde_json::Value) -> Vec<String> {
+    let mut keys: Vec<String> = detail
+        .as_object()
+        .expect("audit detail is an object")
+        .keys()
+        .cloned()
+        .collect();
+    keys.sort();
+    keys
+}
+
+#[tokio::test]
+async fn run_command_without_execute_is_denied() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_command").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "program": "git", "args": ["--version"] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("EXECUTE_DISABLED"), "{text}");
+    assert_audit_row(
+        &core,
+        "run_command",
+        &ws_id,
+        "deny",
+        Some("EXECUTE_DISABLED"),
+    );
+}
+
+#[tokio::test]
+async fn run_command_approved_runs_and_audits_safe_metadata() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::ApprovedCommands,
+    );
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_command").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "program": "git", "args": ["--version"] })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let body_text = res
+        .content
+        .first()
+        .and_then(|c| c.as_text().map(|t| t.text.to_string()))
+        .unwrap_or_default();
+    assert!(!res.is_error.unwrap_or(false), "run failed: {body_text}");
+    let body = extract_json(&body_text);
+    assert_eq!(body["exit_code"], 0);
+    assert!(body["stdout"].as_str().unwrap().contains("git version"));
+    assert_eq!(body["timed_out"], false);
+    assert_eq!(body["stderr_truncated"], false);
+    assert!(body["duration_ms"].as_u64().is_some());
+
+    // Audit: allow row carrying ONLY the safe metadata keys, never output.
+    assert_audit_row(&core, "run_command", &ws_id, "allow", None);
+    let row = latest_audit_row(&core, "run_command");
+    assert!(row.path.is_none(), "execution rows carry no path");
+    let detail = row.detail.as_ref().expect("run_command detail");
+    assert_eq!(
+        detail_keys(detail),
+        vec![
+            "arg_count",
+            "cwd",
+            "duration_ms",
+            "exit_code",
+            "program",
+            "stderr_truncated",
+            "stdout_truncated",
+            "timed_out"
+        ]
+    );
+    assert_eq!(detail["program"], "git");
+    assert_eq!(detail["arg_count"], 1);
+    assert_eq!(detail["cwd"], ".");
+    assert_eq!(detail["timed_out"], false);
+    // stdout/stderr content must never reach the audit log.
+    let detail_str = detail.to_string();
+    assert!(
+        !detail_str.contains("git version"),
+        "audit leaked stdout: {detail_str}"
+    );
+}
+
+#[tokio::test]
+async fn run_command_unapproved_program_is_command_not_allowed() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::ApprovedCommands,
+    );
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_command").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "program": "cmd.exe" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("COMMAND_NOT_ALLOWED"), "{text}");
+    assert_audit_row(
+        &core,
+        "run_command",
+        &ws_id,
+        "error",
+        Some("COMMAND_NOT_ALLOWED"),
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn run_powershell_requires_full_powershell_mode() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::ApprovedCommands,
+    );
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_powershell").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "script": "Write-Output ok" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("POWERSHELL_DISABLED"), "{text}");
+    // Mode check lives inside the audited closure, so it lands as an
+    // "error"-classified row (pipeline convention for post-prelude failures),
+    // unlike the prelude capability denies (EXECUTE_DISABLED).
+    assert_audit_row(
+        &core,
+        "run_powershell",
+        &ws_id,
+        "error",
+        Some("POWERSHELL_DISABLED"),
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn run_powershell_full_mode_runs_and_audits_safe_metadata() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::FullPowerShell,
+    );
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let script = "Write-Output ('ps-ok-' + (2 + 3))";
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_powershell").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_id,
+                    "script": script
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let body_text = res
+        .content
+        .first()
+        .and_then(|c| c.as_text().map(|t| t.text.to_string()))
+        .unwrap_or_default();
+    assert!(!res.is_error.unwrap_or(false), "ps failed: {body_text}");
+    let body = extract_json(&body_text);
+    assert_eq!(body["exit_code"], 0);
+    assert!(body["stdout"].as_str().unwrap().contains("ps-ok-5"));
+
+    // Audit: hash + size of the script, never the script itself or output.
+    assert_audit_row(&core, "run_powershell", &ws_id, "allow", None);
+    let row = latest_audit_row(&core, "run_powershell");
+    assert!(row.path.is_none());
+    let detail = row.detail.as_ref().expect("run_powershell detail");
+    assert_eq!(
+        detail_keys(detail),
+        vec![
+            "cwd",
+            "duration_ms",
+            "exit_code",
+            "script_bytes",
+            "script_sha256",
+            "stderr_truncated",
+            "stdout_truncated",
+            "timed_out"
+        ]
+    );
+    assert_eq!(detail["script_sha256"].as_str().unwrap().len(), 64);
+    assert_eq!(detail["script_bytes"], script.as_bytes().len() as u64);
+    let detail_str = detail.to_string();
+    assert!(
+        !detail_str.contains("ps-ok") && !detail_str.contains("Write-Output"),
+        "audit leaked script/output: {detail_str}"
+    );
+}
+
+#[tokio::test]
+async fn pause_blocks_execution_tools() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::ApprovedCommands,
+    );
+    core.pause.set(true);
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    for tool in ["run_command", "run_powershell"] {
+        let args = if tool == "run_command" {
+            serde_json::json!({ "workspace_id": ws_id, "program": "git" })
+        } else {
+            serde_json::json!({ "workspace_id": ws_id, "script": "Get-Date" })
+        };
+        let res = client
+            .call_tool(
+                CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&res).unwrap();
+        assert!(res.is_error.unwrap_or(false));
+        assert!(text.contains("ACCESS_PAUSED"), "{tool}: {text}");
+        // Pause rows are deny rows with NULL workspace_id (kill switch wins).
+        let row = latest_audit_row(&core, tool);
+        assert_eq!(row.decision, "deny");
+        assert_eq!(row.error_code.as_deref(), Some("ACCESS_PAUSED"));
+        assert_eq!(row.workspace_id, None);
+    }
+}
+
+#[tokio::test]
+async fn run_command_cwd_escape_is_path_outside_workspace() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::ApprovedCommands,
+    );
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_command").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_id, "program": "git", "cwd": ".."
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("PATH_OUTSIDE_WORKSPACE"), "{text}");
+    assert_audit_row(
+        &core,
+        "run_command",
+        &ws_id,
+        "error",
+        Some("PATH_OUTSIDE_WORKSPACE"),
+    );
+}
+
+#[tokio::test]
+async fn run_command_timeout_over_limit_is_invalid_argument() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    enable_execute(
+        &core,
+        &ws_id,
+        lc_core::models::ExecutionMode::ApprovedCommands,
+    );
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("run_command").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_id, "program": "git",
+                    "args": ["--version"], "timeout_ms": 999_999_999u64
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    assert_audit_row(
+        &core,
+        "run_command",
+        &ws_id,
+        "error",
+        Some("INVALID_ARGUMENT"),
+    );
+}
+
+/// Step 6: tool discovery exposes exactly the 10-tool surface.
+#[tokio::test]
+async fn tool_discovery_exposes_exactly_ten_tools() {
+    let (port, _core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+    let mut names: Vec<String> = client
+        .list_all_tools()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "apply_patch",
+            "create_file",
+            "find_files",
+            "list_directory",
+            "list_workspaces",
+            "read_file",
+            "read_files",
+            "run_command",
+            "run_powershell",
+            "search_text",
+        ]
+    );
 }
 
 /// Scenario H: two workspaces — a path valid in workspace 1 is rejected when
@@ -459,7 +907,12 @@ async fn cross_workspace_confinement_over_mcp() {
         .unwrap();
 
     // Absolute path into workspace A, presented under workspace B's id.
-    let abs = dir.path().join("ws/hello.txt").display().to_string().replace('\\', "/");
+    let abs = dir
+        .path()
+        .join("ws/hello.txt")
+        .display()
+        .to_string()
+        .replace('\\', "/");
     let res = client
         .call_tool(
             CallToolRequestParams::new("read_file").with_arguments(

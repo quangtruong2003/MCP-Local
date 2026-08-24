@@ -7,12 +7,11 @@
 //! handlers. Flagged for spec Task 15 ruling.
 
 use axum::Router;
+use lc_core::error::ErrorCode;
+use lc_core::pipeline::{Audited, RequiredCapability};
 use lc_core::{error::CoreError, CoreServices};
 use rmcp::{
-    handler::server::{
-        common::schema_for_output,
-        wrapper::Parameters,
-    },
+    handler::server::{common::schema_for_output, wrapper::Parameters},
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
@@ -129,6 +128,60 @@ pub struct PatchArgs {
     pub new_string: String,
     /// sha256 revision from the last read_file of this path
     pub base_revision: String,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RunCommandArgs {
+    pub workspace_id: String,
+    /// Approved command basename, e.g. "git" — never a path
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Working directory relative to the workspace root (default ".")
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Kill the process tree after this many milliseconds (max 600000)
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct RunPowerShellArgs {
+    pub workspace_id: String,
+    /// PowerShell script executed via stdin (requires FullPowerShell mode)
+    pub script: String,
+    /// Working directory relative to the workspace root (default ".")
+    #[serde(default)]
+    pub cwd: Option<String>,
+    /// Kill the process tree after this many milliseconds (max 600000)
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+/// Client-facing mirror of the runner's `ExecutionResult` (which stays
+/// policy-internal and unserialized). ChatGPT gets partial output on timeout.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct ExecutionOutput {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub duration_ms: u64,
+}
+
+/// Maps a runner/policy failure to a stable CoreError. PolicyError codes that
+/// are already stable pass through as-is (`COMMAND_NOT_ALLOWED`,
+/// `INVALID_ARGUMENT`, and Core-inherited codes like
+/// `PATH_OUTSIDE_WORKSPACE`); anything else is an execution failure.
+fn execution_error(e: crate::execution::policy::PolicyError) -> CoreError {
+    match e.code {
+        "COMMAND_NOT_ALLOWED" => CoreError::new(ErrorCode::CommandNotAllowed, e.message),
+        "INVALID_ARGUMENT" => CoreError::new(ErrorCode::InvalidArgument, e.message),
+        "PATH_OUTSIDE_WORKSPACE" => CoreError::new(ErrorCode::PathOutsideWorkspace, e.message),
+        _ => CoreError::new(ErrorCode::ExecutionFailed, e.message),
+    }
 }
 
 // The #[tool_router] macro generates an associated `Self::tool_router()`
@@ -313,6 +366,116 @@ impl WorkspaceServer {
                         base_revision: a.base_revision.clone(),
                     },
                 )
+            },
+        ) {
+            Ok(r) => ok_structured(&r),
+            Err(e) => err_result(&e),
+        }
+    }
+
+    #[tool(
+        description = "Run an approved developer command (git, cargo, npm, node, python, ...) inside a workspace. Requires command execution to be enabled for the workspace.",
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<ExecutionOutput>()
+    )]
+    fn run_command(&self, Parameters(a): Parameters<RunCommandArgs>) -> CallToolResult {
+        let detail_ctx = serde_json::json!({ "program": &a.program });
+        match lc_core::pipeline::run_tool_with_capability(
+            &self.core,
+            "run_command",
+            &a.workspace_id,
+            RequiredCapability::Execute,
+            None,
+            Some(detail_ctx),
+            |_ws, root| {
+                // Note: powershell/pwsh are not on the approved-command list,
+                // so the policy layer already rejects them — the only path to
+                // PowerShell is run_powershell below.
+                let req = crate::execution::policy::RunCommandRequest {
+                    program: a.program.clone(),
+                    args: a.args.clone(),
+                    cwd: a.cwd.clone(),
+                    timeout_ms: a.timeout_ms,
+                };
+                let result =
+                    crate::execution::runner::run_command(root, req).map_err(execution_error)?;
+                let audited = Audited::new(ExecutionOutput {
+                    exit_code: result.exit_code,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    timed_out: result.timed_out,
+                    stdout_truncated: result.stdout_truncated,
+                    stderr_truncated: result.stderr_truncated,
+                    duration_ms: result.duration_ms,
+                })
+                .with_detail(serde_json::json!({
+                    "program": a.program,
+                    "arg_count": a.args.len(),
+                    "cwd": a.cwd.as_deref().unwrap_or("."),
+                    "exit_code": result.exit_code,
+                    "duration_ms": result.duration_ms,
+                    "timed_out": result.timed_out,
+                    "stdout_truncated": result.stdout_truncated,
+                    "stderr_truncated": result.stderr_truncated,
+                }));
+                Ok(audited)
+            },
+        ) {
+            Ok(r) => ok_structured(&r),
+            Err(e) => err_result(&e),
+        }
+    }
+
+    #[tool(
+        description = "Run a PowerShell script (via stdin) inside a workspace. Requires FullPowerShell execution mode; ApprovedCommands mode returns POWERSHELL_DISABLED.",
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<ExecutionOutput>()
+    )]
+    fn run_powershell(&self, Parameters(a): Parameters<RunPowerShellArgs>) -> CallToolResult {
+        use lc_core::ops::sha256_hex;
+        let script_bytes = a.script.as_bytes();
+        let script_sha256 = sha256_hex(script_bytes);
+        let detail_ctx = serde_json::json!({ "script_bytes": script_bytes.len() });
+        match lc_core::pipeline::run_tool_with_capability(
+            &self.core,
+            "run_powershell",
+            &a.workspace_id,
+            RequiredCapability::Execute,
+            None,
+            Some(detail_ctx),
+            |ws, root| {
+                if ws.execution_mode != lc_core::models::ExecutionMode::FullPowerShell {
+                    return Err(CoreError::new(
+                        ErrorCode::PowershellDisabled,
+                        format!("workspace '{}' does not allow full PowerShell", ws.name),
+                    ));
+                }
+                let req = crate::execution::policy::RunPowerShellRequest {
+                    script: a.script.clone(),
+                    cwd: a.cwd.clone(),
+                    timeout_ms: a.timeout_ms,
+                };
+                let result = crate::execution::runner::run_power_shell(root, req)
+                    .map_err(execution_error)?;
+                Ok(Audited::new(ExecutionOutput {
+                    exit_code: result.exit_code,
+                    stdout: result.stdout,
+                    stderr: result.stderr,
+                    timed_out: result.timed_out,
+                    stdout_truncated: result.stdout_truncated,
+                    stderr_truncated: result.stderr_truncated,
+                    duration_ms: result.duration_ms,
+                })
+                .with_detail(serde_json::json!({
+                    "script_bytes": script_bytes.len(),
+                    "script_sha256": script_sha256,
+                    "cwd": a.cwd.as_deref().unwrap_or("."),
+                    "exit_code": result.exit_code,
+                    "duration_ms": result.duration_ms,
+                    "timed_out": result.timed_out,
+                    "stdout_truncated": result.stdout_truncated,
+                    "stderr_truncated": result.stderr_truncated,
+                })))
             },
         ) {
             Ok(r) => ok_structured(&r),
