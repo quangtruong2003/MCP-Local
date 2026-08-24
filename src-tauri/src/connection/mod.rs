@@ -1,8 +1,8 @@
 //! Connection subsystem: capability secret storage, the verified state
 //! model, and the legacy Cloudflare-era manager that Tasks 7-12 replace.
 
-mod legacy;
 pub mod health;
+mod legacy;
 pub mod manager;
 pub mod secrets;
 pub mod sidecar;

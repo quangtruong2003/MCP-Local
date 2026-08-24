@@ -46,11 +46,17 @@ fn settings_err(code: &str, message: impl std::fmt::Display) -> String {
 pub(crate) fn validate_hostname(hostname: &str) -> Result<(), String> {
     let valid = !hostname.is_empty()
         && hostname.len() <= 63
-        && hostname.chars().all(|c| {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
-        })
-        && hostname.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-        && hostname.chars().last().is_some_and(|c| c.is_ascii_alphanumeric());
+        && hostname
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        && hostname
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        && hostname
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_ascii_alphanumeric());
     if valid {
         Ok(())
     } else {
@@ -77,7 +83,17 @@ fn audit_ui(
     path: Option<&str>,
     detail: Option<serde_json::Value>,
 ) {
-    if let Err(e) = audit::record_simple(db, "ui", None, workspace_id, op, "allow", error_code, path, detail) {
+    if let Err(e) = audit::record_simple(
+        db,
+        "ui",
+        None,
+        workspace_id,
+        op,
+        "allow",
+        error_code,
+        path,
+        detail,
+    ) {
         eprintln!("audit write failed for ui op {op}: {e}");
     }
 }
@@ -102,10 +118,12 @@ pub fn add_workspace(
     }
     let ws = workspace_repo::insert_workspace(
         &state.core.db,
-        &name.unwrap_or_else(|| canonical.file_name().map_or_else(
-            || canonical.display().to_string(),
-            |f| f.to_string_lossy().into_owned(),
-        )),
+        &name.unwrap_or_else(|| {
+            canonical.file_name().map_or_else(
+                || canonical.display().to_string(),
+                |f| f.to_string_lossy().into_owned(),
+            )
+        }),
         &canonical.display().to_string(),
     )
     .map_err(err_string)?;
@@ -136,7 +154,14 @@ pub fn set_capabilities(
 ) -> Result<(), String> {
     workspace_repo::update_capabilities(&state.core.db, &id, can_read, can_write)
         .map_err(err_string)?;
-    audit_ui(&state.core.db, Some(&id), "set_capabilities", None, None, None);
+    audit_ui(
+        &state.core.db,
+        Some(&id),
+        "set_capabilities",
+        None,
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -149,9 +174,21 @@ pub fn set_execution_access(
     can_execute: bool,
     execution_mode: lc_core::models::ExecutionMode,
 ) -> Result<(), String> {
-    lc_core::workspace_repo::update_execution_access(&state.core.db, &id, can_execute, execution_mode)
-        .map_err(err_string)?;
-    audit_ui(&state.core.db, Some(&id), "set_execution_access", None, None, None);
+    lc_core::workspace_repo::update_execution_access(
+        &state.core.db,
+        &id,
+        can_execute,
+        execution_mode,
+    )
+    .map_err(err_string)?;
+    audit_ui(
+        &state.core.db,
+        Some(&id),
+        "set_execution_access",
+        None,
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -159,7 +196,14 @@ pub fn set_execution_access(
 #[tauri::command]
 pub fn remove_workspace(state: State<'_, AppState>, id: String) -> Result<(), String> {
     workspace_repo::delete_workspace(&state.core.db, &id).map_err(err_string)?;
-    audit_ui(&state.core.db, Some(&id), "remove_workspace", None, None, None);
+    audit_ui(
+        &state.core.db,
+        Some(&id),
+        "remove_workspace",
+        None,
+        None,
+        None,
+    );
     Ok(())
 }
 
@@ -245,7 +289,10 @@ pub async fn reset_tailscale_identity(
     restart: bool,
     manager: State<'_, TailscaleManager>,
 ) -> Result<ConnectionStatus, String> {
-    manager.reset_identity(remove_state_dir, restart).await.map_err(conn_err_string)
+    manager
+        .reset_identity(remove_state_dir, restart)
+        .await
+        .map_err(conn_err_string)
 }
 
 #[tauri::command]
@@ -263,7 +310,8 @@ pub fn update_app_settings(
 ) -> Result<settings::AppSettings, String> {
     validate_hostname(&settings.tailscale_hostname)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    settings::save_app_settings(&dir, &settings).map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e))?;
+    settings::save_app_settings(&dir, &settings)
+        .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e))?;
     Ok(settings)
 }
 
@@ -326,8 +374,7 @@ mod tests {
             code: "SIDECAR_NOT_FOUND".into(),
             message: "sidecar binary missing".into(),
         };
-        let parsed: serde_json::Value =
-            serde_json::from_str(&conn_err_string(e)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&conn_err_string(e)).unwrap();
         let obj = parsed.as_object().unwrap();
         assert_eq!(obj.len(), 2, "shape must be exactly {{code,message}}");
         assert_eq!(parsed["code"], "SIDECAR_NOT_FOUND");

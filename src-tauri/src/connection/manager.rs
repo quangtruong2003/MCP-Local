@@ -367,10 +367,7 @@ impl ConnectionManager {
     /// While stopped: rotate only. Returns the resulting status; secrets are
     /// never included in the return value.
     pub async fn rotate_capability(&self) -> Result<ConnectionStatus, ConnectionError> {
-        let was_running = !matches!(
-            self.shared.current_state().await,
-            ConnectionState::Stopped
-        );
+        let was_running = !matches!(self.shared.current_state().await, ConnectionState::Stopped);
         if was_running {
             self.stop().await?;
         }
@@ -463,10 +460,14 @@ async fn run_loop(
                 // Already reflected by StartingServer/StartingTunnel states.
             }
             SidecarEvent::AuthRequired { url } => {
-                shared.set_state(gen, ConnectionState::NeedsLogin { login_url: url }).await;
+                shared
+                    .set_state(gen, ConnectionState::NeedsLogin { login_url: url })
+                    .await;
             }
             SidecarEvent::FunnelListening { fqdn } => {
-                shared.set_state(gen, ConnectionState::Verifying { fqdn: fqdn.clone() }).await;
+                shared
+                    .set_state(gen, ConnectionState::Verifying { fqdn: fqdn.clone() })
+                    .await;
                 let verified = shared.verifier.verify(&fqdn, &capability).await;
                 if shared.current_generation().await != gen {
                     // Verification raced a stop: drop the success/failure, the
@@ -478,7 +479,13 @@ async fn run_loop(
                     Ok(()) => {
                         let url = endpoint(&fqdn, &capability);
                         shared
-                            .set_state(gen, ConnectionState::Online { fqdn, endpoint: url })
+                            .set_state(
+                                gen,
+                                ConnectionState::Online {
+                                    fqdn,
+                                    endpoint: url,
+                                },
+                            )
                             .await;
                     }
                     Err(e) => {
@@ -504,7 +511,9 @@ async fn run_loop(
                         .set_state(gen, ConnectionState::NeedsFunnelPermission { message })
                         .await;
                 } else {
-                    shared.set_state(gen, ConnectionState::Error { code, message }).await;
+                    shared
+                        .set_state(gen, ConnectionState::Error { code, message })
+                        .await;
                     let _ = session.stop().await;
                     break;
                 }
@@ -613,12 +622,15 @@ mod tests {
             _cfg: SidecarConfig,
         ) -> Result<Box<dyn SidecarSession>, ConnectionError> {
             self.spawns.fetch_add(1, Ordering::SeqCst);
-            let session = self.sessions.lock().unwrap().pop_front().ok_or_else(|| {
-                ConnectionError {
-                    code: "NO_FAKE_SESSION".into(),
-                    message: "test exhausted prepared sessions".into(),
-                }
-            })?;
+            let session =
+                self.sessions
+                    .lock()
+                    .unwrap()
+                    .pop_front()
+                    .ok_or_else(|| ConnectionError {
+                        code: "NO_FAKE_SESSION".into(),
+                        message: "test exhausted prepared sessions".into(),
+                    })?;
             Ok(Box::new(session))
         }
     }
@@ -669,8 +681,9 @@ mod tests {
 
         let seen: Arc<std::sync::Mutex<Vec<ConnectionState>>> = Arc::default();
         let sink = seen.clone();
-        let emitter: StatusEmitter =
-            Arc::new(move |status: &ConnectionStatus| sink.lock().unwrap().push(status.state.clone()));
+        let emitter: StatusEmitter = Arc::new(move |status: &ConnectionStatus| {
+            sink.lock().unwrap().push(status.state.clone())
+        });
 
         let driver = FakeDriver::new(sessions);
         let mgr = ConnectionManager::with_parts(
@@ -694,7 +707,10 @@ mod tests {
     }
 
     fn instant_verifier(ok: bool) -> Arc<dyn HealthVerifier> {
-        Arc::new(FakeVerifier { ok, delay: Duration::ZERO })
+        Arc::new(FakeVerifier {
+            ok,
+            delay: Duration::ZERO,
+        })
     }
 
     async fn wait_for(
@@ -722,10 +738,15 @@ mod tests {
     async fn first_run_login_transition_sequence_is_exact() {
         let (sess, tx, _) = fake_session();
         tx.send(SidecarEvent::Starting).unwrap();
-        tx.send(SidecarEvent::AuthRequired { url: "https://login.tailscale.com/a/xyz".into() })
-            .unwrap();
+        tx.send(SidecarEvent::AuthRequired {
+            url: "https://login.tailscale.com/a/xyz".into(),
+        })
+        .unwrap();
         tx.send(SidecarEvent::Authenticated).unwrap();
-        tx.send(SidecarEvent::FunnelListening { fqdn: HOSTNAME.into() }).unwrap();
+        tx.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
         drop(tx); // channel closes after the queue drains
 
         let h = harness([sess], instant_verifier(true));
@@ -752,7 +773,9 @@ mod tests {
                 ConnectionState::NeedsLogin {
                     login_url: "https://login.tailscale.com/a/xyz".into()
                 },
-                ConnectionState::Verifying { fqdn: HOSTNAME.into() },
+                ConnectionState::Verifying {
+                    fqdn: HOSTNAME.into()
+                },
                 ConnectionState::Online {
                     fqdn: HOSTNAME.into(),
                     endpoint: endpoint(HOSTNAME, &h.initial_capability),
@@ -828,8 +851,10 @@ mod tests {
     async fn stop_during_login_ends_stopped_and_keeps_identity_files() {
         let (sess, tx, stop_called) = fake_session();
         tx.send(SidecarEvent::Starting).unwrap();
-        tx.send(SidecarEvent::AuthRequired { url: "https://login.tailscale.com/a/xyz".into() })
-            .unwrap();
+        tx.send(SidecarEvent::AuthRequired {
+            url: "https://login.tailscale.com/a/xyz".into(),
+        })
+        .unwrap();
         // tx intentionally kept alive: login pending, no further events.
 
         let h = harness([sess], instant_verifier(true));
@@ -861,7 +886,10 @@ mod tests {
     async fn stop_during_verification_ends_stopped_and_never_goes_online() {
         let (sess, tx, stop_called) = fake_session();
         tx.send(SidecarEvent::Starting).unwrap();
-        tx.send(SidecarEvent::FunnelListening { fqdn: HOSTNAME.into() }).unwrap();
+        tx.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
         // tx kept alive; the slow verifier below is what we interrupt.
 
         let h = harness(
@@ -883,10 +911,12 @@ mod tests {
 
         // Verification succeeded underneath, but the stale generation must
         // never publish Online.
-        assert!(h.seen.lock().unwrap().iter().all(|s| !matches!(
-            s,
-            ConnectionState::Online { .. }
-        )));
+        assert!(h
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|s| !matches!(s, ConnectionState::Online { .. })));
 
         assert!(h.app_data.join("connection-secret.bin").is_file());
         assert!(h.state_dir.is_dir());
@@ -896,8 +926,10 @@ mod tests {
     async fn double_start_returns_same_status_without_duplicate_spawn() {
         let (sess, tx, _) = fake_session();
         tx.send(SidecarEvent::Starting).unwrap();
-        tx.send(SidecarEvent::AuthRequired { url: "https://login.tailscale.com/a/xyz".into() })
-            .unwrap();
+        tx.send(SidecarEvent::AuthRequired {
+            url: "https://login.tailscale.com/a/xyz".into(),
+        })
+        .unwrap();
 
         let h = harness([sess], instant_verifier(true));
         h.mgr.start().await.unwrap();
@@ -917,12 +949,17 @@ mod tests {
     async fn rotate_while_running_stops_rotates_and_restarts() {
         let (sess1, tx1, stop1) = fake_session();
         tx1.send(SidecarEvent::Starting).unwrap();
-        tx1.send(SidecarEvent::AuthRequired { url: "https://login.tailscale.com/a/1".into() })
-            .unwrap();
+        tx1.send(SidecarEvent::AuthRequired {
+            url: "https://login.tailscale.com/a/1".into(),
+        })
+        .unwrap();
         let (sess2, tx2, _) = fake_session();
         tx2.send(SidecarEvent::Starting).unwrap();
         tx2.send(SidecarEvent::Authenticated).unwrap();
-        tx2.send(SidecarEvent::FunnelListening { fqdn: HOSTNAME.into() }).unwrap();
+        tx2.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
         drop(tx2);
 
         let h = harness([sess1, sess2], instant_verifier(true));
@@ -990,11 +1027,16 @@ mod tests {
     async fn reset_identity_with_restart_comes_back_online() {
         let (sess1, tx1, _) = fake_session();
         tx1.send(SidecarEvent::Starting).unwrap();
-        tx1.send(SidecarEvent::AuthRequired { url: "https://login.tailscale.com/a/1".into() })
-            .unwrap();
+        tx1.send(SidecarEvent::AuthRequired {
+            url: "https://login.tailscale.com/a/1".into(),
+        })
+        .unwrap();
         let (sess2, tx2, _) = fake_session();
         tx2.send(SidecarEvent::Starting).unwrap();
-        tx2.send(SidecarEvent::FunnelListening { fqdn: HOSTNAME.into() }).unwrap();
+        tx2.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
         drop(tx2);
 
         let h = harness([sess1, sess2], instant_verifier(true));

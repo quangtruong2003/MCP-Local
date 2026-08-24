@@ -207,12 +207,7 @@ impl ConnectionManager {
             let org = loaded.settings.organization_id.clone();
             let workspace = loaded.settings.workspace_id.clone();
             let created = tokio::task::spawn_blocking(move || {
-                tunnel::create_tunnel(
-                    &admin_key,
-                    &name,
-                    org.as_deref(),
-                    workspace.as_deref(),
-                )
+                tunnel::create_tunnel(&admin_key, &name, org.as_deref(), workspace.as_deref())
             })
             .await
             .map_err(|e| format!("tunnel create task failed: {e}"))?
@@ -322,7 +317,8 @@ impl ConnectionManager {
             if known_health_url.is_none() {
                 if let Ok(raw) = std::fs::read_to_string(health_file) {
                     let url = raw.trim().trim_end_matches('/').to_string();
-                    if url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:") {
+                    if url.starts_with("http://127.0.0.1:") || url.starts_with("http://localhost:")
+                    {
                         known_health_url = Some(url);
                     }
                 }

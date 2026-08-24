@@ -51,7 +51,11 @@ fn health_url(fqdn: &str, capability: &str) -> Result<url::Url, HealthError> {
 /// One probe attempt. Takes a full [`url::Url`] so tests can point it at a
 /// local server instead of the real tunnel.
 async fn try_once(client: &reqwest::Client, url: &url::Url) -> Result<(), HealthError> {
-    let response = client.get(url.clone()).send().await.map_err(classify_request)?;
+    let response = client
+        .get(url.clone())
+        .send()
+        .await
+        .map_err(classify_request)?;
     let status = response.status();
     if status != reqwest::StatusCode::NO_CONTENT {
         return Err(HealthError::UnexpectedStatus {
@@ -109,8 +113,7 @@ mod tests {
 
     #[test]
     fn builds_expected_health_url() {
-        let url =
-            health_url("local-workspace-mcp.example.ts.net", "abc").expect("valid inputs");
+        let url = health_url("local-workspace-mcp.example.ts.net", "abc").expect("valid inputs");
         assert_eq!(
             url.as_str(),
             "https://local-workspace-mcp.example.ts.net/abc/health"
@@ -128,7 +131,10 @@ mod tests {
             "host with space",
             "host\ttab",
         ] {
-            assert!(health_url(bad, "abc").is_err(), "expected rejection: {bad:?}");
+            assert!(
+                health_url(bad, "abc").is_err(),
+                "expected rejection: {bad:?}"
+            );
         }
     }
 
@@ -168,19 +174,14 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_204_with_marker_header() {
-        let url = spawn_health_server(
-            axum::http::StatusCode::NO_CONTENT,
-            Some("ok"),
-        )
-        .await;
+        let url = spawn_health_server(axum::http::StatusCode::NO_CONTENT, Some("ok")).await;
         let client = reqwest::Client::new();
         assert!(try_once(&client, &url).await.is_ok());
     }
 
     #[tokio::test]
     async fn treats_404_as_unexpected_status_not_success() {
-        let url =
-            spawn_health_server(axum::http::StatusCode::NOT_FOUND, None).await;
+        let url = spawn_health_server(axum::http::StatusCode::NOT_FOUND, None).await;
         let client = reqwest::Client::new();
         match try_once(&client, &url).await.unwrap_err() {
             HealthError::UnexpectedStatus { status } => assert_eq!(status, 404),

@@ -19,7 +19,7 @@ fn generate_capability() -> Result<String, String> {
 #[cfg(windows)]
 fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Security::Cryptography::{
-        CryptProtectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+        CryptProtectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
     // CryptProtectData's signature takes `*mut CRYPT_INTEGER_BLOB`, so the
@@ -59,7 +59,7 @@ unsafe fn blob_to_vec(blob: windows::Win32::Security::Cryptography::CRYPT_INTEGE
 #[cfg(windows)]
 fn unprotect(enc: &[u8]) -> Result<Vec<u8>, String> {
     use windows::Win32::Security::Cryptography::{
-        CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN,
+        CryptUnprotectData, CRYPTPROTECT_UI_FORBIDDEN, CRYPT_INTEGER_BLOB,
     };
 
     let in_blob = CRYPT_INTEGER_BLOB {

@@ -11,13 +11,28 @@ pub enum ConnectionState {
     Stopped,
     StartingServer,
     StartingTunnel,
-    NeedsLogin { login_url: String },
-    NeedsFunnelPermission { message: String },
-    Verifying { fqdn: String },
-    Online { fqdn: String, endpoint: String },
-    Degraded { fqdn: Option<String>, message: String },
+    NeedsLogin {
+        login_url: String,
+    },
+    NeedsFunnelPermission {
+        message: String,
+    },
+    Verifying {
+        fqdn: String,
+    },
+    Online {
+        fqdn: String,
+        endpoint: String,
+    },
+    Degraded {
+        fqdn: Option<String>,
+        message: String,
+    },
     Stopping,
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 /// Full status snapshot pushed to (and polled by) the frontend. Defaults to
@@ -32,7 +47,7 @@ pub struct ConnectionStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{Value, json};
+    use serde_json::{json, Value};
 
     fn to_value(state: &ConnectionState) -> Value {
         serde_json::to_value(state).unwrap()

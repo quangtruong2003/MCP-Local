@@ -217,11 +217,7 @@ mod tests {
 
     #[test]
     fn create_args_include_scope_but_not_admin_secret() {
-        let args = build_create_args(
-            "My MCP",
-            Some("org_123"),
-            Some("ws_123"),
-        );
+        let args = build_create_args("My MCP", Some("org_123"), Some("ws_123"));
         assert_eq!(args[0], "admin");
         assert_eq!(args[1], "--json");
         assert_eq!(args[2], "tunnels");
