@@ -244,28 +244,140 @@
   color: var(--text-primary);
 }
 
-/* ---------- Onboarding callout ---------- */
+/* ---------- Onboarding flow ---------- */
 
-.callout {
+.onboarding-card {
+  width: min(480px, 100%);
+  outline: none;
+}
+
+.onboarding-head {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 13px 16px;
-  border-radius: var(--radius-md);
-  background: var(--accent-soft);
-  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
-  margin-bottom: 16px;
+  flex-direction: column;
+  gap: 4px;
 }
 
-.callout strong {
-  display: block;
-  font-size: var(--text-dense);
+.onboarding-step-count {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
-.callout span {
+.onboarding-head h2 {
+  font-size: var(--text-section-title);
+  font-weight: 650;
+}
+
+.onboarding-body {
+  margin-top: 12px;
   font-size: var(--text-dense);
   color: var(--text-secondary);
+}
+
+.onboarding-points {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.onboarding-added-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.onboarding-added-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-subtle);
+  font-size: var(--text-dense);
+  font-weight: 600;
+}
+
+.onboarding-added-list svg {
+  width: 14px;
+  height: 14px;
+  color: var(--success);
+}
+
+.onboarding-permissions {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.onboarding-permissions li {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.onboarding-permissions svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--success);
+}
+
+.onboarding-permissions strong {
+  display: block;
+  font-size: var(--text-dense);
+  color: var(--text-primary);
+}
+
+.onboarding-permissions span {
+  font-size: var(--text-dense);
+  color: var(--text-secondary);
+}
+
+.onboarding-note {
+  margin-top: 12px;
+  font-size: 12px;
+  color: var(--text-faint);
+}
+
+.onboarding-footer {
+  justify-content: flex-start;
+}
+
+.onboarding-skip {
+  margin-top: 14px;
+}
+
+.onboarding-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.onboarding-diagnostics {
+  font-size: var(--text-dense);
+  color: var(--text-secondary);
+}
+
+.onboarding-diagnostics summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.onboarding-diagnostics p {
+  margin-top: 8px;
+  word-break: break-word;
 }
 
 /* ---------- Toasts ---------- */

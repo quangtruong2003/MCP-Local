@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 
 import type {
   AppError,
@@ -116,4 +117,10 @@ export const api = {
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   updateAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("update_app_settings", { settings }),
+
+  /**
+   * Opens a URL in the system browser. The Tauri opener capability restricts
+   * this to Tailscale domains only; anything else is rejected by the backend.
+   */
+  openExternalUrl: (url: string) => openUrl(url),
 };

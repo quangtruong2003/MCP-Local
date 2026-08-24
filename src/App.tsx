@@ -3,11 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import { CheckCircle2, Info, XOctagon } from "lucide-react";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
+import OnboardingFlow from "./components/OnboardingFlow";
 import DashboardPage from "./pages/DashboardPage";
 import { api, parseErrorMessage } from "./api";
 import type { AuditEvent, ServerStatus } from "./api";
 import { VIEW_META } from "./types";
-import type { ConnectionStatus, Toast, ToastTone, ViewId, Workspace } from "./types";
+import type { AppSettings, ConnectionStatus, Toast, ToastTone, ViewId, Workspace } from "./types";
 
 const TOAST_TTL_MS = 5000;
 const TOAST_ICONS: Record<ToastTone, typeof Info> = {
@@ -20,7 +21,9 @@ export default function App() {
   // --- Shell state (plan Step 6): page, data load, toasts/errors, onboarding ---
   const [page, setPage] = useState<ViewId>("dashboard");
   const [toasts, setToasts] = useState<Toast[]>([]);
-  const [onboardingVisible, setOnboardingVisible] = useState(true);
+  // Null until settings load decides whether onboarding should run at all.
+  const [onboardingVisible, setOnboardingVisible] = useState<boolean | null>(null);
+  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
   const [connection, setConnection] = useState<ConnectionStatus | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -53,9 +56,14 @@ export default function App() {
 
     void (async () => {
       try {
-        const status = await api.connectionStatus();
+        const [status, appSettings] = await Promise.all([
+          api.connectionStatus(),
+          api.getAppSettings(),
+        ]);
         if (disposed) return;
         setConnection(status);
+        setSettings(appSettings);
+        setOnboardingVisible(!appSettings.onboarding_complete);
       } catch (err) {
         reportError(parseErrorMessage(err));
       }
@@ -98,20 +106,33 @@ export default function App() {
   // Ready only when the funnel connection is fully online.
   const connectionReady = connection?.state.state === "online";
 
+  // Onboarding completion persists ONLY via Finish at the Online stage;
+  // dismissing the dialog never marks it complete (plan Task 17 Step 3).
+  async function finishOnboarding() {
+    if (!settings) return;
+    try {
+      const updated = await api.updateAppSettings({ ...settings, onboarding_complete: true });
+      setSettings(updated);
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+      return;
+    }
+    setOnboardingVisible(false);
+  }
+
   const meta = VIEW_META[page];
 
   return (
     <AppShell page={page} onNavigate={setPage} ready={connectionReady} title={meta.title} subtitle={meta.subtitle}>
       {onboardingVisible ? (
-        <div className="callout" role="note">
-          <div>
-            <strong>Welcome</strong>
-            <span>Approve at least one workspace folder, then press Start on the Dashboard.</span>
-          </div>
-          <button className="btn btn-secondary" onClick={() => setOnboardingVisible(false)}>
-            Got it
-          </button>
-        </div>
+        <OnboardingFlow
+          connection={connection}
+          workspaces={workspaces}
+          onWorkspacesChanged={async () => setWorkspaces(await api.listWorkspaces())}
+          onClose={() => setOnboardingVisible(false)}
+          onFinish={() => finishOnboarding()}
+          reportError={reportError}
+        />
       ) : null}
 
       {!initialLoadDone ? (

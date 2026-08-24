@@ -5,6 +5,13 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "dialog:default"
+    "dialog:default",
+    {
+      "identifier": "opener:allow-open-url",
+      "allow": [
+        { "url": "https://login.tailscale.com/*" },
+        { "url": "https://tailscale.com/*" }
+      ]
+    }
   ]
 }
