@@ -3,7 +3,9 @@
 
 mod legacy;
 pub mod secrets;
+pub mod sidecar;
 pub mod state;
+pub(crate) mod windows_job;
 
 pub use legacy::*;
 pub use secrets::CapabilitySecretStore;
