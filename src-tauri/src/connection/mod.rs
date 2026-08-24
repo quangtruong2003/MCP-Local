@@ -2,6 +2,7 @@
 //! model, and the legacy Cloudflare-era manager that Tasks 7-12 replace.
 
 mod legacy;
+pub mod health;
 pub mod secrets;
 pub mod sidecar;
 pub mod state;

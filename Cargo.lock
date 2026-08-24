@@ -2063,6 +2063,7 @@ checksum = "47d9d19d1d6efa0109d2f65ff4c85cddd50bd572e5a00127ab10987290bcefae"
 name = "local-workspace-mcp-manager"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "axum",
  "base64 0.23.1",
  "core",
@@ -2077,8 +2078,10 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "thiserror 2.0.20",
  "time",
  "tokio",
+ "url",
  "windows 0.62.2",
 ]
 
