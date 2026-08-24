@@ -41,6 +41,9 @@ pub struct WorkspaceServer {
     core: Arc<CoreServices>,
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct EmptyArgs {}
+
 // ---- argument structs (all take workspace_id first) ----
 
 fn default_dot() -> String {
@@ -121,6 +124,17 @@ pub struct PatchArgs {
 impl WorkspaceServer {
     pub fn new(core: Arc<CoreServices>) -> Self {
         Self { core }
+    }
+
+    #[tool(
+        description = "List the approved workspaces. Call this first to get valid workspace_id values for every other tool.",
+        annotations(read_only_hint = true)
+    )]
+    fn list_workspaces(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
+        match lc_core::workspace_repo::list_workspaces(&self.core.db) {
+            Ok(ws) => ok_json(&ws),
+            Err(e) => err_result(&e),
+        }
     }
 
     #[tool(
