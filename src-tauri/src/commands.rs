@@ -25,6 +25,21 @@ pub struct Status {
     pub paused: bool,
 }
 
+/// Records a UI-source audit row; a failed audit write is logged loudly instead of
+/// silently swallowed (the mutation itself has already succeeded and is returned).
+fn audit_ui(
+    db: &lc_core::db::Database,
+    workspace_id: Option<&str>,
+    op: &str,
+    error_code: Option<&str>,
+    path: Option<&str>,
+    detail: Option<serde_json::Value>,
+) {
+    if let Err(e) = audit::record_simple(db, "ui", None, workspace_id, op, "allow", error_code, path, detail) {
+        eprintln!("audit write failed for ui op {op}: {e}");
+    }
+}
+
 #[tauri::command]
 pub fn add_workspace(
     state: State<'_, AppState>,
@@ -45,17 +60,17 @@ pub fn add_workspace(
     }
     let ws = workspace_repo::insert_workspace(
         &state.core.db,
-        &name.unwrap_or_else(|| canonical.display().to_string()),
+        &name.unwrap_or_else(|| canonical.file_name().map_or_else(
+            || canonical.display().to_string(),
+            |f| f.to_string_lossy().into_owned(),
+        )),
         &canonical.display().to_string(),
     )
     .map_err(err_string)?;
-    let _ = audit::record_simple(
+    audit_ui(
         &state.core.db,
-        "ui",
-        None,
         Some(&ws.id),
         "add_workspace",
-        "allow",
         None,
         Some(&canonical.display().to_string()),
         None,
@@ -79,17 +94,7 @@ pub fn set_capabilities(
 ) -> Result<(), String> {
     workspace_repo::update_capabilities(&state.core.db, &id, can_read, can_write)
         .map_err(err_string)?;
-    let _ = audit::record_simple(
-        &state.core.db,
-        "ui",
-        None,
-        Some(&id),
-        "set_capabilities",
-        "allow",
-        None,
-        None,
-        None,
-    );
+    audit_ui(&state.core.db, Some(&id), "set_capabilities", None, None, None);
     Ok(())
 }
 
@@ -97,17 +102,7 @@ pub fn set_capabilities(
 #[tauri::command]
 pub fn remove_workspace(state: State<'_, AppState>, id: String) -> Result<(), String> {
     workspace_repo::delete_workspace(&state.core.db, &id).map_err(err_string)?;
-    let _ = audit::record_simple(
-        &state.core.db,
-        "ui",
-        None,
-        Some(&id),
-        "remove_workspace",
-        "allow",
-        None,
-        None,
-        None,
-    );
+    audit_ui(&state.core.db, Some(&id), "remove_workspace", None, None, None);
     Ok(())
 }
 
@@ -118,13 +113,10 @@ pub fn set_paused(
     paused: bool,
 ) -> Result<(), String> {
     state.core.pause.set(paused);
-    let _ = audit::record_simple(
+    audit_ui(
         &state.core.db,
-        "ui",
-        None,
         None,
         if paused { "pause" } else { "resume" },
-        "allow",
         None,
         None,
         None,
