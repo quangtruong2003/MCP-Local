@@ -27,6 +27,20 @@ pub fn run_tool_audited<T>(
     needs_write: bool,
     f: impl FnOnce(&Workspace, &Path) -> Result<T, CoreError>,
 ) -> Result<T, CoreError> {
+    run_tool_audited_with_context(core, tool, workspace_id, needs_write, None, None, f)
+}
+
+/// Same fail-closed pipeline with bounded, caller-provided audit context.
+/// `path` is a workspace-relative request path/prefix, never file content.
+pub fn run_tool_audited_with_context<T>(
+    core: &CoreServices,
+    tool: &str,
+    workspace_id: &str,
+    needs_write: bool,
+    path: Option<&str>,
+    detail: Option<serde_json::Value>,
+    f: impl FnOnce(&Workspace, &Path) -> Result<T, CoreError>,
+) -> Result<T, CoreError> {
     let pre = (|| -> Result<(Workspace, PathBuf), CoreError> {
         if core.pause.is_paused() {
             return Err(CoreError::new(
@@ -54,10 +68,6 @@ pub fn run_tool_audited<T>(
     let (ws, root) = match pre {
         Ok(ok) => ok,
         Err(e) => {
-            // Deny codes happen before execution; anything else from the
-            // prelude (e.g. a db failure surfacing as WORKSPACE_NOT_FOUND or
-            // IO_ERROR) is an error. Capability denies know the workspace;
-            // pause and not-found do not.
             let known_ws = matches!(e.code, ErrorCode::ReadDisabled | ErrorCode::WriteDisabled);
             let decision = if known_ws || e.code == ErrorCode::AccessPaused {
                 "deny"
@@ -72,8 +82,8 @@ pub fn run_tool_audited<T>(
                 tool,
                 decision,
                 Some(e.code.as_str()),
-                None,
-                None,
+                path,
+                detail.clone(),
             )?;
             return Err(e);
         }
@@ -88,8 +98,8 @@ pub fn run_tool_audited<T>(
         tool,
         if result.is_ok() { "allow" } else { "error" },
         result.as_ref().err().map(|e| e.code.as_str()),
-        None,
-        None,
+        path,
+        detail,
     )?;
     result
 }
@@ -214,6 +224,25 @@ mod tests {
         assert_eq!(events[0].decision, "allow");
         assert_eq!(events[0].workspace_id.as_deref(), Some(ws_id.as_str()));
         assert_eq!(events[0].error_code, None);
+    }
+
+    #[test]
+    fn contextual_audit_records_path_and_bounded_detail() {
+        let (core, _d, ws_id) = setup();
+        run_tool_audited_with_context(
+            &core,
+            "read_file",
+            &ws_id,
+            false,
+            Some("src/main.rs"),
+            Some(serde_json::json!({"window": "partial"})),
+            |_ws, _root| Ok(()),
+        )
+        .unwrap();
+        let events = crate::audit::list_recent(&core.db, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].path.as_deref(), Some("src/main.rs"));
+        assert_eq!(events[0].detail.as_ref().unwrap()["window"], "partial");
     }
 
     #[test]

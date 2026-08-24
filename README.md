@@ -47,10 +47,13 @@ The archive's `LICENSE`, `NOTICE`, SPDX, and license-text files are tracked in g
 
 ## First-run setup
 
-1. Launch the app.
-2. Click **Add workspace** and pick a folder. Read access is on by default; write is off until you enable it.
-3. Create a tunnel endpoint at [platform.openai.com](https://platform.openai.com) (**Settings → Organization → Tunnels**) and note its id and API key.
-4. Open **Tunnel settings…**, enter the tunnel id and API key, and save. The status bar shows the sidecar state; when running it reports "connected" (spawn-success — see limitations below).
+1. Launch the app and add at least one **Workspace**. Read access starts on; write stays off until you explicitly enable it.
+2. Open **Settings → Secure MCP Tunnel** and enter a Runtime API key (Tunnels Read + Use), an Admin API key for tunnel creation, and at least one Organization ID or ChatGPT Workspace ID.
+3. Return to **Dashboard** and press **Start**.
+4. If no tunnel exists yet, the app creates one with `tunnel-client admin --json tunnels create`, saves the returned Tunnel ID, and reuses that ID on future starts. A newly created tunnel can take roughly 25–30 seconds to become active.
+5. The Dashboard becomes **Ready** only after tunnel-client's loopback `/readyz` endpoint reports success; process spawn alone is not considered connected.
+
+Normal **Stop → Start** and app restarts reuse the saved Tunnel ID. Creating a replacement is an explicit **Regenerate tunnel** action in Settings.
 
 ## Connect ChatGPT
 
@@ -66,12 +69,13 @@ The archive's `LICENSE`, `NOTICE`, SPDX, and license-text files are tracked in g
 - **Sensitive-file deny-list**: `.env*`, `*.pem`, `*.key`, `id_rsa*`, `.git/config`, `credentials*`, `*.pfx`, `*.p12`, `secrets.*`, and all of `node_modules/**` are blocked at any depth, for reads and writes alike. Overriding requires a code change.
 - **Patch-first editing**: edits are anchored string replacements (`apply_patch`), not whole-file writes; every edit carries a `base_revision` (SHA-256 of content as last seen) and fails with `FILE_CHANGED_SINCE_READ` if the file changed externally. New files are written atomically via temp-file + rename.
 - **Append-only audit log**: every MCP request writes exactly one audit row (allow, deny, or error) before its response is sent; rows can never be updated or deleted. The latest 100 events are visible in the UI.
-- **Secret handling**: the tunnel API key is never written to command-line arguments and never sent back to the UI; it is passed to the sidecar as an environment-variable reference only, and persisted only in the local app-data `settings.json`.
+- **Secret handling**: Runtime/Admin API keys are never written to command-line arguments and never have a UI read-back path. Windows builds encrypt the credential payload with DPAPI before writing it under the current user's LocalAppData; `settings.json` contains only non-secret connection metadata. Existing MVP `tunnel_api_key` values are migrated on startup after the protected-store write succeeds.
+- **Readiness**: tunnel-client gets an ephemeral loopback health listener and URL file. `/healthz` is liveness only; the app reports **Ready** only when `/readyz` succeeds.
 
 ### Known limitations (honesty notes)
 
-- "Connected" means *sidecar process spawned successfully* — control-plane health polling is future work.
-- If the app hard-crashes, the sidecar process may be orphaned (no OS-level Job Object binding yet); normal exit tears it down cleanly.
+- If the app hard-crashes, the sidecar process may still be orphaned because an OS-level Windows Job Object is not yet attached; normal exit tears it down cleanly.
+- Automatic tunnel creation requires an Admin API key plus at least one organization/workspace scope. Runtime operation uses a separate restricted key.
 
 ## Error codes
 
@@ -94,4 +98,4 @@ Tool errors surface as structured results `{ code, message, detail? }` with thes
 
 ## MCP tool surface
 
-Seven tools, all taking `workspace_id`: `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), `apply_patch`. Read tools return bounded results (e.g. `read_file` ≤ 256 KB window with truncation flag) and carry a `revision` field usable with `apply_patch`.
+Eight tools are exposed. `list_workspaces` returns the approved workspace IDs. The seven workspace-scoped filesystem tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), and `apply_patch`. Read tools return bounded results (for example `read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` usable by `apply_patch`.

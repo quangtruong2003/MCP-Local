@@ -157,11 +157,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<lc_core::ops::list_dir::ListDirResult>()
     )]
     fn list_directory(&self, Parameters(a): Parameters<ListDirArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "list_directory",
             &a.workspace_id,
             false,
+            Some(&a.path),
+            Some(serde_json::json!({ "recursive": a.recursive })),
             |_, root| lc_core::ops::list_dir::list_dir(&self.core, root, &a.path, a.recursive),
         ) {
             Ok(r) => ok_structured(&r),
@@ -175,11 +177,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<lc_core::ops::find_files::FindResult>()
     )]
     fn find_files(&self, Parameters(a): Parameters<FindArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "find_files",
             &a.workspace_id,
             false,
+            None,
+            Some(serde_json::json!({ "pattern": &a.pattern })),
             |_, root| lc_core::ops::find_files::find_files(&self.core, root, &a.pattern),
         ) {
             Ok(r) => ok_structured(&r),
@@ -193,11 +197,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<lc_core::ops::search_text::SearchResult>()
     )]
     fn search_text(&self, Parameters(a): Parameters<SearchArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "search_text",
             &a.workspace_id,
             false,
+            a.path_prefix.as_deref(),
+            Some(serde_json::json!({ "regex": a.is_regex, "case_sensitive": a.case_sensitive })),
             |_, root| {
                 lc_core::ops::search_text::search_text(
                     &self.core,
@@ -221,11 +227,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<lc_core::ops::read_file::ReadResult>()
     )]
     fn read_file(&self, Parameters(a): Parameters<ReadArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "read_file",
             &a.workspace_id,
             false,
+            Some(&a.path),
+            None,
             |_, root| {
                 lc_core::ops::read_file::read_file(
                     &self.core,
@@ -247,11 +255,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<Vec<lc_core::ops::read_file::FileResult>>()
     )]
     fn read_files(&self, Parameters(a): Parameters<ReadManyArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "read_files",
             &a.workspace_id,
             false,
+            None,
+            Some(serde_json::json!({ "file_count": a.paths.len() })),
             |_, root| lc_core::ops::read_file::read_files(&self.core, root, &a.paths),
         ) {
             Ok(r) => ok_structured(&r),
@@ -265,11 +275,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<lc_core::ops::write_file::CreateResult>()
     )]
     fn create_file(&self, Parameters(a): Parameters<CreateArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "create_file",
             &a.workspace_id,
             true,
+            Some(&a.path),
+            Some(serde_json::json!({ "bytes": a.content.len() })),
             |_, root| lc_core::ops::write_file::create_file(&self.core, root, &a.path, &a.content),
         ) {
             Ok(r) => ok_structured(&r),
@@ -283,11 +295,13 @@ impl WorkspaceServer {
         output_schema = schema_for_output::<lc_core::ops::write_file::PatchResult>()
     )]
     fn apply_patch(&self, Parameters(a): Parameters<PatchArgs>) -> CallToolResult {
-        match lc_core::pipeline::run_tool_audited(
+        match lc_core::pipeline::run_tool_audited_with_context(
             &self.core,
             "apply_patch",
             &a.workspace_id,
             true,
+            Some(&a.path),
+            None,
             |_, root| {
                 lc_core::ops::write_file::apply_patch(
                     &self.core,

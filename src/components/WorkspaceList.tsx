@@ -4,23 +4,27 @@ import { api, parseErrorMessage, Workspace } from "../api";
 
 interface Props {
   workspaces: Workspace[];
-  onChanged: () => void;
+  onChanged: () => void | Promise<void>;
   onError: (message: string | null) => void;
 }
 
 export default function WorkspaceList({ workspaces, onChanged, onError }: Props) {
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
 
   const add = async () => {
     onError(null);
+    setAdding(true);
     try {
-      const dir = await open({ directory: true, multiple: false });
+      const dir = await open({ directory: true, multiple: false, title: "Choose a workspace folder" });
       if (typeof dir === "string") {
         await api.addWorkspace(dir);
-        onChanged();
+        await onChanged();
       }
     } catch (err) {
       onError(parseErrorMessage(err));
+    } finally {
+      setAdding(false);
     }
   };
 
@@ -29,11 +33,13 @@ export default function WorkspaceList({ workspaces, onChanged, onError }: Props)
     setBusyId(ws.id);
     try {
       if (cap === "read") {
-        await api.setCapabilities(ws.id, !ws.can_read, ws.can_write);
+        const nextRead = !ws.can_read;
+        await api.setCapabilities(ws.id, nextRead, nextRead ? ws.can_write : false);
       } else {
-        await api.setCapabilities(ws.id, ws.can_read, !ws.can_write);
+        const nextWrite = !ws.can_write;
+        await api.setCapabilities(ws.id, nextWrite ? true : ws.can_read, nextWrite);
       }
-      onChanged();
+      await onChanged();
     } catch (err) {
       onError(parseErrorMessage(err));
     } finally {
@@ -42,12 +48,12 @@ export default function WorkspaceList({ workspaces, onChanged, onError }: Props)
   };
 
   const remove = async (ws: Workspace) => {
-    if (!confirm(`Remove workspace "${ws.name}"? Files on disk are NOT deleted.`)) return;
+    if (!confirm(`Remove “${ws.name}” from MCP access? Files on disk will not be deleted.`)) return;
     onError(null);
     setBusyId(ws.id);
     try {
       await api.removeWorkspace(ws.id);
-      onChanged();
+      await onChanged();
     } catch (err) {
       onError(parseErrorMessage(err));
     } finally {
@@ -56,80 +62,77 @@ export default function WorkspaceList({ workspaces, onChanged, onError }: Props)
   };
 
   return (
-    <section>
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <h2 style={{ margin: 0, fontSize: 16 }}>Workspaces</h2>
-        <button onClick={add}>+ Add folder</button>
-      </div>
-      <p style={{ margin: "4px 0 8px", color: "var(--text-muted)", fontSize: 12 }}>
-        Folders ChatGPT may access. New folders start with read on and write off.
-      </p>
-      {workspaces.map((ws) => (
-        <div
-          key={ws.id}
-          style={{
-            display: "flex",
-            gap: 12,
-            alignItems: "center",
-            padding: "10px 12px",
-            marginBottom: 8,
-            background: "var(--surface)",
-            border: "1px solid var(--border)",
-            borderRadius: 8,
-            opacity: busyId === ws.id ? 0.6 : 1,
-          }}
-        >
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <strong>{ws.name}</strong>
-            <div
-              style={{
-                fontSize: 12,
-                color: "var(--text-muted)",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-              }}
-            >
-              {ws.root_path}
-            </div>
-          </div>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={ws.can_read}
-              disabled={busyId === ws.id}
-              onChange={() => toggle(ws, "read")}
-            />
-            Read
-          </label>
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={ws.can_write}
-              disabled={busyId === ws.id}
-              onChange={() => toggle(ws, "write")}
-            />
-            Write
-          </label>
-          <button
-            onClick={() => remove(ws)}
-            disabled={busyId === ws.id}
-            style={{ color: "var(--danger)" }}
-          >
-            Remove
-          </button>
+    <section className="panel workspace-panel">
+      <div className="section-heading">
+        <div>
+          <span className="eyebrow">Approved folders</span>
+          <h2>Workspaces</h2>
+          <p>New folders start with Read enabled and Write disabled.</p>
         </div>
-      ))}
-      {workspaces.length === 0 && (
-        <p style={{ color: "var(--text-muted)", fontStyle: "italic" }}>
-          No workspaces yet — add a folder to let ChatGPT access it.
-        </p>
+        <button className="btn btn-primary" onClick={() => void add()} disabled={adding}>
+          {adding ? "Adding…" : "+ Add workspace"}
+        </button>
+      </div>
+
+      {workspaces.length === 0 ? (
+        <div className="empty-state">
+          <div className="empty-icon">▱</div>
+          <strong>No workspaces approved</strong>
+          <p>Add a folder to let ChatGPT list, search and read files inside that boundary.</p>
+          <button className="btn btn-primary" onClick={() => void add()} disabled={adding}>Add your first workspace</button>
+        </div>
+      ) : (
+        <div className="workspace-list">
+          {workspaces.map((ws) => {
+            const busy = busyId === ws.id;
+            return (
+              <article className={`workspace-card ${busy ? "busy" : ""}`} key={ws.id}>
+                <div className="workspace-main">
+                  <div className="workspace-icon">▱</div>
+                  <div className="workspace-copy">
+                    <div className="workspace-title-row">
+                      <strong>{ws.name}</strong>
+                      <span className={`badge ${ws.can_read ? "badge-success" : "badge-neutral"}`}>
+                        {ws.can_read ? "Active" : "Disabled"}
+                      </span>
+                    </div>
+                    <code className="workspace-path">{ws.root_path}</code>
+                  </div>
+                </div>
+
+                <div className="workspace-controls">
+                  <label className="permission-toggle">
+                    <div>
+                      <strong>Read</strong>
+                      <span>List, search and inspect files</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={ws.can_read}
+                      disabled={busy}
+                      onChange={() => void toggle(ws, "read")}
+                    />
+                  </label>
+                  <label className="permission-toggle">
+                    <div>
+                      <strong>Write</strong>
+                      <span>Create files and apply anchored patches</span>
+                    </div>
+                    <input
+                      type="checkbox"
+                      checked={ws.can_write}
+                      disabled={busy}
+                      onChange={() => void toggle(ws, "write")}
+                    />
+                  </label>
+                  <button className="btn btn-danger-ghost" onClick={() => void remove(ws)} disabled={busy}>
+                    Remove
+                  </button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
       )}
     </section>
   );

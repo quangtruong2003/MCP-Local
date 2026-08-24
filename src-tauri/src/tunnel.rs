@@ -1,50 +1,38 @@
-//! Lifecycle management for the `tunnel-client` sidecar process.
+//! Low-level adapter around OpenAI's bundled `tunnel-client` binary.
 //!
-//! The sidecar bridges the local MCP server (`http://127.0.0.1:{port}/mcp`)
-//! to a remote control plane. We own the child process: spawn on configure /
-//! startup, kill on stop / exit, and broadcast status transitions to the UI
-//! via the `"tunnel-status"` event.
-//!
-//! Status honesty note: we emit `Connected` right after a successful spawn
-//! without verifying the control-plane handshake. Real health polling (the
-//! sidecar exposes `--health.listen-addr` / `--health.url-file`) is future
-//! work; until then `Connected` means "process running", nothing more.
-//!
-//! Known limitation (MVP): teardown only runs on the normal exit path
-//! (`RunEvent::ExitRequested`). If the app hard-crashes or is force-killed,
-//! the sidecar is orphaned and keeps bridging. A Windows Job Object (kill-on-
-//! close) or equivalent OS-level process binding is the future mitigation.
+//! This module intentionally does not decide whether the app is Ready. It
+//! owns CLI argument construction, tunnel CRUD lookups and the runtime child
+//! process. `connection.rs` owns orchestration and readiness semantics.
 
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
 
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
-/// Sidecar file name as produced by Tauri's `externalBin` resolution
-/// (bundle target triple appended to `binaries/tunnel-client`).
 const SIDECAR_FILE: &str = "tunnel-client-x86_64-pc-windows-msvc.exe";
+const TUNNEL_DESCRIPTION: &str = "Routes ChatGPT to Local Workspace MCP Manager";
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum TunnelStatus {
-    #[default]
-    Stopped,
-    Connecting,
-    Connected,
-    Error(String),
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct TunnelRecord {
+    #[serde(alias = "tunnel_id")]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub organization_ids: Vec<String>,
+    #[serde(default)]
+    pub workspace_ids: Vec<String>,
 }
 
 #[derive(Default)]
 pub struct TunnelHandle {
-    pub child: Mutex<Option<Child>>,
-    pub status: Mutex<TunnelStatus>,
+    child: Mutex<Option<Child>>,
 }
 
-/// Locates the sidecar executable: bundled builds place `externalBin`
-/// artifacts next to the main executable; in dev (`cargo run`) fall back to
-/// the source-tree `src-tauri/binaries/` checkout.
-fn sidecar_path() -> PathBuf {
+pub fn sidecar_path() -> PathBuf {
     if let Some(exe_dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_path_buf))
@@ -59,61 +47,150 @@ fn sidecar_path() -> PathBuf {
         .join(SIDECAR_FILE)
 }
 
-/// Builds the `tunnel-client run` argument list. The API key itself is passed
-/// via the `TUNNEL_CLIENT_API_KEY` environment variable (see `spawn`); the
-/// flag only carries an `env:` reference so the secret never hits argv.
-fn build_args(tunnel_id: &str, port: u16) -> Vec<String> {
+fn build_runtime_args(tunnel_id: &str, port: u16, health_url_file: &Path) -> Vec<String> {
     vec![
         "run".into(),
         format!("--control-plane.tunnel-id={tunnel_id}"),
-        "--control-plane.api-key=env:TUNNEL_CLIENT_API_KEY".into(),
+        "--control-plane.api-key=env:CONTROL_PLANE_API_KEY".into(),
         format!("--mcp.server-url=url=http://127.0.0.1:{port}/mcp"),
+        "--health.listen-addr=127.0.0.1:0".into(),
+        format!("--health.url-file={}", health_url_file.display()),
     ]
 }
 
-fn set_status(app: &AppHandle, status: TunnelStatus) {
-    let handle = app.state::<TunnelHandle>();
-    *handle.status.lock().unwrap() = status.clone();
-    let _ = app.emit("tunnel-status", &status);
+fn build_create_args(
+    name: &str,
+    organization_id: Option<&str>,
+    workspace_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "admin".into(),
+        "--json".into(),
+        "tunnels".into(),
+        "create".into(),
+        format!("--name={name}"),
+        format!("--description={TUNNEL_DESCRIPTION}"),
+    ];
+    if let Some(id) = non_blank(organization_id) {
+        args.push(format!("--organization-id={id}"));
+    }
+    if let Some(id) = non_blank(workspace_id) {
+        args.push(format!("--workspace-id={id}"));
+    }
+    args
 }
 
-/// Spawns the sidecar and stores it in [`TunnelHandle`]. Emits
-/// `Connecting` before launch and `Connected` (or `Error`) after.
-pub fn spawn(app: &AppHandle, tunnel_id: &str, api_key: &str, port: u16) -> Result<(), String> {
-    set_status(app, TunnelStatus::Connecting);
-    let child = Command::new(sidecar_path())
-        .args(build_args(tunnel_id, port))
-        .env("TUNNEL_CLIENT_API_KEY", api_key)
+fn build_get_args(tunnel_id: &str) -> Vec<String> {
+    vec![
+        "admin".into(),
+        "--json".into(),
+        "tunnels".into(),
+        "get".into(),
+        tunnel_id.into(),
+    ]
+}
+
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn parse_tunnel_record(stdout: &str) -> Result<TunnelRecord, String> {
+    serde_json::from_str(stdout.trim()).map_err(|e| format!("invalid tunnel-client JSON: {e}"))
+}
+
+fn output_error(action: &str, output: &Output) -> String {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let detail = if !stdout.is_empty() { stdout } else { stderr };
+    if detail.is_empty() {
+        format!("tunnel-client {action} failed with {}", output.status)
+    } else {
+        format!("tunnel-client {action} failed: {detail}")
+    }
+}
+
+pub fn create_tunnel(
+    admin_key: &str,
+    name: &str,
+    organization_id: Option<&str>,
+    workspace_id: Option<&str>,
+) -> Result<TunnelRecord, String> {
+    if non_blank(organization_id).is_none() && non_blank(workspace_id).is_none() {
+        return Err("an Organization ID or Workspace ID is required to create a tunnel".into());
+    }
+    let output = Command::new(sidecar_path())
+        .args(build_create_args(name, organization_id, workspace_id))
+        .env("OPENAI_ADMIN_KEY", admin_key)
         .stdin(Stdio::null())
-        // Piped-but-never-drained streams deadlock once the pipe buffer
-        // fills; the sidecar logs are not consumed, so discard them.
+        .output()
+        .map_err(|e| format!("failed to launch tunnel-client admin create: {e}"))?;
+    if !output.status.success() {
+        return Err(output_error("admin create", &output));
+    }
+    parse_tunnel_record(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn get_tunnel(runtime_key: &str, tunnel_id: &str) -> Result<TunnelRecord, String> {
+    let output = Command::new(sidecar_path())
+        .args(build_get_args(tunnel_id))
+        .env("CONTROL_PLANE_API_KEY", runtime_key)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("failed to launch tunnel-client admin get: {e}"))?;
+    if !output.status.success() {
+        return Err(output_error("admin get", &output));
+    }
+    parse_tunnel_record(&String::from_utf8_lossy(&output.stdout))
+}
+
+pub fn spawn_runtime(
+    app: &AppHandle,
+    tunnel_id: &str,
+    runtime_key: &str,
+    port: u16,
+    health_url_file: &Path,
+) -> Result<(), String> {
+    let handle = app.state::<TunnelHandle>();
+    handle.kill();
+    if let Some(parent) = health_url_file.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_file(health_url_file);
+    let child = Command::new(sidecar_path())
+        .args(build_runtime_args(tunnel_id, port, health_url_file))
+        .env("CONTROL_PLANE_API_KEY", runtime_key)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|e| {
-            let msg = format!("failed to spawn tunnel-client: {e}");
-            set_status(app, TunnelStatus::Error(msg.clone()));
-            msg
-        })?;
-    let handle = app.state::<TunnelHandle>();
+        .map_err(|e| format!("failed to spawn tunnel-client runtime: {e}"))?;
     *handle.child.lock().unwrap() = Some(child);
-    // See module docs: no health verification yet.
-    set_status(app, TunnelStatus::Connected);
     Ok(())
 }
 
-/// Kills the sidecar if running (idempotent) and marks the status `Stopped`.
 pub fn stop(app: &AppHandle) {
     app.state::<TunnelHandle>().kill();
-    set_status(app, TunnelStatus::Stopped);
 }
 
 impl TunnelHandle {
-    /// Terminates the tracked child, if any. Safe to call repeatedly.
     pub fn kill(&self) {
         if let Some(mut child) = self.child.lock().unwrap().take() {
             let _ = child.kill();
             let _ = child.wait();
+        }
+    }
+
+    pub fn is_running(&self) -> bool {
+        let mut guard = self.child.lock().unwrap();
+        let Some(child) = guard.as_mut() else {
+            return false;
+        };
+        match child.try_wait() {
+            Ok(None) => true,
+            Ok(Some(_)) | Err(_) => {
+                guard.take();
+                false
+            }
         }
     }
 }
@@ -123,27 +200,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn args_target_local_mcp_server_with_env_key_reference() {
-        let args = build_args("t-123", 8123);
+    fn runtime_args_target_local_mcp_and_emit_health_url_without_secret() {
+        let health_file = std::path::Path::new(r"C:\\temp\\health.url");
+        let args = build_runtime_args("tunnel_123", 8123, health_file);
         assert_eq!(args[0], "run");
-        assert!(args.contains(&"--control-plane.tunnel-id=t-123".to_string()));
-        assert!(args.contains(&"--control-plane.api-key=env:TUNNEL_CLIENT_API_KEY".to_string()));
+        assert!(args.contains(&"--control-plane.tunnel-id=tunnel_123".to_string()));
+        assert!(args.contains(&"--control-plane.api-key=env:CONTROL_PLANE_API_KEY".to_string()));
+        assert!(args.contains(&"--health.listen-addr=127.0.0.1:0".to_string()));
+        assert!(args.iter().any(|a| a.starts_with("--health.url-file=")));
         assert!(
             args.contains(&"--mcp.server-url=url=http://127.0.0.1:8123/mcp".to_string()),
             "args were {args:?}"
         );
+        assert!(!args.join(" ").contains("runtime-secret"));
     }
 
     #[test]
-    fn status_serializes_lowercase() {
-        assert_eq!(
-            serde_json::to_string(&TunnelStatus::Stopped).unwrap(),
-            "\"stopped\""
+    fn create_args_include_scope_but_not_admin_secret() {
+        let args = build_create_args(
+            "My MCP",
+            Some("org_123"),
+            Some("ws_123"),
         );
-        assert_eq!(
-            serde_json::to_string(&TunnelStatus::Error("boom".into())).unwrap(),
-            "{\"error\":\"boom\"}"
-        );
+        assert_eq!(args[0], "admin");
+        assert_eq!(args[1], "--json");
+        assert_eq!(args[2], "tunnels");
+        assert_eq!(args[3], "create");
+        assert!(args.contains(&"--name=My MCP".to_string()));
+        assert!(args.contains(&"--organization-id=org_123".to_string()));
+        assert!(args.contains(&"--workspace-id=ws_123".to_string()));
+        assert!(!args.join(" ").contains("admin-secret"));
+    }
+
+    #[test]
+    fn tunnel_record_parses_json_create_output() {
+        let record = parse_tunnel_record(
+            r#"{"id":"tunnel_123","name":"My MCP","description":"Local Workspace MCP Manager","organization_ids":["org_123"],"workspace_ids":["ws_123"]}"#,
+        )
+        .unwrap();
+        assert_eq!(record.id, "tunnel_123");
+        assert_eq!(record.name, "My MCP");
     }
 
     /// Windows-only: the long-running stub is a PowerShell sleeper and the
@@ -161,7 +257,6 @@ mod tests {
         let pid = child.id();
         let handle = TunnelHandle {
             child: Mutex::new(Some(child)),
-            status: Mutex::new(TunnelStatus::Connecting),
         };
         assert!(is_alive(pid));
         handle.kill();

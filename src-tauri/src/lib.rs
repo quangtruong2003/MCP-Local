@@ -1,4 +1,6 @@
 mod commands;
+pub mod connection;
+pub mod secret_store;
 pub mod server;
 pub mod settings;
 pub mod tunnel;
@@ -23,22 +25,37 @@ pub fn run() {
             );
             let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
             app.manage(AppState { core, port });
-            // Must be managed before any tunnel::spawn/stop/status access
-            // (app.state::<TunnelHandle>() panics when unmanaged).
             app.manage(tunnel::TunnelHandle::default());
+            app.manage(connection::ConnectionManager::new(port));
             println!("MCP server: http://127.0.0.1:{port}/mcp");
-            // Restore persisted tunnel settings and auto-start the sidecar
-            // if one was configured. Spawn failures are surfaced as a
-            // tunnel-status Error event (inside spawn) rather than
-            // blocking startup.
-            let settings = settings::load(&dir).unwrap_or_default();
-            if !settings.tunnel_id.is_empty() {
-                let _ = tunnel::spawn(
-                    app.handle(),
-                    &settings.tunnel_id,
-                    &settings.tunnel_api_key,
-                    port,
-                );
+
+            // One-time migration from the MVP plaintext tunnel_api_key. Only
+            // rewrite settings.json after the OS credential write succeeds.
+            let loaded = settings::load(&dir).unwrap_or_else(|e| {
+                eprintln!("settings load failed: {e}");
+                settings::LoadedSettings {
+                    settings: settings::ConnectionSettings::default(),
+                    legacy_runtime_key: None,
+                }
+            });
+            if let Some(legacy_key) = loaded.legacy_runtime_key.as_deref() {
+                match secret_store::SecretStore::system().save(Some(legacy_key), None) {
+                    Ok(()) => {
+                        if let Err(e) = settings::save(&dir, &loaded.settings) {
+                            eprintln!("failed to remove legacy plaintext key: {e}");
+                        }
+                    }
+                    Err(e) => eprintln!("legacy key migration failed: {e}"),
+                }
+            }
+
+            if loaded.settings.auto_start {
+                let handle = app.handle().clone();
+                let app_dir = dir.clone();
+                tauri::async_runtime::spawn(async move {
+                    let manager = handle.state::<connection::ConnectionManager>();
+                    let _ = manager.start(&handle, &app_dir, port).await;
+                });
             }
             Ok(())
         })
@@ -50,10 +67,12 @@ pub fn run() {
             commands::set_paused,
             commands::recent_audit,
             commands::server_status,
-            commands::configure_tunnel,
-            commands::stop_tunnel,
-            commands::tunnel_status,
-            commands::tunnel_config,
+            commands::connection_status,
+            commands::start_connection,
+            commands::stop_connection,
+            commands::save_connection_settings,
+            commands::connection_settings_summary,
+            commands::regenerate_tunnel,
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")

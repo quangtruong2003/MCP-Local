@@ -7,7 +7,11 @@
 use serde::Serialize;
 use tauri::{Manager, State};
 
-use crate::{settings, tunnel, AppState};
+use crate::{
+    connection::{ConnectionManager, ConnectionSnapshot},
+    secret_store::{SecretStore, SecretSummary},
+    settings, AppState,
+};
 use lc_core::{audit, error::CoreError, models::AuditEvent, workspace_repo};
 
 fn err_string(e: CoreError) -> String {
@@ -138,51 +142,97 @@ pub fn server_status(state: State<'_, AppState>) -> Status {
     }
 }
 
-/// Persists tunnel credentials and (re)starts the sidecar.
+#[derive(Debug, Serialize)]
+pub struct ConnectionSettingsSummary {
+    pub tunnel_id: String,
+    pub organization_id: Option<String>,
+    pub workspace_id: Option<String>,
+    pub tunnel_name: String,
+    pub auto_start: bool,
+    pub has_runtime_key: bool,
+    pub has_admin_key: bool,
+}
+
+fn settings_summary(
+    settings: settings::ConnectionSettings,
+    secret_summary: SecretSummary,
+) -> ConnectionSettingsSummary {
+    ConnectionSettingsSummary {
+        tunnel_id: settings.tunnel_id,
+        organization_id: settings.organization_id,
+        workspace_id: settings.workspace_id,
+        tunnel_name: settings.tunnel_name,
+        auto_start: settings.auto_start,
+        has_runtime_key: secret_summary.has_runtime_key,
+        has_admin_key: secret_summary.has_admin_key,
+    }
+}
+
 #[tauri::command]
-pub fn configure_tunnel(
+pub fn connection_status(manager: State<'_, ConnectionManager>) -> ConnectionSnapshot {
+    manager.snapshot()
+}
+
+#[tauri::command]
+pub async fn start_connection(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
-    tunnel_id: String,
-    api_key: String,
-) -> Result<(), String> {
-    // Always stop any running sidecar first — even when the new config is
-    // empty (disabling the tunnel must not leave a stale process bridged).
-    tunnel::stop(&app);
+    manager: State<'_, ConnectionManager>,
+) -> Result<ConnectionSnapshot, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let saved = settings::Settings {
-        tunnel_id,
-        tunnel_api_key: api_key,
-    };
-    settings::save(&dir, &saved)?;
-    if saved.tunnel_id.is_empty() {
-        return Ok(());
-    }
-    tunnel::spawn(&app, &saved.tunnel_id, &saved.tunnel_api_key, state.port)
+    manager.start(&app, &dir, state.port).await
 }
 
-/// Stops the sidecar; persisted settings are left untouched so the user can
-/// re-enable later without re-entering credentials.
 #[tauri::command]
-pub fn stop_tunnel(app: tauri::AppHandle) {
-    tunnel::stop(&app);
+pub async fn stop_connection(
+    app: tauri::AppHandle,
+    manager: State<'_, ConnectionManager>,
+) -> Result<ConnectionSnapshot, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    manager.stop(&app, &dir).await
 }
 
-/// Current sidecar status as serialized `TunnelStatus` JSON.
 #[tauri::command]
-pub fn tunnel_status(app: tauri::AppHandle) -> String {
-    let handle = app.state::<crate::tunnel::TunnelHandle>();
-    let status = handle.status.lock().unwrap().clone();
-    serde_json::to_string(&status).unwrap_or_else(|_| "\"stopped\"".into())
+pub async fn regenerate_tunnel(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    manager: State<'_, ConnectionManager>,
+) -> Result<ConnectionSnapshot, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    manager.regenerate(&app, &dir, state.port).await
 }
 
-/// Configured tunnel id for display (`None` when unset or unreadable).
-/// Deliberately returns ONLY the id — the API key has no read-back path.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
-pub fn tunnel_config(app: tauri::AppHandle) -> Option<String> {
-    let dir = app.path().app_data_dir().ok()?;
-    match settings::load(&dir) {
-        Ok(s) if !s.tunnel_id.is_empty() => Some(s.tunnel_id),
-        _ => None,
-    }
+pub fn save_connection_settings(
+    app: tauri::AppHandle,
+    organization_id: Option<String>,
+    workspace_id: Option<String>,
+    tunnel_name: String,
+    auto_start: bool,
+    runtime_api_key: Option<String>,
+    admin_api_key: Option<String>,
+) -> Result<ConnectionSettingsSummary, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let mut loaded = settings::load(&dir)?;
+    loaded.settings.organization_id = organization_id;
+    loaded.settings.workspace_id = workspace_id;
+    loaded.settings.tunnel_name = tunnel_name;
+    loaded.settings.auto_start = auto_start;
+    loaded.settings.normalize();
+
+    let store = SecretStore::system();
+    store.save(runtime_api_key.as_deref(), admin_api_key.as_deref())?;
+    settings::save(&dir, &loaded.settings)?;
+    Ok(settings_summary(loaded.settings, store.summary()?))
+}
+
+#[tauri::command]
+pub fn connection_settings_summary(
+    app: tauri::AppHandle,
+) -> Result<ConnectionSettingsSummary, String> {
+    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let loaded = settings::load(&dir)?;
+    let secret_summary = SecretStore::system().summary()?;
+    Ok(settings_summary(loaded.settings, secret_summary))
 }

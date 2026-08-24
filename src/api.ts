@@ -28,44 +28,49 @@ export interface ServerStatus {
   paused: boolean;
 }
 
-/** Normalized tunnel status for display. */
-export interface TunnelDisplay {
-  state: "stopped" | "connecting" | "connected" | "error";
-  /** Present only when state is "error". */
-  detail?: string;
+export type ConnectionState =
+  | "stopped"
+  | "starting_server"
+  | "validating_tunnel"
+  | "provisioning_tunnel"
+  | "connecting"
+  | "checking_health"
+  | "ready"
+  | "stopping"
+  | "needs_setup"
+  | "error";
+
+export interface ConnectionSnapshot {
+  state: ConnectionState;
+  tunnel_id?: string | null;
+  local_mcp_url: string;
+  health_url?: string | null;
+  started_at?: string | null;
+  ready_at?: string | null;
+  message?: string | null;
+  error_code?: string | null;
+  error_detail?: string | null;
 }
 
-/**
- * Narrow a tunnel-status payload to a display shape. The backend serializes
- * its `TunnelStatus` enum as lowercase strings ("stopped" | "connecting" |
- * "connected") or an object {"error": "<detail>"}.
- */
-export function tunnelStateFromPayload(payload: unknown): TunnelDisplay {
-  if (typeof payload === "string") {
-    if (payload === "connecting") return { state: "connecting" };
-    if (payload === "connected") return { state: "connected" };
-    return { state: "stopped" };
-  }
-  if (payload && typeof payload === "object" && "error" in payload) {
-    const raw = (payload as { error?: unknown }).error;
-    return { state: "error", detail: typeof raw === "string" ? raw : String(raw) };
-  }
-  return { state: "stopped" };
+export interface ConnectionSettingsSummary {
+  tunnel_id: string;
+  organization_id?: string | null;
+  workspace_id?: string | null;
+  tunnel_name: string;
+  auto_start: boolean;
+  has_runtime_key: boolean;
+  has_admin_key: boolean;
 }
 
-/** Same as {@link tunnelStateFromPayload} for the raw JSON returned by `tunnel_status`. */
-export function tunnelStateFromJson(raw: string): TunnelDisplay {
-  try {
-    return tunnelStateFromPayload(JSON.parse(raw));
-  } catch {
-    return tunnelStateFromPayload(raw);
-  }
+export interface SaveConnectionSettingsInput {
+  organizationId?: string | null;
+  workspaceId?: string | null;
+  tunnelName: string;
+  autoStart: boolean;
+  runtimeApiKey?: string | null;
+  adminApiKey?: string | null;
 }
 
-/**
- * Commands reject with a string containing CoreError JSON
- * ({code, message, detail}); extract a human-readable message.
- */
 export function parseErrorMessage(err: unknown): string {
   if (typeof err === "string") {
     try {
@@ -90,10 +95,12 @@ export const api = {
   setPaused: (paused: boolean) => invoke<void>("set_paused", { paused }),
   recentAudit: () => invoke<AuditEvent[]>("recent_audit"),
   serverStatus: () => invoke<ServerStatus>("server_status"),
-  configureTunnel: (tunnelId: string, apiKey: string) =>
-    invoke<void>("configure_tunnel", { tunnelId, apiKey }),
-  stopTunnel: () => invoke<void>("stop_tunnel"),
-  tunnelStatus: () => invoke<string>("tunnel_status"),
-  /** Configured tunnel id for display; the API key has no read-back path. */
-  tunnelConfig: () => invoke<string | null>("tunnel_config"),
+  connectionStatus: () => invoke<ConnectionSnapshot>("connection_status"),
+  startConnection: () => invoke<ConnectionSnapshot>("start_connection"),
+  stopConnection: () => invoke<ConnectionSnapshot>("stop_connection"),
+  regenerateTunnel: () => invoke<ConnectionSnapshot>("regenerate_tunnel"),
+  connectionSettingsSummary: () =>
+    invoke<ConnectionSettingsSummary>("connection_settings_summary"),
+  saveConnectionSettings: (input: SaveConnectionSettingsInput) =>
+    invoke<ConnectionSettingsSummary>("save_connection_settings", input),
 };

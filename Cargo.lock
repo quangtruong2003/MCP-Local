@@ -2039,6 +2039,7 @@ dependencies = [
  "axum",
  "core",
  "dunce",
+ "reqwest",
  "rmcp",
  "schemars 1.2.2",
  "serde",
@@ -2047,6 +2048,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tempfile",
+ "time",
  "tokio",
 ]
 
