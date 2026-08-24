@@ -1,17 +1,26 @@
-export type AppPage = "dashboard" | "workspaces" | "activity" | "security" | "settings";
+import {
+  LayoutDashboard,
+  FolderOpen,
+  ScrollText,
+  ShieldCheck,
+  Settings as SettingsIcon,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import StatusBadge from "./StatusBadge";
+import type { ViewId } from "../types";
 
 interface Props {
-  page: AppPage;
-  onNavigate: (page: AppPage) => void;
+  page: ViewId;
+  onNavigate: (page: ViewId) => void;
   ready: boolean;
 }
 
-const items: Array<{ id: AppPage; label: string; glyph: string }> = [
-  { id: "dashboard", label: "Dashboard", glyph: "⌂" },
-  { id: "workspaces", label: "Workspaces", glyph: "▱" },
-  { id: "activity", label: "Activity", glyph: "≋" },
-  { id: "security", label: "Security", glyph: "◇" },
-  { id: "settings", label: "Settings", glyph: "⚙" },
+const ITEMS: Array<{ id: ViewId; label: string; icon: LucideIcon }> = [
+  { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
+  { id: "workspaces", label: "Workspaces", icon: FolderOpen },
+  { id: "activity", label: "Activity", icon: ScrollText },
+  { id: "security", label: "Security", icon: ShieldCheck },
+  { id: "settings", label: "Settings", icon: SettingsIcon },
 ];
 
 export default function Sidebar({ page, onNavigate, ready }: Props) {
@@ -26,21 +35,24 @@ export default function Sidebar({ page, onNavigate, ready }: Props) {
       </div>
 
       <nav className="nav-list" aria-label="Primary navigation">
-        {items.map((item) => (
+        {ITEMS.map((item) => (
           <button
             key={item.id}
             className={`nav-item ${page === item.id ? "active" : ""}`}
             onClick={() => onNavigate(item.id)}
+            aria-current={page === item.id ? "page" : undefined}
           >
-            <span className="nav-glyph" aria-hidden="true">{item.glyph}</span>
+            <item.icon aria-hidden="true" />
             <span>{item.label}</span>
           </button>
         ))}
       </nav>
 
       <div className="sidebar-footer">
-        <span className={`status-dot ${ready ? "ready" : "offline"}`} />
-        <span>{ready ? "Tunnel ready" : "Tunnel offline"}</span>
+        <StatusBadge
+          tone={ready ? "ready" : "offline"}
+          text={ready ? "Tunnel ready" : "Tunnel offline"}
+        />
       </div>
     </aside>
   );

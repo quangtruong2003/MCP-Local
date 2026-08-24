@@ -1,9 +1,10 @@
 import type { ReactNode } from "react";
-import Sidebar, { AppPage } from "./Sidebar";
+import Sidebar from "./Sidebar";
+import type { ViewId } from "../types";
 
 interface Props {
-  page: AppPage;
-  onNavigate: (page: AppPage) => void;
+  page: ViewId;
+  onNavigate: (page: ViewId) => void;
   ready: boolean;
   title: string;
   subtitle: string;
@@ -20,9 +21,8 @@ export default function AppShell({ page, onNavigate, ready, title, subtitle, chi
             <h1>{title}</h1>
             <p>{subtitle}</p>
           </div>
-          <div className={`connection-chip ${ready ? "ready" : "offline"}`}>
-            <span className={`status-dot ${ready ? "ready" : "offline"}`} />
-            {ready ? "Ready" : "Offline"}
+          <div className="connection-chip">
+            {ready ? "Connected" : "Offline"}
           </div>
         </header>
         <div className="page-content">{children}</div>
