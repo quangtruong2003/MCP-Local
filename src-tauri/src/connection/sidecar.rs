@@ -57,13 +57,24 @@ pub enum SidecarEvent {
 
 /// Parses one NDJSON line. Returns `None` for malformed JSON or unknown event
 /// types so the reader thread can route them to diagnostics without panicking.
-pub fn parse_event(line: &str) -> Option<SidecarEvent> {
+///
+/// Defense in depth, enforced here at the parse boundary:
+/// - `auth_required` URLs not starting with the Tailscale login prefix are
+///   dropped (routed to diagnostics by the caller like any malformed line);
+/// - error messages pass through [`redact`] so the capability token can never
+///   reach UI-visible state via a sidecar echo.
+pub fn parse_event(line: &str, token: &str) -> Option<SidecarEvent> {
     let value: serde_json::Value = serde_json::from_str(line).ok()?;
     match value.get("type")?.as_str()? {
         "starting" => Some(SidecarEvent::Starting),
-        "auth_required" => Some(SidecarEvent::AuthRequired {
-            url: value.get("url")?.as_str()?.to_string(),
-        }),
+        "auth_required" => {
+            let url = value.get("url")?.as_str()?.to_string();
+            if url.starts_with(LOGIN_URL_PREFIX) {
+                Some(SidecarEvent::AuthRequired { url })
+            } else {
+                None
+            }
+        }
         "authenticated" => Some(SidecarEvent::Authenticated),
         "funnel_listening" => Some(SidecarEvent::FunnelListening {
             fqdn: value.get("fqdn")?.as_str()?.to_string(),
@@ -74,11 +85,13 @@ pub fn parse_event(line: &str) -> Option<SidecarEvent> {
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
-            message: value
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
+            message: redact(
+                value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default(),
+                token,
+            ),
         }),
         "stopped" => Some(SidecarEvent::Stopped),
         _ => None,
@@ -276,7 +289,7 @@ pub fn spawn_sidecar(
             let reader = BufReader::new(stdout);
             for line in reader.lines() {
                 let Ok(line) = line else { break };
-                match parse_event(&line) {
+                match parse_event(&line, &token) {
                     Some(event) => {
                         if tx_lines.send(event).is_err() {
                             break; // receiver dropped; stop reading
@@ -334,7 +347,7 @@ mod tests {
     fn parses_auth_required_event_with_url() {
         let line = r#"{"type":"auth_required","url":"https://login.tailscale.com/a/123"}"#;
         assert_eq!(
-            parse_event(line),
+            parse_event(line, "test-token"),
             Some(SidecarEvent::AuthRequired {
                 url: "https://login.tailscale.com/a/123".into()
             })
@@ -342,9 +355,43 @@ mod tests {
     }
 
     #[test]
+    fn auth_required_non_login_url_is_dropped() {
+        for hostile in [
+            r#"{"type":"auth_required","url":"https://evil.example/a/1"}"#,
+            r#"{"type":"auth_required","url":"http://login.tailscale.com/a/1"}"#,
+            "not json",
+        ] {
+            assert_eq!(
+                parse_event(hostile, "test-token"),
+                None,
+                "line should be dropped: {hostile}"
+            );
+        }
+    }
+
+    #[test]
+    fn error_event_message_is_redacted_of_token() {
+        // Simulates the reader-thread path: a sidecar error echoing the
+        // capability token must never carry it into UI-visible state.
+        let token = "super-secret-token";
+        let line =
+            format!(r#"{{"type":"error","code":"X","message":"failed with {token} in env"}}"#);
+        let event = parse_event(&line, "super-secret-token").unwrap();
+        match event {
+            SidecarEvent::Error { message, .. } => {
+                assert!(!message.contains(token));
+            }
+            other => panic!("expected Error event, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parses_funnel_listening_event_with_fqdn() {
         assert_eq!(
-            parse_event(r#"{"type":"funnel_listening","fqdn":"foo.tailnet.ts.net"}"#),
+            parse_event(
+                r#"{"type":"funnel_listening","fqdn":"foo.tailnet.ts.net"}"#,
+                "test-token"
+            ),
             Some(SidecarEvent::FunnelListening {
                 fqdn: "foo.tailnet.ts.net".into()
             })
@@ -353,23 +400,22 @@ mod tests {
 
     #[test]
     fn unknown_event_type_returns_none_without_panicking() {
-        assert_eq!(parse_event(r#"{"type":"weird","x":1}"#), None);
+        assert_eq!(parse_event(r#"{"type":"weird","x":1}"#, "test-token"), None);
         // Missing "type" entirely is equally tolerated.
-        assert_eq!(parse_event(r#"{"x":1}"#), None);
+        assert_eq!(parse_event(r#"{"x":1}"#, "test-token"), None);
     }
 
     #[test]
     fn garbage_line_returns_none() {
-        assert_eq!(parse_event("not json"), None);
-        assert_eq!(parse_event(""), None);
+        assert_eq!(parse_event("not json", "test-token"), None);
+        assert_eq!(parse_event("", "test-token"), None);
     }
 
     #[test]
     fn redaction_scrubs_token_and_login_url() {
         let token = "super-secret-capability-token";
-        let input = format!(
-            "auth failed for {token} at https://login.tailscale.com/a/abc123 trailing"
-        );
+        let input =
+            format!("auth failed for {token} at https://login.tailscale.com/a/abc123 trailing");
         let out = redact(&input, token);
         assert!(out.contains("[REDACTED]"));
         assert!(!out.contains(token));
