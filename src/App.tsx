@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { CheckCircle2, Info, XOctagon } from "lucide-react";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
+import { api, parseErrorMessage } from "./api";
+import type { AuditEvent, ServerStatus } from "./api";
 import { VIEW_META } from "./types";
-import type { Toast, ToastTone, ViewId } from "./types";
+import type { ConnectionStatus, Toast, ToastTone, ViewId, Workspace } from "./types";
 
 const TOAST_TTL_MS = 5000;
 const TOAST_ICONS: Record<ToastTone, typeof Info> = {
@@ -18,6 +21,10 @@ export default function App() {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [onboardingVisible, setOnboardingVisible] = useState(true);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
+  const [connection, setConnection] = useState<ConnectionStatus | null>(null);
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [server, setServer] = useState<ServerStatus | null>(null);
   const nextToastId = useRef(1);
 
   const pushToast = useCallback((tone: ToastTone, message: string) => {
@@ -39,22 +46,56 @@ export default function App() {
     [pushToast],
   );
 
-  // Placeholder for Task 15: real initial data load + connection-status subscription.
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+
+    void (async () => {
+      try {
+        const status = await api.connectionStatus();
+        if (disposed) return;
+        setConnection(status);
+      } catch (err) {
+        reportError(parseErrorMessage(err));
+      }
+
+      try {
+        unlisten = await listen<ConnectionStatus>("connection-status", (e) => {
+          setConnection(e.payload);
+        });
+      } catch (err) {
+        reportError(parseErrorMessage(err));
+      }
+    })();
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [reportError]);
+
+  // Initial data load: workspaces, audit trail and server state.
   useEffect(() => {
     void (async () => {
       try {
-        // TODO(Task 15): api.connectionStatus(), api.serverStatus(), workspaces, audit.
-        await Promise.resolve();
+        const [wsList, events, status] = await Promise.all([
+          api.listWorkspaces(),
+          api.recentAudit(),
+          api.serverStatus(),
+        ]);
+        setWorkspaces(wsList);
+        setAuditEvents(events);
+        setServer(status);
       } catch (err) {
-        reportError(err instanceof Error ? err.message : String(err));
+        reportError(parseErrorMessage(err));
       } finally {
         setInitialLoadDone(true);
       }
     })();
   }, [reportError]);
 
-  // Placeholder connection readiness until Task 15 wires the live subscription.
-  const connectionReady = false;
+  // Ready only when the funnel connection is fully online.
+  const connectionReady = connection?.state.state === "online";
 
   const meta = VIEW_META[page];
 
