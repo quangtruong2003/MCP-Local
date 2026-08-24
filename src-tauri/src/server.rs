@@ -9,7 +9,10 @@
 use axum::Router;
 use lc_core::{error::CoreError, CoreServices};
 use rmcp::{
-    handler::server::wrapper::Parameters,
+    handler::server::{
+        common::schema_for_output,
+        wrapper::Parameters,
+    },
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
@@ -18,6 +21,16 @@ use rmcp::{
     ServerHandler,
 };
 use std::sync::Arc;
+
+/// Builds a success result carrying both the pretty-printed text (for
+/// clients that ignore schemas) and the typed `structuredContent` payload
+/// (for clients that validate against the tool's outputSchema).
+fn ok_structured<T: serde::Serialize>(v: &T) -> CallToolResult {
+    let json = serde_json::to_value(v).unwrap_or(serde_json::Value::Null);
+    let mut r = ok_json(&json);
+    r.structured_content = Some(json);
+    r
+}
 
 /// Serializes a CoreError as an `isError` tool result carrying the stable
 /// error code.
@@ -128,18 +141,20 @@ impl WorkspaceServer {
 
     #[tool(
         description = "List the approved workspaces. Call this first to get valid workspace_id values for every other tool.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<Vec<lc_core::models::Workspace>>()
     )]
     fn list_workspaces(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         match lc_core::workspace_repo::list_workspaces(&self.core.db) {
-            Ok(ws) => ok_json(&ws),
+            Ok(ws) => ok_structured(&ws),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "List entries of a directory inside an approved workspace",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<lc_core::ops::list_dir::ListDirResult>()
     )]
     fn list_directory(&self, Parameters(a): Parameters<ListDirArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -149,14 +164,15 @@ impl WorkspaceServer {
             false,
             |_, root| lc_core::ops::list_dir::list_dir(&self.core, root, &a.path, a.recursive),
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "Find files by glob pattern inside an approved workspace",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<lc_core::ops::find_files::FindResult>()
     )]
     fn find_files(&self, Parameters(a): Parameters<FindArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -166,14 +182,15 @@ impl WorkspaceServer {
             false,
             |_, root| lc_core::ops::find_files::find_files(&self.core, root, &a.pattern),
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "Search text (literal or regex) across files in an approved workspace",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<lc_core::ops::search_text::SearchResult>()
     )]
     fn search_text(&self, Parameters(a): Parameters<SearchArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -193,14 +210,15 @@ impl WorkspaceServer {
                 )
             },
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "Read a file (with line offset/limit). Returns sha256 revision for patching.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<lc_core::ops::read_file::ReadResult>()
     )]
     fn read_file(&self, Parameters(a): Parameters<ReadArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -218,14 +236,15 @@ impl WorkspaceServer {
                 )
             },
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "Read up to 8 files at once; per-file results",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<Vec<lc_core::ops::read_file::FileResult>>()
     )]
     fn read_files(&self, Parameters(a): Parameters<ReadManyArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -235,14 +254,15 @@ impl WorkspaceServer {
             false,
             |_, root| lc_core::ops::read_file::read_files(&self.core, root, &a.paths),
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "Create a new file (fails if it exists)",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<lc_core::ops::write_file::CreateResult>()
     )]
     fn create_file(&self, Parameters(a): Parameters<CreateArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -252,14 +272,15 @@ impl WorkspaceServer {
             true,
             |_, root| lc_core::ops::write_file::create_file(&self.core, root, &a.path, &a.content),
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }
 
     #[tool(
         description = "Replace one unique occurrence of old_string in a file. Requires base_revision from a prior read.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<lc_core::ops::write_file::PatchResult>()
     )]
     fn apply_patch(&self, Parameters(a): Parameters<PatchArgs>) -> CallToolResult {
         match lc_core::pipeline::run_tool_audited(
@@ -280,7 +301,7 @@ impl WorkspaceServer {
                 )
             },
         ) {
-            Ok(r) => ok_json(&r),
+            Ok(r) => ok_structured(&r),
             Err(e) => err_result(&e),
         }
     }

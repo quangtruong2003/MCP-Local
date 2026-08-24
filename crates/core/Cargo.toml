@@ -3,9 +3,16 @@ name = "core"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+# The crate is named `core`, which shadows `::core` inside rustdoc's doctest
+# harness (breaking macro-generated paths like `::core::concat!` from the
+# schemars derive). The crate has no doctests, so skip the harness entirely.
+doctest = false
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+schemars = "1"
 thiserror.workspace = true
 uuid.workspace = true
 time.workspace = true

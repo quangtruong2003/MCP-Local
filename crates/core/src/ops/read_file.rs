@@ -3,7 +3,7 @@ use crate::error::{CoreError, ErrorCode};
 use serde::Serialize;
 use std::path::Path;
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, schemars::JsonSchema)]
 pub struct ReadResult {
     pub content: String,
     pub revision: String,
@@ -11,7 +11,7 @@ pub struct ReadResult {
     pub truncated: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FileResult {
     pub path: String,
     /// Ok on success; Err carries a JSON string of `{code, message}`.

@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct TextMatch {
     pub path: String,
     pub line_no: u64,
@@ -12,7 +12,7 @@ pub struct TextMatch {
     pub col: u64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct SearchResult {
     pub matches: Vec<TextMatch>,
     pub truncated: bool,

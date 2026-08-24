@@ -4,7 +4,7 @@ use globset::{GlobBuilder, GlobSetBuilder};
 use serde::Serialize;
 use std::path::Path;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct FindResult {
     pub paths: Vec<String>,
     pub truncated: bool,

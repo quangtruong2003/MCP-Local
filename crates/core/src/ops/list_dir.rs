@@ -3,7 +3,7 @@ use crate::error::{CoreError, ErrorCode};
 use serde::Serialize;
 use std::path::Path;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct DirEntry {
     pub name: String,
     pub kind: &'static str,
@@ -11,7 +11,7 @@ pub struct DirEntry {
     pub modified: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct ListDirResult {
     pub entries: Vec<DirEntry>,
     pub truncated: bool,

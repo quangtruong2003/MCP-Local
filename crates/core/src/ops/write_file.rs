@@ -28,7 +28,7 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct CreateResult {
     pub path: String,
     pub revision: String,
@@ -74,7 +74,7 @@ pub struct PatchArgs {
     pub base_revision: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct PatchResult {
     pub path: String,
     pub revision: String,

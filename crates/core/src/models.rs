@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 /// A registered workspace directory with its permission toggles.
 /// Timestamps are ISO 8601 UTC strings.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Workspace {
     pub id: String,
     pub name: String,
