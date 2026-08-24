@@ -1,5 +1,7 @@
 mod commands;
 pub mod connection;
+mod execution;
+mod process_job;
 pub mod secret_store;
 pub mod server;
 pub mod settings;

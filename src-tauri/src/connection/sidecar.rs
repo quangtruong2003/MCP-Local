@@ -7,7 +7,7 @@ use std::process::Stdio;
 
 use tokio::sync::mpsc;
 
-use super::windows_job::JobHandle;
+use crate::process_job::JobHandle;
 
 /// Target filename of the Go funnel sidecar, mirroring the tunnel-client
 /// dev/bundled fallback convention in `tunnel.rs`.

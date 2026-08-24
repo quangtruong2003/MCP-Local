@@ -1,14 +1,16 @@
-//! Windows Job Object wrapper enforcing KILL_ON_JOB_CLOSE so sidecar child
-//! processes never outlive the manager, even on abnormal exit paths.
-
-#![cfg(windows)]
+//! Shared Windows Job Object wrapper enforcing KILL_ON_JOB_CLOSE so spawned
+//! child processes never outlive their owner, even on abnormal exit paths.
+//!
+//! Used by both the Tailscale funnel sidecar lifecycle
+//! (`connection::sidecar`) and the bounded command runner (`execution::runner`)
+//! so every child tree dies with its owner.
 
 use std::os::windows::io::AsRawHandle;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
-    AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
-    JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
 
@@ -79,23 +81,17 @@ impl Drop for JobHandle {
 // concurrent use of the same handle value.
 unsafe impl Send for JobHandle {}
 
-#[cfg(windows)]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
-    #[cfg(windows)]
+    /// Best-effort liveness probe for a PID: a dead PID fails to open with
+    /// query-limited access.
     fn process_exists(pid: u32) -> bool {
-        use windows::Win32::Foundation::CloseHandle;
-        use windows::Win32::System::Threading::{
-            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-        };
-
         // SAFETY: pid comes from a live Child earlier in the test; opening
         // with query-limited access only and closing immediately after.
-        let opened = unsafe {
-            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
-        };
+        let opened = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
         match opened {
             Ok(h) => {
                 // SAFETY: h is valid from the successful OpenProcess above.
@@ -118,7 +114,10 @@ mod tests {
             .spawn()
             .expect("spawn sleeper");
         let pid = child.id();
-        assert!(process_exists(pid), "sleeper should be running before assign");
+        assert!(
+            process_exists(pid),
+            "sleeper should be running before assign"
+        );
 
         job.assign(&child).expect("assign sleeper to job");
 
