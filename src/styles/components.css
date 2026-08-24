@@ -1027,3 +1027,259 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* ---------- Activity page ---------- */
+
+.activity-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.activity-tabs {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.filter-tab {
+  padding: 5px 11px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--border-strong);
+  background: var(--bg-surface);
+  font-size: var(--text-dense);
+  font-weight: 600;
+  color: var(--text-secondary);
+  transition: background var(--transition-fast), color var(--transition-fast),
+    border-color var(--transition-fast);
+}
+
+.filter-tab:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--bg-subtle);
+}
+
+.filter-tab.selected {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.activity-search {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 220px;
+  max-width: 320px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.activity-search:focus-within {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+}
+
+.activity-search svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--text-faint);
+}
+
+.activity-search input {
+  border: none;
+  background: none;
+  min-height: 32px;
+  padding: 7px 0;
+  flex: 1;
+  min-width: 0;
+}
+
+.activity-search input:focus-visible {
+  outline: none;
+}
+
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.activity-row {
+  display: grid;
+  grid-template-columns: 62px 72px minmax(120px, 1.2fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  text-align: left;
+  font-size: var(--text-dense);
+  transition: background var(--transition-fast), border-color var(--transition-fast);
+}
+
+.activity-row:hover {
+  background: var(--bg-subtle);
+  border-color: var(--border-default);
+}
+
+.activity-time {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.activity-source {
+  font-weight: 600;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.activity-op {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.activity-ws {
+  color: var(--text-faint);
+  font-weight: 400;
+}
+
+.activity-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  color: var(--text-faint);
+}
+
+.decision-badge {
+  justify-self: end;
+  padding: 2px 9px;
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.decision-allow {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.decision-deny {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.decision-error {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+/* ---------- Activity detail dialog ---------- */
+
+.activity-detail-card {
+  width: min(520px, 100%);
+  max-height: min(70vh, 560px);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.activity-detail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.activity-detail-head h2 {
+  font-size: var(--text-section-title);
+  font-weight: 650;
+  text-transform: capitalize;
+}
+
+.activity-detail-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  margin-top: 8px;
+  font-size: var(--text-dense);
+  color: var(--text-secondary);
+}
+
+.activity-detail-meta code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.activity-exec-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 8px;
+  margin: 14px 0 0;
+}
+
+.activity-exec-field dt {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-faint);
+}
+
+.activity-exec-field dd {
+  margin: 2px 0 0;
+  font-size: var(--text-dense);
+  word-break: break-all;
+}
+
+.activity-exec-field dd code {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.activity-detail-subhead {
+  margin-top: 16px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.activity-json {
+  margin: 6px 0 0;
+  padding: 12px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-default);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.activity-no-detail {
+  margin-top: 14px;
+  font-size: var(--text-dense);
+  color: var(--text-secondary);
+}

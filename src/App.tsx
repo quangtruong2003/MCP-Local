@@ -4,6 +4,7 @@ import { CheckCircle2, Info, XOctagon } from "lucide-react";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
+import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
@@ -51,6 +52,16 @@ export default function App() {
     [pushToast],
   );
 
+  // Event-driven audit refresh (plan Task 19 Step 5): called after mutations
+  // and connection events; no polling.
+  const refreshAudit = useCallback(async () => {
+    try {
+      setAuditEvents(await api.recentAudit());
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+    }
+  }, [reportError]);
+
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
@@ -72,6 +83,7 @@ export default function App() {
       try {
         unlisten = await listen<ConnectionStatus>("connection-status", (e) => {
           setConnection(e.payload);
+          void refreshAudit();
         });
       } catch (err) {
         reportError(parseErrorMessage(err));
@@ -82,7 +94,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [reportError]);
+  }, [reportError, refreshAudit]);
 
   // Initial data load: workspaces, audit trail and server state.
   useEffect(() => {
@@ -129,7 +141,10 @@ export default function App() {
         <OnboardingFlow
           connection={connection}
           workspaces={workspaces}
-          onWorkspacesChanged={async () => setWorkspaces(await api.listWorkspaces())}
+          onWorkspacesChanged={async () => {
+            const [wsList] = await Promise.all([api.listWorkspaces(), refreshAudit()]);
+            setWorkspaces(wsList);
+          }}
           onClose={() => setOnboardingVisible(false)}
           onFinish={() => finishOnboarding()}
           reportError={reportError}
@@ -150,7 +165,17 @@ export default function App() {
       ) : page === "workspaces" ? (
         <WorkspacesPage
           workspaces={workspaces}
-          onWorkspacesChanged={async () => setWorkspaces(await api.listWorkspaces())}
+          onWorkspacesChanged={async () => {
+            const [wsList] = await Promise.all([api.listWorkspaces(), refreshAudit()]);
+            setWorkspaces(wsList);
+          }}
+          reportError={reportError}
+        />
+      ) : page === "activity" ? (
+        <ActivityPage
+          auditEvents={auditEvents}
+          workspaces={workspaces}
+          onRefresh={async () => setAuditEvents(await api.recentAudit())}
           reportError={reportError}
         />
       ) : (
