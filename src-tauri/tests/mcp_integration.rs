@@ -284,3 +284,164 @@ async fn unknown_workspace_is_invalid_error_result() {
     assert!(res.is_error.unwrap_or(false));
     assert!(text.contains("WORKSPACE_NOT_FOUND"), "{text}");
 }
+
+/// Scenario B: path traversal escapes are denied at the MCP layer with
+/// PATH_OUTSIDE_WORKSPACE, and the deny row lands in the audit log.
+#[tokio::test]
+async fn path_traversal_denied_over_mcp() {
+    let (port, core, _dir, ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_id, "path": "../../../outside.txt"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false), "traversal must be isError");
+    assert!(text.contains("PATH_OUTSIDE_WORKSPACE"), "{text}");
+    // Post-prelude failures are classified "error" with their code (pause and
+    // capability checks are the "deny" rows) — established pipeline convention.
+    assert_audit_row(&core, "read_file", &ws_id, "error", Some("PATH_OUTSIDE_WORKSPACE"));
+}
+
+/// Scenario C: sensitive files (.env) return SENSITIVE_FILE_BLOCKED.
+#[tokio::test]
+async fn sensitive_file_blocked_over_mcp() {
+    let (port, core, dir, ws_id) = spawn_server().await;
+    std::fs::write(dir.path().join("ws/.env"), "SECRET=1\n").unwrap();
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "path": ".env" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("SENSITIVE_FILE_BLOCKED"), "{text}");
+    // The secret must not leak into the error payload.
+    assert!(!text.contains("SECRET"), "secret leaked: {text}");
+    assert_audit_row(&core, "read_file", &ws_id, "error", Some("SENSITIVE_FILE_BLOCKED"));
+}
+
+/// Scenario E: an external edit between read and patch yields
+/// FILE_CHANGED_SINCE_READ instead of silently overwriting.
+#[tokio::test]
+async fn stale_revision_detected_over_mcp() {
+    let (port, core, dir, ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({ "workspace_id": ws_id, "path": "hello.txt" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let body_text = res.content.first().and_then(|c| c.as_text().map(|t| t.text.to_string())).unwrap_or_default();
+    let rev: String = extract_json(&body_text)["revision"].as_str().unwrap().into();
+
+    // External edit behind ChatGPT's back.
+    std::fs::write(dir.path().join("ws/hello.txt"), "externally edited\n").unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("apply_patch").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_id, "path": "hello.txt",
+                    "old_string": "world", "new_string": "there",
+                    "base_revision": rev
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("FILE_CHANGED_SINCE_READ"), "{text}");
+    // The external edit must be intact — no silent overwrite.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("ws/hello.txt")).unwrap(),
+        "externally edited\n"
+    );
+    assert_audit_row(&core, "apply_patch", &ws_id, "error", Some("FILE_CHANGED_SINCE_READ"));
+}
+
+/// Scenario H: two workspaces — a path valid in workspace 1 is rejected when
+/// passed with workspace 2's id (cross-confinement).
+#[tokio::test]
+async fn cross_workspace_confinement_over_mcp() {
+    let (port, core, dir, _ws_a) = spawn_server().await;
+    let db = &core.db;
+    std::fs::create_dir_all(dir.path().join("ws-b")).unwrap();
+    std::fs::write(dir.path().join("ws-b/secret-b.txt"), "b\n").unwrap();
+    let ws_b = lc_core::workspace_repo::insert_workspace(
+        db,
+        "B",
+        &dir.path().join("ws-b").to_string_lossy(),
+    )
+    .unwrap();
+
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .unwrap();
+
+    // Absolute path into workspace A, presented under workspace B's id.
+    let abs = dir.path().join("ws/hello.txt").display().to_string().replace('\\', "/");
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("read_file").with_arguments(
+                serde_json::json!({
+                    "workspace_id": ws_b.id, "path": abs
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false));
+    assert!(text.contains("PATH_OUTSIDE_WORKSPACE"), "{text}");
+}
