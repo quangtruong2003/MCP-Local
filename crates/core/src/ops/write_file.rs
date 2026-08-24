@@ -14,7 +14,11 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     })?;
     let name = target.file_name().unwrap_or_default().to_string_lossy();
     let tmp = dir.join(format!(".{name}.{}.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp, bytes)?;
+    if let Err(e) = std::fs::write(&tmp, bytes) {
+        // Do not leak a partial temp file when the write itself fails.
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     match std::fs::rename(&tmp, target) {
         Ok(()) => Ok(()),
         Err(e) => {
@@ -344,5 +348,140 @@ mod tests {
             fs::read_to_string(d.path().join("ws/f.txt")).unwrap(),
             "one\r\nTWO\r\n"
         );
+    }
+
+    #[test]
+    fn patch_missing_file_is_file_not_found() {
+        let (core, _d, ws) = setup();
+        let e = run_tool_audited(&core, "apply_patch", &ws, true, |_, root| {
+            apply_patch(
+                &core,
+                root,
+                &PatchArgs {
+                    rel: "ghost.txt".into(),
+                    old_string: "a".into(),
+                    new_string: "b".into(),
+                    base_revision: "0".repeat(64),
+                },
+            )
+        })
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::FileNotFound);
+    }
+
+    #[test]
+    fn patch_non_utf8_is_invalid_argument() {
+        let (core, d, ws) = setup();
+        fs::write(d.path().join("ws/bin.dat"), [0xFF, 0xFE, 0x00]).unwrap();
+        let rev = crate::ops::sha256_hex(&[0xFF, 0xFE, 0x00]);
+        let e = run_tool_audited(&core, "apply_patch", &ws, true, |_, root| {
+            apply_patch(
+                &core,
+                root,
+                &PatchArgs {
+                    rel: "bin.dat".into(),
+                    old_string: "a".into(),
+                    new_string: "b".into(),
+                    base_revision: rev,
+                },
+            )
+        })
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::InvalidArgument);
+        // File untouched.
+        assert_eq!(fs::read(d.path().join("ws/bin.dat")).unwrap(), vec![0xFF, 0xFE, 0x00]);
+    }
+
+    #[test]
+    fn patch_on_sensitive_file_blocked() {
+        let (core, d, ws) = setup();
+        // vet_path runs before anything else, so even an existing .env is
+        // refused without reading it.
+        fs::write(d.path().join("ws/.env"), "SECRET=1").unwrap();
+        let e = run_tool_audited(&core, "apply_patch", &ws, true, |_, root| {
+            apply_patch(
+                &core,
+                root,
+                &PatchArgs {
+                    rel: ".env".into(),
+                    old_string: "SECRET=1".into(),
+                    new_string: "SECRET=2".into(),
+                    base_revision: crate::ops::sha256_hex(b"SECRET=1"),
+                },
+            )
+        })
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::SensitiveFileBlocked);
+    }
+
+    #[test]
+    fn patch_noop_old_equals_new_keeps_revision_stable() {
+        let (core, d, ws) = setup();
+        fs::write(d.path().join("ws/f.txt"), "same text\n").unwrap();
+        let rev = run_tool_audited(&core, "read_file", &ws, false, |_, root| {
+            read_file(&core, root, "f.txt", None, None)
+        })
+        .unwrap()
+        .revision;
+        let r = run_tool_audited(&core, "apply_patch", &ws, true, |_, root| {
+            apply_patch(
+                &core,
+                root,
+                &PatchArgs {
+                    rel: "f.txt".into(),
+                    old_string: "same text\n".into(),
+                    new_string: "same text\n".into(),
+                    base_revision: rev.clone(),
+                },
+            )
+        })
+        .unwrap();
+        assert_eq!(r.bytes_changed, 0);
+        assert_eq!(r.revision, rev); // content unchanged -> same hash as pre-read revision
+        assert_eq!(
+            fs::read_to_string(d.path().join("ws/f.txt")).unwrap(),
+            "same text\n"
+        );
+    }
+
+    #[test]
+    fn create_into_nested_dirs_makes_parents() {
+        let (core, d, ws) = setup();
+        let r = run_tool_audited(&core, "create_file", &ws, true, |_, root| {
+            create_file(&core, root, "a/b/c/new.txt", "deep")
+        })
+        .unwrap();
+        assert_eq!(r.path, "a/b/c/new.txt");
+        assert_eq!(fs::read_to_string(d.path().join("ws/a/b/c/new.txt")).unwrap(), "deep");
+    }
+
+    #[test]
+    fn atomic_write_cleans_up_temp_file_when_rename_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        // Target is a directory: temp write succeeds, rename over it fails,
+        // and the temp file must not be left behind.
+        let target = dir.path().join("adir");
+        std::fs::create_dir(&target).unwrap();
+        assert!(atomic_write(&target, b"data").is_err());
+        assert_eq!(count_tmp_files(dir.path()), 0);
+        assert!(target.is_dir(), "original target must be untouched");
+    }
+
+    #[test]
+    fn atomic_write_propagates_write_failure_without_leaking() {
+        let dir = tempfile::tempdir().unwrap();
+        // Parent of the target does not exist: fs::write of the temp file
+        // fails and the error must propagate (no partial state).
+        let target = dir.path().join("missing_sub").join("f.txt");
+        assert!(atomic_write(&target, b"data").is_err());
+        assert_eq!(count_tmp_files(dir.path()), 0);
+    }
+
+    fn count_tmp_files(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .count()
     }
 }

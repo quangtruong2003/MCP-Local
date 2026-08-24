@@ -182,6 +182,22 @@ mod tests {
     }
 
     #[test]
+    fn nested_double_traversal_rejected() {
+        let (_d, root) = setup();
+        let e = ensure_inside(&root, &root.join("sub").join("..").join("..").join("x"))
+            .unwrap_err();
+        assert_eq!(e.code, ErrorCode::PathOutsideWorkspace);
+    }
+
+    #[test]
+    fn internal_parent_hop_back_inside_allowed() {
+        let (_d, root) = setup();
+        // sub/../file.txt normalizes back inside the workspace.
+        let p = ensure_inside(&root, &root.join("sub").join("..").join("file.txt")).unwrap();
+        assert!(p.ends_with("file.txt"));
+    }
+
+    #[test]
     fn exact_canonical_root_is_inside() {
         let (_d, root) = setup();
         let canonical = dunce::canonicalize(&root).unwrap();

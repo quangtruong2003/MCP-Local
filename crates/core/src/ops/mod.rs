@@ -12,6 +12,11 @@ use std::path::{Path, PathBuf};
 /// Hard bounds on read-only op results (spec section 6 error model: results
 /// that cannot be truncated sensibly fail with RESULT_TOO_LARGE instead).
 pub const MAX_READ_BYTES: u64 = 262_144;
+/// Upper bound on the size of a single file `read_file` will load at all;
+/// larger files fail fast with `RESULT_TOO_LARGE` instead of being read into
+/// memory. Files up to this size are still window-truncated to
+/// [`MAX_READ_BYTES`] as before.
+pub const MAX_INPUT_FILE_BYTES: u64 = 10 * 1024 * 1024;
 pub const MAX_LIST_ENTRIES: usize = 5_000;
 pub const MAX_FIND_PATHS: usize = 500;
 pub const MAX_SEARCH_MATCHES: usize = 200;

@@ -46,15 +46,25 @@ pub fn insert_workspace(
     get_workspace(db, &id)
 }
 
-/// Fetches one workspace by id, or `WORKSPACE_NOT_FOUND`.
+/// Fetches one workspace by id, or `WORKSPACE_NOT_FOUND`. Any other database
+/// failure surfaces as `IO_ERROR` so a corrupt store is not misreported as
+/// "not found".
 pub fn get_workspace(db: &Database, id: &str) -> Result<Workspace, CoreError> {
-    db.with_conn(|c| c.query_row("SELECT * FROM workspaces WHERE id = ?1", [id], row_to_ws))
-        .map_err(|_| {
+    db.with_conn(|c| {
+        match c.query_row("SELECT * FROM workspaces WHERE id = ?1", [id], row_to_ws) {
+            Ok(ws) => Ok(Some(ws)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    })
+    .and_then(|ws| {
+        ws.ok_or_else(|| {
             CoreError::new(
                 ErrorCode::WorkspaceNotFound,
                 format!("workspace {id} not found"),
             )
         })
+    })
 }
 
 /// Lists all workspaces ordered by creation time.
@@ -121,8 +131,8 @@ mod tests {
         let (db, _dir) = setup();
         let ws = insert_workspace(&db, "Docs", r"C:\proj\docs").unwrap();
         assert!(!ws.id.is_empty());
-        assert_eq!(ws.can_read, true);
-        assert_eq!(ws.can_write, false);
+        assert!(ws.can_read);
+        assert!(!ws.can_write);
         let got = get_workspace(&db, &ws.id).unwrap();
         assert_eq!(got.root_path, ws.root_path);
     }
@@ -132,6 +142,19 @@ mod tests {
         let (db, _dir) = setup();
         let e = get_workspace(&db, "nope").unwrap_err();
         assert_eq!(e.code, ErrorCode::WorkspaceNotFound);
+    }
+
+    #[test]
+    fn get_workspace_discriminates_not_found_from_db_failure() {
+        let (db, dir) = setup();
+        // A malformed schema makes the SELECT fail for a non-"no rows" reason;
+        // that must surface as IO_ERROR, not WORKSPACE_NOT_FOUND.
+        db.with_conn(|c| c.execute("DROP TABLE workspaces", []))
+            .unwrap();
+        let e = get_workspace(&db, "whatever").unwrap_err();
+        assert_eq!(e.code, ErrorCode::IoError);
+        drop(db);
+        drop(dir);
     }
 
     #[test]
@@ -159,6 +182,24 @@ mod tests {
         assert_eq!(list_workspaces(&db).unwrap().len(), 0);
         // grant cascade: inserting again must succeed (no orphan blocking UNIQUE)
         assert!(insert_workspace(&db, "A", r"C:\a").is_ok());
+    }
+
+    #[test]
+    fn insert_writes_permanent_session_grant() {
+        let (db, _dir) = setup();
+        let ws = insert_workspace(&db, "A", r"C:\a").unwrap();
+        // Direct assertion on session_grants (not just the cascade side effect).
+        let n = db
+            .with_conn(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM session_grants WHERE workspace_id = ?1
+                     AND expires_at IS NULL AND reason = 'user added via UI'",
+                    [&ws.id],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(n, 1);
     }
 
     #[test]

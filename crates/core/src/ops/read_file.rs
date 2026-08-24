@@ -34,6 +34,13 @@ pub fn read_file(
             format!("{rel} is a directory"),
         ));
     }
+    // Fail fast on pathologically large files instead of loading them whole.
+    if meta.len() > MAX_INPUT_FILE_BYTES {
+        return Err(CoreError::new(
+            ErrorCode::ResultTooLarge,
+            format!("{rel} exceeds {MAX_INPUT_FILE_BYTES} bytes and cannot be read"),
+        ));
+    }
     let bytes = std::fs::read(&resolved).map_err(CoreError::io)?;
     let revision = sha256_hex(&bytes);
     let text = String::from_utf8_lossy(&bytes);
@@ -192,6 +199,55 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(e.code, crate::error::ErrorCode::FileNotFound);
+    }
+
+    #[test]
+    fn crlf_line_endings_counted_correctly() {
+        let (core, d, ws) = setup();
+        fs::write(d.path().join("ws/win.txt"), "one\r\ntwo\r\nthree\r\n").unwrap();
+        let r = run_tool_audited(&core, "read_file", &ws, false, |_, root| {
+            read_file(&core, root, "win.txt", None, None)
+        })
+        .unwrap();
+        assert_eq!(r.total_lines, 3);
+        // split_inclusive keeps \r intact; content round-trips byte-for-byte.
+        assert_eq!(r.content, "one\r\ntwo\r\nthree\r\n");
+    }
+
+    #[test]
+    fn oversized_file_rejected_early_with_result_too_large() {
+        let (core, d, ws) = setup();
+        let big = "x".repeat(crate::ops::MAX_INPUT_FILE_BYTES as usize + 1);
+        fs::write(d.path().join("ws/huge.txt"), &big).unwrap();
+        let e = run_tool_audited(&core, "read_file", &ws, false, |_, root| {
+            read_file(&core, root, "huge.txt", None, None)
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::ErrorCode::ResultTooLarge);
+    }
+
+    #[test]
+    fn reading_a_directory_is_invalid_argument() {
+        let (core, d, ws) = setup();
+        fs::create_dir(d.path().join("ws/adir")).unwrap();
+        let e = run_tool_audited(&core, "read_file", &ws, false, |_, root| {
+            read_file(&core, root, "adir", None, None)
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn offset_past_end_returns_empty_not_error() {
+        let (core, d, ws) = setup();
+        fs::write(d.path().join("ws/f.txt"), "only\n").unwrap();
+        let r = run_tool_audited(&core, "read_file", &ws, false, |_, root| {
+            read_file(&core, root, "f.txt", Some(50), None)
+        })
+        .unwrap();
+        assert_eq!(r.content, "");
+        assert!(!r.truncated);
+        assert_eq!(r.total_lines, 1);
     }
 
     #[test]

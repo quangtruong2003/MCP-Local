@@ -135,6 +135,26 @@ mod tests {
     }
 
     #[test]
+    fn listing_a_file_is_file_not_found() {
+        let (core, _d, ws) = setup();
+        let e = run_tool_audited(&core, "list_directory", &ws, false, |_, root| {
+            list_dir(&core, root, "a.txt", false)
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::ErrorCode::FileNotFound);
+    }
+
+    #[test]
+    fn missing_dir_is_file_not_found() {
+        let (core, _d, ws) = setup();
+        let e = run_tool_audited(&core, "list_directory", &ws, false, |_, root| {
+            list_dir(&core, root, "nope", false)
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::ErrorCode::FileNotFound);
+    }
+
+    #[test]
     fn rel_outside_workspace_rejected() {
         let (core, _d, ws) = setup();
         let e = run_tool_audited(&core, "list_directory", &ws, false, |_, root| {

@@ -192,4 +192,41 @@ mod tests {
         assert_eq!(r.matches.len(), 2);
         assert!(r.truncated);
     }
+
+    #[test]
+    fn max_results_below_match_count_reports_truncated() {
+        let (core, d, ws) = setup();
+        fs::write(d.path().join("ws/a.txt"), "x hit x\ny hit y\nz hit z\n").unwrap();
+        fs::write(d.path().join("ws/b.txt"), "hit here too\n").unwrap();
+        let r = run_tool_audited(&core, "search_text", &ws, false, |_, root| {
+            search_text(&core, root, "hit", None, true, false, Some(2))
+        })
+        .unwrap();
+        assert_eq!(r.matches.len(), 2);
+        assert!(r.truncated); // at least one more real match existed
+    }
+
+    #[test]
+    fn empty_query_is_invalid_argument() {
+        let (core, _d, ws) = setup();
+        let e = run_tool_audited(&core, "search_text", &ws, false, |_, root| {
+            search_text(&core, root, "", None, true, false, None)
+        })
+        .unwrap_err();
+        assert_eq!(e.code, crate::error::ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn path_prefix_narrows_search() {
+        let (core, d, ws) = setup();
+        fs::create_dir_all(d.path().join("ws/sub")).unwrap();
+        fs::write(d.path().join("ws/sub/in.txt"), "needle\n").unwrap();
+        fs::write(d.path().join("ws/out.txt"), "needle\n").unwrap();
+        let r = run_tool_audited(&core, "search_text", &ws, false, |_, root| {
+            search_text(&core, root, "needle", Some("sub"), true, false, None)
+        })
+        .unwrap();
+        assert_eq!(r.matches.len(), 1);
+        assert_eq!(r.matches[0].path, "sub/in.txt");
+    }
 }

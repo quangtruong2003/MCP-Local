@@ -124,4 +124,14 @@ mod tests {
         ));
         assert_eq!(e.code, ErrorCode::IoError);
     }
+
+    #[test]
+    fn with_detail_attaches_payload_and_preserves_code() {
+        let e = CoreError::new(ErrorCode::PathOutsideWorkspace, "escaped")
+            .with_detail(serde_json::json!({ "requested": "../x" }));
+        assert_eq!(e.code, ErrorCode::PathOutsideWorkspace);
+        assert_eq!(e.detail.as_ref().unwrap()["requested"], "../x");
+        // No detail by default.
+        assert!(CoreError::new(ErrorCode::IoError, "plain").detail.is_none());
+    }
 }

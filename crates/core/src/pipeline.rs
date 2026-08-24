@@ -245,4 +245,39 @@ mod tests {
         let events = crate::audit::list_recent(&core.db, 10).unwrap();
         assert_eq!(events.len(), 2);
     }
+
+    #[test]
+    fn allow_is_fail_closed_when_audit_write_fails() {
+        let (core, _d, ws_id) = setup();
+        // Break the audit sink: the allow row cannot be written.
+        core.db
+            .with_conn(|c| c.execute("DROP TABLE audit_events", []))
+            .unwrap();
+        let e = run_tool_audited(&core, "read_file", &ws_id, false, |_ws, _r| {
+            Ok("closure ran")
+        })
+        .unwrap_err();
+        // Fail-closed: even though the closure succeeded, the caller gets an error.
+        assert_eq!(e.code, ErrorCode::IoError);
+    }
+
+    #[test]
+    fn deny_is_fail_closed_when_audit_write_fails() {
+        let (core, _d, ws_id) = setup();
+        core.pause.set(true);
+        core.db
+            .with_conn(|c| c.execute("DROP TABLE audit_events", []))
+            .unwrap();
+        let e = run_tool_audited(
+            &core,
+            "read_file",
+            &ws_id,
+            false,
+            |_ws, _r| -> Result<(), CoreError> { panic!("must not run") },
+        )
+        .unwrap_err();
+        // The pause deny surfaces (not swallowed), because writing its audit
+        // row failed too.
+        assert_eq!(e.code, ErrorCode::IoError);
+    }
 }
