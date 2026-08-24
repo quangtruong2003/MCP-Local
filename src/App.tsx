@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { CheckCircle2, Info, XOctagon } from "lucide-react";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
+import DashboardPage from "./pages/DashboardPage";
 import { api, parseErrorMessage } from "./api";
 import type { AuditEvent, ServerStatus } from "./api";
 import { VIEW_META } from "./types";
@@ -115,6 +116,15 @@ export default function App() {
 
       {!initialLoadDone ? (
         <EmptyState title="Loading…" message="Reading local app state." />
+      ) : page === "dashboard" ? (
+        <DashboardPage
+          connection={connection}
+          workspaces={workspaces}
+          auditEvents={auditEvents}
+          server={server}
+          onNavigate={setPage}
+          reportError={reportError}
+        />
       ) : (
         <EmptyState title={`${meta.title} coming soon`} message="This page is wired up by the next milestone." />
       )}

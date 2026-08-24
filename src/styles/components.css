@@ -458,3 +458,242 @@
   font-size: var(--text-dense);
   color: var(--text-secondary);
 }
+
+/* ---------- Dashboard ---------- */
+
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+/* Connection card */
+
+.conn-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-card);
+}
+
+.conn-card-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.conn-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--text-section-title);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.conn-state svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.conn-state-ready {
+  color: var(--success);
+}
+
+.conn-state-offline {
+  color: var(--text-secondary);
+}
+
+.conn-state-warning {
+  color: var(--warning);
+}
+
+.conn-state-error {
+  color: var(--danger);
+}
+
+.spinner {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.conn-copy {
+  font-size: var(--text-body);
+  color: var(--text-secondary);
+}
+
+.conn-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.setup-help {
+  font-size: var(--text-dense);
+  color: var(--text-secondary);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--warning-soft);
+  border: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+}
+
+/* Public endpoint panel (Online only) */
+
+.endpoint-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-default);
+}
+
+.endpoint-panel label {
+  font-size: var(--text-dense);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.endpoint-row {
+  display: flex;
+  gap: 8px;
+}
+
+.endpoint-row input {
+  flex: 1;
+  min-width: 0;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: var(--text-dense);
+  background: var(--bg-inset);
+  color: var(--text-primary);
+  user-select: all;
+}
+
+.endpoint-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  font-size: var(--text-dense);
+  color: var(--warning);
+}
+
+.endpoint-warning svg {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+/* Summary cards row */
+
+.dash-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 12px;
+  align-items: stretch;
+}
+
+.dash-summary .stat-link {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 14px;
+  border-radius: var(--radius-md);
+  border: 1px dashed var(--border-strong);
+  color: var(--accent);
+  font-size: var(--text-dense);
+  font-weight: 600;
+  text-align: left;
+  transition: background var(--transition-fast);
+}
+
+.dash-summary .stat-link:hover {
+  background: var(--accent-soft);
+}
+
+/* Recent activity list */
+
+.dash-recent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px 20px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-card);
+}
+
+.dash-recent-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+
+.dash-recent-head h2 {
+  font-size: var(--text-section-title);
+  font-weight: 650;
+}
+
+.link-button {
+  font-size: var(--text-dense);
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.link-button:hover {
+  text-decoration: underline;
+}
+
+.recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.recent-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 7px 0;
+  border-top: 1px solid var(--border-default);
+  font-size: var(--text-dense);
+}
+
+.recent-list li:first-child {
+  border-top: none;
+}
+
+.recent-time {
+  flex-shrink: 0;
+  width: 46px;
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+}
+
+.recent-source {
+  flex-shrink: 0;
+  min-width: 72px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.recent-op {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
