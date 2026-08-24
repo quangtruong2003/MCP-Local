@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{CoreError, ErrorCode};
+use crate::pipeline::Audited;
 use serde::Serialize;
 use std::path::Path;
 
@@ -22,7 +23,7 @@ pub fn list_dir(
     root: &Path,
     rel: &str,
     recursive: bool,
-) -> Result<ListDirResult, CoreError> {
+) -> Result<Audited<ListDirResult>, CoreError> {
     let (resolved, _) = vet_path(core, root, rel)?;
     if !resolved.is_dir() {
         return Err(CoreError::new(
@@ -78,7 +79,13 @@ pub fn list_dir(
             }
         }
     }
-    Ok(ListDirResult { entries, truncated })
+    let entries_count = entries.len();
+    Ok(Audited::new(ListDirResult { entries, truncated })
+        .with_path(rel)
+        .with_detail(serde_json::json!({
+            "entries": entries_count,
+            "truncated": truncated,
+        })))
 }
 
 #[cfg(test)]

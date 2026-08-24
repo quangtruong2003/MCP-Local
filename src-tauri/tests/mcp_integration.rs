@@ -130,6 +130,12 @@ async fn full_read_write_roundtrip_over_mcp() {
         .unwrap()
         .into();
     assert_audit_row(&core, "read_file", &ws_id, "allow", None);
+    // Audit enrichment: relative path + safe byte metrics, never content.
+    let row = latest_audit_row(&core, "read_file");
+    assert_eq!(row.path.as_deref(), Some("hello.txt"));
+    let detail = row.detail.as_ref().expect("read_file detail");
+    assert!(detail["bytes"].as_u64().unwrap_or(0) > 0);
+    assert!(detail["total_lines"].as_u64().unwrap_or(0) > 0);
 
     // apply_patch rewrites using that revision
     let res = client
@@ -159,6 +165,19 @@ async fn full_read_write_roundtrip_over_mcp() {
         "hello there\n"
     );
     assert_audit_row(&core, "apply_patch", &ws_id, "allow", None);
+    // Audit enrichment: path plus exact byte delta ("world" -> "there": 0).
+    let row = latest_audit_row(&core, "apply_patch");
+    assert_eq!(row.path.as_deref(), Some("hello.txt"));
+    let detail = row.detail.as_ref().expect("apply_patch detail");
+    assert_eq!(detail["bytes_changed"].as_i64(), Some(0));
+}
+
+/// Returns the most recent audit row for `op` (panics if none).
+fn latest_audit_row(core: &lc_core::CoreServices, op: &str) -> lc_core::models::AuditEvent {
+    let rows = lc_core::audit::list_recent(&core.db, 100).unwrap();
+    rows.into_iter()
+        .find(|r| r.op == op)
+        .unwrap_or_else(|| panic!("no audit row for '{op}'"))
 }
 
 #[tokio::test]
@@ -347,6 +366,19 @@ async fn sensitive_file_blocked_over_mcp() {
     // The secret must not leak into the error payload.
     assert!(!text.contains("SECRET"), "secret leaked: {text}");
     assert_audit_row(&core, "read_file", &ws_id, "error", Some("SENSITIVE_FILE_BLOCKED"));
+    // The audit row must not leak the secret either: no file content in
+    // path or detail (the blocked filename itself is allowed).
+    let row = latest_audit_row(&core, "read_file");
+    let detail_str = row
+        .detail
+        .as_ref()
+        .map(|d| d.to_string())
+        .unwrap_or_default();
+    assert!(
+        !detail_str.contains("SECRET") && !row.path.as_deref().unwrap_or("").contains("SECRET"),
+        "audit leak: path={:?} detail={detail_str}",
+        row.path
+    );
 }
 
 /// Scenario E: an external edit between read and patch yields

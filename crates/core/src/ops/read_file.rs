@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{CoreError, ErrorCode};
+use crate::pipeline::Audited;
 use serde::Serialize;
 use std::path::Path;
 
@@ -24,8 +25,8 @@ pub fn read_file(
     rel: &str,
     offset_line: Option<u64>,
     max_lines: Option<u64>,
-) -> Result<ReadResult, CoreError> {
-    let (resolved, _) = vet_path(core, root, rel)?;
+) -> Result<Audited<ReadResult>, CoreError> {
+    let (resolved, rel_path) = vet_path(core, root, rel)?;
     let meta = std::fs::metadata(&resolved)
         .map_err(|_| CoreError::new(ErrorCode::FileNotFound, format!("{rel} not found")))?;
     if meta.is_dir() {
@@ -49,12 +50,18 @@ pub fn read_file(
 
     let start = offset_line.unwrap_or(0) as usize;
     if start >= lines.len() {
-        return Ok(ReadResult {
-            content: String::new(),
-            revision,
-            total_lines: total,
-            truncated: false,
-        });
+        return Ok(Audited::new(ReadResult {
+                content: String::new(),
+                revision,
+                total_lines: total,
+                truncated: false,
+            })
+            .with_path(rel_path.to_string_lossy().replace('\\', "/"))
+            .with_detail(serde_json::json!({
+                "bytes": 0,
+                "total_lines": total,
+                "truncated": false,
+            })));
     }
     let window: Vec<&str> = lines[start..]
         .iter()
@@ -73,37 +80,54 @@ pub fn read_file(
         content.truncate(cut);
         truncated = true;
     }
-    Ok(ReadResult {
-        content,
-        revision,
-        total_lines: total,
-        truncated,
-    })
+    let content_len = content.len();
+    Ok(Audited::new(ReadResult {
+            content,
+            revision,
+            total_lines: total,
+            truncated,
+        })
+        .with_path(rel_path.to_string_lossy().replace('\\', "/"))
+        .with_detail(serde_json::json!({
+            "bytes": content_len,
+            "total_lines": total,
+            "truncated": truncated,
+        })))
 }
 
 pub fn read_files(
     core: &CoreServices,
     root: &Path,
     rels: &[String],
-) -> Result<Vec<FileResult>, CoreError> {
+) -> Result<Audited<Vec<FileResult>>, CoreError> {
     if rels.len() > MAX_READ_FILES {
         return Err(CoreError::new(
             ErrorCode::InvalidArgument,
             format!("read_files accepts at most {MAX_READ_FILES} paths per call"),
         ));
     }
-    Ok(rels
+    let results: Vec<FileResult> = rels
         .iter()
         .map(|rel| {
-            let result = read_file(core, root, rel, None, None).map_err(|e| {
-                serde_json::json!({"code": e.code.as_str(), "message": e.message}).to_string()
-            });
+            // Metadata-only audit info; the per-file ReadResult detail is
+            // discarded so contents/byte counts are not duplicated here.
+            let result = read_file(core, root, rel, None, None)
+                .map(|a| a.value)
+                .map_err(|e| {
+                    serde_json::json!({"code": e.code.as_str(), "message": e.message}).to_string()
+                });
             FileResult {
                 path: rel.clone(),
                 result,
             }
         })
-        .collect())
+        .collect();
+    let requested = results.len();
+    let successful = results.iter().filter(|r| r.result.is_ok()).count();
+    Ok(Audited::new(results).with_detail(serde_json::json!({
+        "requested_files": requested,
+        "successful_files": successful,
+    })))
 }
 
 #[cfg(test)]

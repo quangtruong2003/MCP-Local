@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{CoreError, ErrorCode};
+use crate::pipeline::Audited;
 use globset::{GlobBuilder, GlobSetBuilder};
 use serde::Serialize;
 use std::path::Path;
@@ -14,7 +15,7 @@ pub fn find_files(
     core: &CoreServices,
     root: &Path,
     pattern: &str,
-) -> Result<FindResult, CoreError> {
+) -> Result<Audited<FindResult>, CoreError> {
     let glob = GlobBuilder::new(pattern)
         .literal_separator(true)
         .build()
@@ -46,7 +47,12 @@ pub fn find_files(
             paths.push(rel.to_string_lossy().replace('\\', "/"));
         }
     }
-    Ok(FindResult { paths, truncated })
+    // Bounded by MAX_FIND_PATHS; paths only — never file contents.
+    let audited_paths = serde_json::to_value(&paths).unwrap_or_default();
+    Ok(Audited::new(FindResult { paths, truncated }).with_detail(serde_json::json!({
+        "paths": audited_paths,
+        "truncated": truncated,
+    })))
 }
 
 #[cfg(test)]

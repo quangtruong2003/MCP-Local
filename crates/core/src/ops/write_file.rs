@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{CoreError, ErrorCode};
+use crate::pipeline::Audited;
 use serde::Serialize;
 use std::path::Path;
 
@@ -74,7 +75,7 @@ pub fn create_file(
     root: &Path,
     rel: &str,
     content: &str,
-) -> Result<CreateResult, CoreError> {
+) -> Result<Audited<CreateResult>, CoreError> {
     let (resolved, rel_path) = vet_path(core, root, rel)?;
     if content.len() > MAX_CREATE_BYTES {
         return Err(CoreError::new(
@@ -92,10 +93,14 @@ pub fn create_file(
         std::fs::create_dir_all(parent).map_err(CoreError::io)?;
     }
     atomic_write(&resolved, content.as_bytes()).map_err(CoreError::io)?;
-    Ok(CreateResult {
-        path: rel_path.to_string_lossy().replace('\\', "/"),
-        revision: crate::ops::sha256_hex(content.as_bytes()),
-    })
+    let content_len = content.len();
+    let path_str = rel_path.to_string_lossy().replace('\\', "/");
+    Ok(Audited::new(CreateResult {
+            path: path_str.clone(),
+            revision: crate::ops::sha256_hex(content.as_bytes()),
+        })
+        .with_path(path_str)
+        .with_detail(serde_json::json!({ "bytes": content_len })))
 }
 
 #[derive(Debug, Serialize)]
@@ -120,7 +125,7 @@ pub fn apply_patch(
     core: &CoreServices,
     root: &Path,
     args: &PatchArgs,
-) -> Result<PatchResult, CoreError> {
+) -> Result<Audited<PatchResult>, CoreError> {
     let (resolved, rel_path) = vet_path(core, root, &args.rel)?;
     let bytes = std::fs::read(&resolved)
         .map_err(|_| CoreError::new(ErrorCode::FileNotFound, format!("{} not found", args.rel)))?;
@@ -164,11 +169,15 @@ pub fn apply_patch(
 
     let patched = text.replacen(&args.old_string, &args.new_string, 1);
     atomic_write(&resolved, patched.as_bytes()).map_err(CoreError::io)?;
-    Ok(PatchResult {
-        path: rel_path.to_string_lossy().replace('\\', "/"),
-        revision: crate::ops::sha256_hex(patched.as_bytes()),
-        bytes_changed: patched.len() as i64 - text.len() as i64,
-    })
+    let bytes_changed = patched.len() as i64 - text.len() as i64;
+    let path_str = rel_path.to_string_lossy().replace('\\', "/");
+    Ok(Audited::new(PatchResult {
+            path: path_str.clone(),
+            revision: crate::ops::sha256_hex(patched.as_bytes()),
+            bytes_changed,
+        })
+        .with_path(path_str)
+        .with_detail(serde_json::json!({ "bytes_changed": bytes_changed })))
 }
 
 #[cfg(test)]

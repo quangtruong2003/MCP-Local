@@ -1,5 +1,6 @@
 use super::*;
 use crate::error::{CoreError, ErrorCode};
+use crate::pipeline::Audited;
 use serde::Serialize;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -26,7 +27,7 @@ pub fn search_text(
     case_sensitive: bool,
     is_regex: bool,
     max_results: Option<usize>,
-) -> Result<SearchResult, CoreError> {
+) -> Result<Audited<SearchResult>, CoreError> {
     if query.is_empty() {
         return Err(CoreError::new(
             ErrorCode::InvalidArgument,
@@ -93,7 +94,16 @@ pub fn search_text(
             }
         }
     }
-    Ok(SearchResult { matches, truncated })
+    let match_count = matches.len();
+    // Counts and truncation only — never matched lines or file contents.
+    let audited = Audited::new(SearchResult { matches, truncated }).with_detail(serde_json::json!({
+        "matches": match_count,
+        "truncated": truncated,
+    }));
+    Ok(match path_prefix {
+        Some(prefix) => audited.with_path(prefix),
+        None => audited,
+    })
 }
 
 #[cfg(test)]

@@ -8,6 +8,35 @@ use crate::workspace_repo::get_workspace;
 use crate::CoreServices;
 use std::path::{Path, PathBuf};
 
+/// Safe per-operation audit metadata carried alongside an op result.
+/// `path` is a workspace-relative request path and `detail` holds bounded
+/// metrics — never file contents, matched search lines, or secrets.
+pub struct Audited<T> {
+    pub value: T,
+    pub path: Option<String>,
+    pub detail: Option<serde_json::Value>,
+}
+
+impl<T> Audited<T> {
+    pub fn new(value: T) -> Self {
+        Self {
+            value,
+            path: None,
+            detail: None,
+        }
+    }
+
+    pub fn with_path(mut self, path: impl Into<String>) -> Self {
+        self.path = Some(path.into());
+        self
+    }
+
+    pub fn with_detail(mut self, detail: serde_json::Value) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+}
+
 /// Runs one tool call through the fail-closed pipeline and writes exactly one
 /// audit row:
 ///
@@ -25,13 +54,15 @@ pub fn run_tool_audited<T>(
     tool: &str,
     workspace_id: &str,
     needs_write: bool,
-    f: impl FnOnce(&Workspace, &Path) -> Result<T, CoreError>,
+    f: impl FnOnce(&Workspace, &Path) -> Result<Audited<T>, CoreError>,
 ) -> Result<T, CoreError> {
     run_tool_audited_with_context(core, tool, workspace_id, needs_write, None, None, f)
 }
 
-/// Same fail-closed pipeline with bounded, caller-provided audit context.
-/// `path` is a workspace-relative request path/prefix, never file content.
+/// Same fail-closed pipeline with bounded, caller-provided fallback audit
+/// context used for the prelude deny/error rows (before the op has run and can
+/// supply its own [`Audited`] metadata). `path` is a workspace-relative
+/// request path/prefix, never file content.
 pub fn run_tool_audited_with_context<T>(
     core: &CoreServices,
     tool: &str,
@@ -39,7 +70,7 @@ pub fn run_tool_audited_with_context<T>(
     needs_write: bool,
     path: Option<&str>,
     detail: Option<serde_json::Value>,
-    f: impl FnOnce(&Workspace, &Path) -> Result<T, CoreError>,
+    f: impl FnOnce(&Workspace, &Path) -> Result<Audited<T>, CoreError>,
 ) -> Result<T, CoreError> {
     let pre = (|| -> Result<(Workspace, PathBuf), CoreError> {
         if core.pause.is_paused() {
@@ -89,19 +120,28 @@ pub fn run_tool_audited_with_context<T>(
         }
     };
 
-    let result = f(&ws, &root);
+    let audited = f(&ws, &root);
+    // Op-supplied metadata wins; caller-provided context is the fallback
+    // (and the only source on error rows, where the op never ran).
+    let (op_path, op_detail) = match &audited {
+        Ok(a) => (
+            a.path.as_deref().or(path),
+            a.detail.clone().or_else(|| detail.clone()),
+        ),
+        Err(_) => (path, detail),
+    };
     audit::record_simple(
         &core.db,
         "mcp",
         Some(tool),
         Some(workspace_id),
         tool,
-        if result.is_ok() { "allow" } else { "error" },
-        result.as_ref().err().map(|e| e.code.as_str()),
-        path,
-        detail,
+        if audited.is_ok() { "allow" } else { "error" },
+        audited.as_ref().err().map(|e| e.code.as_str()),
+        op_path,
+        op_detail,
     )?;
-    result
+    audited.map(|a| a.value)
 }
 
 #[cfg(test)]
@@ -136,7 +176,7 @@ mod tests {
             "list_directory",
             &ws_id,
             false,
-            |_ws, _root| -> Result<(), CoreError> { panic!("closure must not run while paused") },
+            |_ws, _root| -> Result<Audited<()>, CoreError> { panic!("closure must not run while paused") },
         )
         .unwrap_err();
         assert_eq!(e.code, ErrorCode::AccessPaused);
@@ -155,7 +195,7 @@ mod tests {
             "read_file",
             "ghost",
             false,
-            |_ws, _r| -> Result<(), CoreError> {
+            |_ws, _r| -> Result<Audited<()>, CoreError> {
                 panic!("closure must not run for unknown workspace")
             },
         )
@@ -176,7 +216,7 @@ mod tests {
             "apply_patch",
             &ws_id,
             true,
-            |_ws, _r| -> Result<(), CoreError> {
+            |_ws, _r| -> Result<Audited<()>, CoreError> {
                 panic!("closure must not run without write capability")
             },
         )
@@ -197,7 +237,7 @@ mod tests {
             "read_file",
             &ws_id,
             false,
-            |_ws, _r| -> Result<(), CoreError> {
+            |_ws, _r| -> Result<Audited<()>, CoreError> {
                 panic!("closure must not run without read capability")
             },
         )
@@ -215,7 +255,7 @@ mod tests {
         let v = run_tool_audited(&core, "read_file", &ws_id, false, |ws, root| {
             assert!(ws.can_read);
             assert_eq!(root, dir.path().join("ws"));
-            Ok(42)
+            Ok(Audited::new(42))
         })
         .unwrap();
         assert_eq!(v, 42);
@@ -236,7 +276,7 @@ mod tests {
             false,
             Some("src/main.rs"),
             Some(serde_json::json!({"window": "partial"})),
-            |_ws, _root| Ok(()),
+            |_ws, _root| Ok(Audited::new(())),
         )
         .unwrap();
         let events = crate::audit::list_recent(&core.db, 10).unwrap();
@@ -253,7 +293,7 @@ mod tests {
             "read_file",
             &ws_id,
             false,
-            |_ws, _r| -> Result<i32, CoreError> {
+            |_ws, _r| -> Result<Audited<i32>, CoreError> {
                 Err(CoreError::new(ErrorCode::FileNotFound, "x"))
             },
         )
@@ -269,8 +309,8 @@ mod tests {
     #[test]
     fn exactly_one_row_per_invocation() {
         let (core, _d, ws_id) = setup();
-        run_tool_audited(&core, "read_file", &ws_id, false, |_ws, _r| Ok(())).unwrap();
-        let _ = run_tool_audited(&core, "read_file", "ghost", false, |_ws, _r| Ok(()));
+        run_tool_audited(&core, "read_file", &ws_id, false, |_ws, _r| Ok(Audited::new(()))).unwrap();
+        let _ = run_tool_audited(&core, "read_file", "ghost", false, |_ws, _r| Ok(Audited::new(())));
         let events = crate::audit::list_recent(&core.db, 10).unwrap();
         assert_eq!(events.len(), 2);
     }
@@ -283,7 +323,7 @@ mod tests {
             .with_conn(|c| c.execute("DROP TABLE audit_events", []))
             .unwrap();
         let e = run_tool_audited(&core, "read_file", &ws_id, false, |_ws, _r| {
-            Ok("closure ran")
+            Ok(Audited::new("closure ran"))
         })
         .unwrap_err();
         // Fail-closed: even though the closure succeeded, the caller gets an error.
@@ -302,7 +342,7 @@ mod tests {
             "read_file",
             &ws_id,
             false,
-            |_ws, _r| -> Result<(), CoreError> { panic!("must not run") },
+            |_ws, _r| -> Result<Audited<()>, CoreError> { panic!("must not run") },
         )
         .unwrap_err();
         // Fail-closed: the deny is not swallowed — writing its audit row also
