@@ -134,6 +134,90 @@ pub fn save(dir: &Path, settings: &ConnectionSettings) -> Result<(), String> {
     std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
+/// Versioned application settings (`version: 2`), replacing the legacy
+/// Cloudflare-era `ConnectionSettings` shape above.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppSettings {
+    pub version: u32,
+    #[serde(default)]
+    pub start_on_launch: bool,
+    #[serde(default = "default_tailscale_hostname")]
+    pub tailscale_hostname: String,
+    #[serde(default)]
+    pub onboarding_complete: bool,
+}
+
+fn default_tailscale_hostname() -> String {
+    "local-workspace-mcp".into()
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            version: 2,
+            start_on_launch: false,
+            tailscale_hostname: default_tailscale_hostname(),
+            onboarding_complete: false,
+        }
+    }
+}
+
+/// True when a parsed JSON object still carries the pre-v2 tunnel config.
+fn is_legacy_shape(value: &serde_json::Value) -> bool {
+    value
+        .as_object()
+        .is_some_and(|o| o.contains_key("tunnel_id") || o.contains_key("tunnel_api_key"))
+}
+
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    lc_core::ops::write_file::atomic_write(path, bytes).map_err(|e| e.to_string())
+}
+
+/// Loads `<dir>/settings.json` as versioned [`AppSettings`].
+///
+/// - missing file -> v2 defaults
+/// - legacy `{ tunnel_id, ... }` file -> migrate to v2 defaults and overwrite
+///   the file atomically (dropping any plaintext `tunnel_api_key`)
+/// - invalid JSON -> explicit `SETTINGS_INVALID` error; the file is never
+///   silently replaced
+pub fn load_app_settings(dir: &Path) -> Result<AppSettings, String> {
+    let path = dir.join("settings.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AppSettings::default()),
+        Err(e) => return Err(e.to_string()),
+    };
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| format!("SETTINGS_INVALID: failed to parse settings.json: {e}"))?;
+    let settings = if is_legacy_shape(&value) {
+        // Migrate away from the legacy tunnel shape; this also drops any
+        // historical plaintext `tunnel_api_key`.
+        let migrated = AppSettings::default();
+        let json =
+            serde_json::to_vec_pretty(&migrated).map_err(|e| format!("serialize settings: {e}"))?;
+        write_atomic(&path, &json)?;
+        migrated
+    } else {
+        let mut settings: AppSettings = serde_json::from_value(value)
+            .map_err(|e| format!("SETTINGS_INVALID: unsupported settings.json layout: {e}"))?;
+        if settings.tailscale_hostname.trim().is_empty() {
+            settings.tailscale_hostname = default_tailscale_hostname();
+        }
+        settings
+    };
+    Ok(settings)
+}
+
+/// Persists [`AppSettings`] as pretty v2 JSON, written atomically.
+pub fn save_app_settings(dir: &Path, settings: &AppSettings) -> Result<(), String> {
+    let path = dir.join("settings.json");
+    let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
+    write_atomic(&path, &json)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,5 +299,75 @@ mod tests {
         let nested = dir.path().join("a").join("b");
         save(&nested, &ConnectionSettings::default()).unwrap();
         assert!(nested.join("settings.json").is_file());
+    }
+
+    #[test]
+    fn app_settings_missing_file_yields_defaults_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(loaded, AppSettings::default());
+        assert_eq!(loaded.version, 2);
+        assert!(!loaded.start_on_launch);
+        assert_eq!(loaded.tailscale_hostname, "local-workspace-mcp");
+        assert!(!loaded.onboarding_complete);
+    }
+
+    #[test]
+    fn legacy_settings_file_migrates_to_v2_and_is_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"tunnel_id":"legacy-id","tunnel_api_key":"legacy-secret"}"#,
+        )
+        .unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(loaded, AppSettings::default());
+        let text = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+        assert!(!text.contains("legacy-id"));
+        assert!(!text.contains("legacy-secret"));
+        assert!(!text.contains("tunnel_api_key"));
+        // The migrated file must itself be loadable v2 JSON.
+        let reloaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(reloaded, AppSettings::default());
+    }
+
+    #[test]
+    fn app_settings_roundtrip_preserves_all_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = AppSettings {
+            version: 2,
+            start_on_launch: true,
+            tailscale_hostname: "my-machine.tailnet-name.ts.net".into(),
+            onboarding_complete: true,
+        };
+        save_app_settings(dir.path(), &settings).unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn invalid_json_reports_settings_invalid_and_leaves_file_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = "{not json";
+        std::fs::write(dir.path().join("settings.json"), broken).unwrap();
+        let err = load_app_settings(dir.path()).unwrap_err();
+        assert!(err.contains("SETTINGS_INVALID"), "unexpected error: {err}");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("settings.json")).unwrap(),
+            broken
+        );
+    }
+
+    #[test]
+    fn unknown_extra_fields_in_v2_file_are_tolerated() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"version":2,"start_on_launch":false,"tailscale_hostname":"h","onboarding_complete":true,"future_field":{"a":1}}"#,
+        )
+        .unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(loaded.tailscale_hostname, "h");
+        assert!(loaded.onboarding_complete);
     }
 }
