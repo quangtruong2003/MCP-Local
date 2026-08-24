@@ -19,13 +19,48 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    match std::fs::rename(&tmp, target) {
+    match replace_file(&tmp, target) {
         Ok(()) => Ok(()),
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
             Err(e)
         }
     }
+}
+
+/// Replaces `target` with `tmp`. On Windows, `std::fs::rename` fails when the
+/// destination exists, so use `MoveFileExW` with REPLACE_EXISTING explicitly;
+/// WRITE_THROUGH flushes the move before returning. On other platforms a plain
+/// rename already replaces atomically.
+#[cfg(windows)]
+fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let from = wide(tmp);
+    let to = wide(target);
+    // SAFETY: both pointers are null-terminated wide strings valid for the
+    // duration of the call; MoveFileExW does not retain them.
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            windows_sys::Win32::Storage::FileSystem::MOVEFILE_REPLACE_EXISTING
+                | windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if ok == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::rename(tmp, target)
 }
 
 #[derive(Debug, Serialize, schemars::JsonSchema)]
@@ -453,6 +488,17 @@ mod tests {
         .unwrap();
         assert_eq!(r.path, "a/b/c/new.txt");
         assert_eq!(fs::read_to_string(d.path().join("ws/a/b/c/new.txt")).unwrap(), "deep");
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("existing.txt");
+        std::fs::write(&target, b"old").unwrap();
+
+        atomic_write(&target, b"new").unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
     }
 
     #[test]
