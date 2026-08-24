@@ -13,7 +13,7 @@ use rmcp::{
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpService,
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
     ServerHandler,
 };
@@ -284,13 +284,20 @@ impl ServerHandler for WorkspaceServer {
 }
 
 /// Bind axum to a free loopback port and serve /mcp. Returns the chosen port.
+///
+/// rmcp defaults `allowed_hosts` to loopback only (DNS-rebinding defense).
+/// Requests arrive through tunnels with the public tunnel hostname in
+/// `Host`, so host validation is disabled here — access control stays at
+/// the workspace/pipeline layer, and the server still binds loopback only.
 pub async fn serve(core: Arc<CoreServices>) -> std::io::Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts = vec![]; // empty = Host validation off (see doc comment)
     let service = StreamableHttpService::new(
         move || Ok(WorkspaceServer::new(core.clone())),
         LocalSessionManager::default().into(),
-        Default::default(),
+        config,
     );
     let app = Router::new().nest_service("/mcp", service);
     tokio::spawn(async move {
