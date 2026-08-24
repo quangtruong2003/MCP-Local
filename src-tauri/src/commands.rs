@@ -8,8 +8,10 @@ use serde::Serialize;
 use tauri::{Manager, State};
 
 use crate::{
-    connection::{ConnectionManager, ConnectionSnapshot},
-    secret_store::{SecretStore, SecretSummary},
+    connection::{
+        manager::{ConnectionError, ConnectionManager as TailscaleManager},
+        ConnectionStatus,
+    },
     settings, AppState,
 };
 use lc_core::{audit, error::CoreError, models::AuditEvent, workspace_repo};
@@ -21,6 +23,42 @@ fn err_string(e: CoreError) -> String {
         "detail": e.detail,
     })
     .to_string()
+}
+
+/// Serializes a [`ConnectionError`] into the same stable `{code,message}`
+/// JSON shape the UI already parses. Never carries the capability token.
+fn conn_err_string(e: ConnectionError) -> String {
+    serde_json::json!({
+        "code": e.code,
+        "message": e.message,
+    })
+    .to_string()
+}
+
+fn settings_err(code: &str, message: impl std::fmt::Display) -> String {
+    serde_json::json!({ "code": code, "message": message.to_string() }).to_string()
+}
+
+/// Validates a Tailscale Funnel hostname label: 1-63 characters, lowercase
+/// ASCII letters / digits / hyphens only, starting and ending with a letter
+/// or digit. On failure the error string uses the stable JSON shape with
+/// code `HOSTNAME_INVALID`.
+pub(crate) fn validate_hostname(hostname: &str) -> Result<(), String> {
+    let valid = !hostname.is_empty()
+        && hostname.len() <= 63
+        && hostname.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'
+        })
+        && hostname.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && hostname.chars().last().is_some_and(|c| c.is_ascii_alphanumeric());
+    if valid {
+        Ok(())
+    } else {
+        Err(settings_err(
+            "HOSTNAME_INVALID",
+            format!("invalid hostname '{hostname}': use 1-63 lowercase letters, digits, or hyphens, starting and ending with a letter or digit"),
+        ))
+    }
 }
 
 #[derive(Serialize)]
@@ -142,97 +180,142 @@ pub fn server_status(state: State<'_, AppState>) -> Status {
     }
 }
 
-#[derive(Debug, Serialize)]
-pub struct ConnectionSettingsSummary {
-    pub tunnel_id: String,
-    pub organization_id: Option<String>,
-    pub workspace_id: Option<String>,
-    pub tunnel_name: String,
-    pub auto_start: bool,
-    pub has_runtime_key: bool,
-    pub has_admin_key: bool,
-}
-
-fn settings_summary(
-    settings: settings::ConnectionSettings,
-    secret_summary: SecretSummary,
-) -> ConnectionSettingsSummary {
-    ConnectionSettingsSummary {
-        tunnel_id: settings.tunnel_id,
-        organization_id: settings.organization_id,
-        workspace_id: settings.workspace_id,
-        tunnel_name: settings.tunnel_name,
-        auto_start: settings.auto_start,
-        has_runtime_key: secret_summary.has_runtime_key,
-        has_admin_key: secret_summary.has_admin_key,
-    }
-}
-
+/// Thin wrapper over the Tailscale [`TailscaleManager`]: current status.
+/// Async commands taking `State<'_, _>` must return `Result`, hence the
+/// infallible `Ok`.
 #[tauri::command]
-pub fn connection_status(manager: State<'_, ConnectionManager>) -> ConnectionSnapshot {
-    manager.snapshot()
+pub async fn connection_status(
+    manager: State<'_, TailscaleManager>,
+) -> Result<ConnectionStatus, String> {
+    Ok(manager.status().await)
 }
 
+/// Starts the funnel connection via the new manager.
 #[tauri::command]
 pub async fn start_connection(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    manager: State<'_, ConnectionManager>,
-) -> Result<ConnectionSnapshot, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    manager.start(&app, &dir, state.port).await
+    manager: State<'_, TailscaleManager>,
+) -> Result<ConnectionStatus, String> {
+    manager.start().await.map_err(conn_err_string)
 }
 
+/// Stops the funnel connection via the new manager.
 #[tauri::command]
 pub async fn stop_connection(
-    app: tauri::AppHandle,
-    manager: State<'_, ConnectionManager>,
-) -> Result<ConnectionSnapshot, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    manager.stop(&app, &dir).await
+    manager: State<'_, TailscaleManager>,
+) -> Result<ConnectionStatus, String> {
+    manager.stop().await.map_err(conn_err_string)
+}
+
+/// Stop then start: retries the funnel connection.
+#[tauri::command]
+pub async fn retry_connection(
+    manager: State<'_, TailscaleManager>,
+) -> Result<ConnectionStatus, String> {
+    manager.retry().await.map_err(conn_err_string)
+}
+
+/// Rotates the capability secret (restarts when running). Never returns the token.
+#[tauri::command]
+pub async fn rotate_connection_url(
+    manager: State<'_, TailscaleManager>,
+) -> Result<ConnectionStatus, String> {
+    manager.rotate_capability().await.map_err(conn_err_string)
+}
+
+/// Resets Tailscale identity: stops, optionally removes the Tailscale state
+/// directory, rotates the capability secret, and restarts only if asked.
+#[tauri::command]
+pub async fn reset_tailscale_identity(
+    remove_state_dir: bool,
+    restart: bool,
+    manager: State<'_, TailscaleManager>,
+) -> Result<ConnectionStatus, String> {
+    manager.reset_identity(remove_state_dir, restart).await.map_err(conn_err_string)
 }
 
 #[tauri::command]
-pub async fn regenerate_tunnel(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-    manager: State<'_, ConnectionManager>,
-) -> Result<ConnectionSnapshot, String> {
+pub fn get_app_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, String> {
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    manager.regenerate(&app, &dir, state.port).await
+    settings::load_app_settings(&dir).map_err(|e| settings_err("SETTINGS_INVALID", e))
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Validates then persists application settings; rejects an invalid
+/// `tailscale_hostname` before touching disk.
 #[tauri::command]
-pub fn save_connection_settings(
+pub fn update_app_settings(
     app: tauri::AppHandle,
-    organization_id: Option<String>,
-    workspace_id: Option<String>,
-    tunnel_name: String,
-    auto_start: bool,
-    runtime_api_key: Option<String>,
-    admin_api_key: Option<String>,
-) -> Result<ConnectionSettingsSummary, String> {
+    settings: settings::AppSettings,
+) -> Result<settings::AppSettings, String> {
+    validate_hostname(&settings.tailscale_hostname)?;
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let mut loaded = settings::load(&dir)?;
-    loaded.settings.organization_id = organization_id;
-    loaded.settings.workspace_id = workspace_id;
-    loaded.settings.tunnel_name = tunnel_name;
-    loaded.settings.auto_start = auto_start;
-    loaded.settings.normalize();
-
-    let store = SecretStore::system();
-    store.save(runtime_api_key.as_deref(), admin_api_key.as_deref())?;
-    settings::save(&dir, &loaded.settings)?;
-    Ok(settings_summary(loaded.settings, store.summary()?))
+    settings::save_app_settings(&dir, &settings).map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e))?;
+    Ok(settings)
 }
 
-#[tauri::command]
-pub fn connection_settings_summary(
-    app: tauri::AppHandle,
-) -> Result<ConnectionSettingsSummary, String> {
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let loaded = settings::load(&dir)?;
-    let secret_summary = SecretStore::system().summary()?;
-    Ok(settings_summary(loaded.settings, secret_summary))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_hostname_accepts_valid_labels() {
+        for ok in [
+            "local-workspace-mcp",
+            "a",
+            "0",
+            "abc123",
+            "a-b-c",
+            "1machine2",
+            &"x".repeat(63),
+        ] {
+            assert!(validate_hostname(ok).is_ok(), "'{ok}' should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_hostname_rejects_empty() {
+        let err = validate_hostname("").unwrap_err();
+        assert!(err.contains("HOSTNAME_INVALID"));
+        let parsed: serde_json::Value = serde_json::from_str(&err).unwrap();
+        assert_eq!(parsed["code"], "HOSTNAME_INVALID");
+    }
+
+    #[test]
+    fn validate_hostname_rejects_over_63_chars() {
+        assert!(validate_hostname(&"x".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn validate_hostname_rejects_uppercase() {
+        assert!(validate_hostname("Local-Workspace").is_err());
+    }
+
+    #[test]
+    fn validate_hostname_rejects_leading_and_trailing_hyphen() {
+        assert!(validate_hostname("-lead").is_err());
+        assert!(validate_hostname("trail-").is_err());
+    }
+
+    #[test]
+    fn validate_hostname_rejects_underscore() {
+        assert!(validate_hostname("under_score").is_err());
+    }
+
+    #[test]
+    fn validate_hostname_rejects_spaces() {
+        assert!(validate_hostname("has space").is_err());
+    }
+
+    #[test]
+    fn conn_error_serializes_to_stable_code_message_shape() {
+        let e = ConnectionError {
+            code: "SIDECAR_NOT_FOUND".into(),
+            message: "sidecar binary missing".into(),
+        };
+        let parsed: serde_json::Value =
+            serde_json::from_str(&conn_err_string(e)).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(obj.len(), 2, "shape must be exactly {{code,message}}");
+        assert_eq!(parsed["code"], "SIDECAR_NOT_FOUND");
+        assert_eq!(parsed["message"], "sidecar binary missing");
+    }
 }

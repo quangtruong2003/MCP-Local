@@ -26,10 +26,6 @@ pub fn run() {
             let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
             app.manage(AppState { core, port });
             app.manage(tunnel::TunnelHandle::default());
-            // Legacy Cloudflare-era manager stays managed until Task 12/24
-            // retire the old commands; the Tailscale manager below is the
-            // replacement wired alongside it meanwhile.
-            app.manage(connection::ConnectionManager::new(port));
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 
             // One-time migration from the MVP plaintext tunnel_api_key. Only
@@ -88,9 +84,11 @@ pub fn run() {
             commands::connection_status,
             commands::start_connection,
             commands::stop_connection,
-            commands::save_connection_settings,
-            commands::connection_settings_summary,
-            commands::regenerate_tunnel,
+            commands::retry_connection,
+            commands::rotate_connection_url,
+            commands::reset_tailscale_identity,
+            commands::get_app_settings,
+            commands::update_app_settings,
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")
