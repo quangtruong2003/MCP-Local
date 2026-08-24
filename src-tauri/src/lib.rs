@@ -26,6 +26,9 @@ pub fn run() {
             let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
             app.manage(AppState { core, port });
             app.manage(tunnel::TunnelHandle::default());
+            // Legacy Cloudflare-era manager stays managed until Task 12/24
+            // retire the old commands; the Tailscale manager below is the
+            // replacement wired alongside it meanwhile.
             app.manage(connection::ConnectionManager::new(port));
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 
@@ -49,12 +52,27 @@ pub fn run() {
                 }
             }
 
-            if loaded.settings.auto_start {
+            // Versioned v2 settings drive the Tailscale connection manager.
+            let app_settings = settings::load_app_settings(&dir).unwrap_or_else(|e| {
+                eprintln!("app settings load failed: {e}");
+                settings::AppSettings::default()
+            });
+            let tailscale_manager = connection::manager::ConnectionManager::with_parts(
+                std::sync::Arc::new(connection::manager::ProcessSidecarDriver),
+                std::sync::Arc::new(connection::manager::ReqwestHealthVerifier),
+                connection::manager::ConnectionManager::tauri_emitter(app.handle().clone()),
+                connection::secrets::CapabilitySecretStore::new(dir.clone()),
+                dir.join("tailscale"),
+                app_settings.tailscale_hostname.clone(),
+                port,
+            );
+            app.manage(tailscale_manager);
+
+            if app_settings.start_on_launch {
                 let handle = app.handle().clone();
-                let app_dir = dir.clone();
                 tauri::async_runtime::spawn(async move {
-                    let manager = handle.state::<connection::ConnectionManager>();
-                    let _ = manager.start(&handle, &app_dir, port).await;
+                    let manager = handle.state::<connection::manager::ConnectionManager>();
+                    let _ = manager.start().await;
                 });
             }
             Ok(())
