@@ -1,22 +1,21 @@
-use local_workspace_mcp_manager::connection::{ConnectionSnapshot, ConnectionState};
+use local_workspace_mcp_manager::connection::{ConnectionState, ConnectionStatus};
 
 #[test]
-fn connection_snapshot_starts_stopped_with_local_mcp_url() {
-    let snapshot = ConnectionSnapshot::new(43123);
-    assert_eq!(snapshot.state, ConnectionState::Stopped);
-    assert_eq!(snapshot.local_mcp_url, "http://127.0.0.1:43123/mcp");
-    assert_eq!(snapshot.tunnel_id, None);
-    assert_eq!(snapshot.health_url, None);
+fn connection_status_defaults_to_stopped() {
+    let status = ConnectionStatus::default();
+    assert_eq!(status.state, ConnectionState::Stopped);
+    assert_eq!(status.local_port, 0);
+    assert!(!status.paused);
 }
 
 #[test]
 fn connection_state_serializes_as_frontend_friendly_snake_case() {
     assert_eq!(
-        serde_json::to_string(&ConnectionState::CheckingHealth).unwrap(),
-        "\"checking_health\""
+        serde_json::to_string(&ConnectionState::StartingTunnel).unwrap(),
+        r#"{"state":"starting_tunnel"}"#
     );
     assert_eq!(
-        serde_json::to_string(&ConnectionState::NeedsSetup).unwrap(),
-        "\"needs_setup\""
+        serde_json::to_string(&ConnectionState::Stopping).unwrap(),
+        r#"{"state":"stopping"}"#
     );
 }
