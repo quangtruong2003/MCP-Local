@@ -183,3 +183,14 @@ pub fn tunnel_status(app: tauri::AppHandle) -> String {
     let status = handle.status.lock().unwrap().clone();
     serde_json::to_string(&status).unwrap_or_else(|_| "\"stopped\"".into())
 }
+
+/// Configured tunnel id for display (`None` when unset or unreadable).
+/// Deliberately returns ONLY the id — the API key has no read-back path.
+#[tauri::command]
+pub fn tunnel_config(app: tauri::AppHandle) -> Option<String> {
+    let dir = app.path().app_data_dir().ok()?;
+    match settings::load(&dir) {
+        Ok(s) if !s.tunnel_id.is_empty() => Some(s.tunnel_id),
+        _ => None,
+    }
+}

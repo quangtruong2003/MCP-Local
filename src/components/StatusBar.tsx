@@ -3,7 +3,11 @@ import type { TunnelDisplay } from "../api";
 interface Props {
   port?: number;
   tunnel: TunnelDisplay;
+  /** Configured tunnel id (display only — last 8 chars shown). */
+  tunnelId?: string | null;
+  busy?: boolean;
   onOpenSettings: () => void;
+  onDisconnect: () => void;
 }
 
 const TUNNEL_LABEL: Record<TunnelDisplay["state"], string> = {
@@ -13,7 +17,8 @@ const TUNNEL_LABEL: Record<TunnelDisplay["state"], string> = {
   error: "Error",
 };
 
-export default function StatusBar({ port, tunnel, onOpenSettings }: Props) {
+export default function StatusBar({ port, tunnel, tunnelId, busy, onOpenSettings, onDisconnect }: Props) {
+  const suffix = tunnelId ? tunnelId.slice(-8) : undefined;
   const color =
     tunnel.state === "connected"
       ? "var(--ok)"
@@ -44,7 +49,11 @@ export default function StatusBar({ port, tunnel, onOpenSettings }: Props) {
       </span>
       <span style={{ color, fontWeight: 600 }} title={title}>
         Tunnel: {TUNNEL_LABEL[tunnel.state]}
+        {suffix && tunnel.state === "connected" ? ` · ${suffix}` : ""}
       </span>
+      <button onClick={onDisconnect} disabled={busy || tunnel.state === "stopped"}>
+        Disconnect
+      </button>
       <button onClick={onOpenSettings} style={{ marginLeft: "auto" }}>
         Tunnel settings…
       </button>

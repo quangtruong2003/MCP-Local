@@ -276,8 +276,8 @@ mod tests {
             |_ws, _r| -> Result<(), CoreError> { panic!("must not run") },
         )
         .unwrap_err();
-        // The pause deny surfaces (not swallowed), because writing its audit
-        // row failed too.
+        // Fail-closed: the deny is not swallowed — writing its audit row also
+        // failed, so the pipeline surfaces IO_ERROR instead of the pause deny.
         assert_eq!(e.code, ErrorCode::IoError);
     }
 }

@@ -94,4 +94,6 @@ export const api = {
     invoke<void>("configure_tunnel", { tunnelId, apiKey }),
   stopTunnel: () => invoke<void>("stop_tunnel"),
   tunnelStatus: () => invoke<string>("tunnel_status"),
+  /** Configured tunnel id for display; the API key has no read-back path. */
+  tunnelConfig: () => invoke<string | null>("tunnel_config"),
 };

@@ -22,6 +22,8 @@ export default function App() {
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [paused, setPaused] = useState(false);
   const [tunnel, setTunnel] = useState<TunnelDisplay>({ state: "stopped" });
+  const [tunnelId, setTunnelId] = useState<string | null>(null);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,6 +42,7 @@ export default function App() {
         // Seed current tunnel state first so an already-connected sidecar
         // (auto-spawned at startup) is reflected even before any event.
         setTunnel(tunnelStateFromJson(await api.tunnelStatus()));
+        setTunnelId(await api.tunnelConfig());
         const s = await api.serverStatus();
         setStatus(s);
         setPaused(s.paused);
@@ -55,6 +58,18 @@ export default function App() {
       un2.then((f) => f());
     };
   }, [refresh]);
+
+  const disconnectTunnel = async () => {
+    setError(null);
+    setDisconnecting(true);
+    try {
+      await api.stopTunnel();
+    } catch (err) {
+      setError(parseErrorMessage(err));
+    } finally {
+      setDisconnecting(false);
+    }
+  };
 
   const togglePause = async () => {
     const next = !paused;
@@ -80,7 +95,14 @@ export default function App() {
         minHeight: "100%",
       }}
     >
-      <StatusBar port={status?.port} tunnel={tunnel} onOpenSettings={() => setShowSettings(true)} />
+      <StatusBar
+        port={status?.port}
+        tunnel={tunnel}
+        tunnelId={tunnelId}
+        busy={disconnecting}
+        onOpenSettings={() => setShowSettings(true)}
+        onDisconnect={() => void disconnectTunnel()}
+      />
 
       {error && (
         <div

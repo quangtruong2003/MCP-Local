@@ -53,6 +53,7 @@ pub fn run() {
             commands::configure_tunnel,
             commands::stop_tunnel,
             commands::tunnel_status,
+            commands::tunnel_config,
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")
