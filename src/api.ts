@@ -102,5 +102,5 @@ export const api = {
   connectionSettingsSummary: () =>
     invoke<ConnectionSettingsSummary>("connection_settings_summary"),
   saveConnectionSettings: (input: SaveConnectionSettingsInput) =>
-    invoke<ConnectionSettingsSummary>("save_connection_settings", input),
+    invoke<ConnectionSettingsSummary>("save_connection_settings", { input }),
 };
