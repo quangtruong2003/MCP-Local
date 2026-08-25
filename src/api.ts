@@ -12,42 +12,6 @@ import type {
 
 export type { AppError, AppSettings, ConnectionStatus, DiagnosticsReport, ExecutionMode, Workspace };
 
-// --- Deprecated compat types (Cloudflare-era components, removed by a later task) ---
-
-/** @deprecated Legacy Cloudflare snapshot shape; superseded by {@link ConnectionStatus}. */
-export interface ConnectionSnapshot {
-  state: string;
-  tunnel_id?: string | null;
-  local_mcp_url: string;
-  health_url?: string | null;
-  started_at?: string | null;
-  ready_at?: string | null;
-  message?: string | null;
-  error_code?: string | null;
-  error_detail?: string | null;
-}
-
-/** @deprecated Legacy Cloudflare settings summary; superseded by {@link AppSettings}. */
-export interface ConnectionSettingsSummary {
-  tunnel_id: string;
-  organization_id?: string | null;
-  workspace_id?: string | null;
-  tunnel_name: string;
-  auto_start: boolean;
-  has_runtime_key: boolean;
-  has_admin_key: boolean;
-}
-
-/** @deprecated Legacy Cloudflare save input; superseded by {@link updateAppSettings}. */
-export interface SaveConnectionSettingsInput {
-  organizationId?: string | null;
-  workspaceId?: string | null;
-  tunnelName: string;
-  autoStart: boolean;
-  runtimeApiKey?: string | null;
-  adminApiKey?: string | null;
-}
-
 export interface AuditEvent {
   id: number;
   ts: string;
