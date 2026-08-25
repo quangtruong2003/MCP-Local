@@ -51,17 +51,17 @@ pub fn read_file(
     let start = offset_line.unwrap_or(0) as usize;
     if start >= lines.len() {
         return Ok(Audited::new(ReadResult {
-                content: String::new(),
-                revision,
-                total_lines: total,
-                truncated: false,
-            })
-            .with_path(rel_path.to_string_lossy().replace('\\', "/"))
-            .with_detail(serde_json::json!({
-                "bytes": 0,
-                "total_lines": total,
-                "truncated": false,
-            })));
+            content: String::new(),
+            revision,
+            total_lines: total,
+            truncated: false,
+        })
+        .with_path(rel_path.to_string_lossy().replace('\\', "/"))
+        .with_detail(serde_json::json!({
+            "bytes": 0,
+            "total_lines": total,
+            "truncated": false,
+        })));
     }
     let window: Vec<&str> = lines[start..]
         .iter()
@@ -82,17 +82,17 @@ pub fn read_file(
     }
     let content_len = content.len();
     Ok(Audited::new(ReadResult {
-            content,
-            revision,
-            total_lines: total,
-            truncated,
-        })
-        .with_path(rel_path.to_string_lossy().replace('\\', "/"))
-        .with_detail(serde_json::json!({
-            "bytes": content_len,
-            "total_lines": total,
-            "truncated": truncated,
-        })))
+        content,
+        revision,
+        total_lines: total,
+        truncated,
+    })
+    .with_path(rel_path.to_string_lossy().replace('\\', "/"))
+    .with_detail(serde_json::json!({
+        "bytes": content_len,
+        "total_lines": total,
+        "truncated": truncated,
+    })))
 }
 
 pub fn read_files(

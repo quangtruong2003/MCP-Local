@@ -8,3 +8,8 @@ settings.json
 .superpowers/
 # Vendored sidecar binaries (download step documented in README)
 src-tauri/binaries/*.exe
+
+# Local tool caches and scratch areas
+.mimosa/
+demo-workspace/
+src-tauri/target/

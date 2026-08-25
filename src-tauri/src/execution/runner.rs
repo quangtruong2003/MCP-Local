@@ -16,6 +16,7 @@ use super::policy::{
     resolve_cwd, resolve_program, resolve_timeout, ExecutionResult, PolicyError, RunCommandRequest,
     RunPowerShellRequest,
 };
+use super::resolver::{merged_path_string, resolve_executable};
 
 /// Per-stream output retention cap; excess bytes are drained and discarded.
 const MAX_STREAM_BYTES: usize = 512 * 1024;
@@ -163,12 +164,23 @@ fn run_bounded(
 }
 
 fn host_env() -> Vec<(String, String)> {
-    super::policy::build_child_env(std::env::vars())
+    let mut env = super::policy::build_child_env(std::env::vars());
+    // Override the inherited PATH with the registry-fresh merged one so
+    // children (cargo -> rustc, npm -> node) can find tools the app process
+    // never saw at login time.
+    if let Some(path) = merged_path_string() {
+        match env.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case("PATH")) {
+            Some(slot) => slot.1 = path,
+            None => env.push(("PATH".to_string(), path)),
+        }
+    }
+    env
 }
 
-/// Runs an allowlisted developer command. No shell involved: the resolved
-/// basename goes straight to `Command::new` with args passed verbatim, so no
-/// quoting/parsing surface exists.
+/// Runs an allowlisted developer command. No shell involved: the name is
+/// resolved to a concrete executable (registry-fresh PATH + PATHEXT) and
+/// passed to `Command::new` with args verbatim, so no quoting/parsing surface
+/// exists.
 pub fn run_command(
     workspace_root: &Path,
     req: RunCommandRequest,
@@ -177,12 +189,17 @@ pub fn run_command(
     let cwd = resolve_cwd(workspace_root, req.cwd.as_deref())?;
     let timeout = Duration::from_millis(resolve_timeout(req.timeout_ms)?);
 
-    let mut cmd = Command::new(&program);
+    let exe = resolve_executable(&program).ok_or_else(|| {
+        PolicyError::invalid_argument(format!(
+            "executable '{program}' not found in PATH (searched machine + user registry PATH and process PATH)"
+        ))
+    })?;
+    let mut cmd = Command::new(&exe);
     cmd.args(&req.args);
 
     run_bounded(cmd, None, &cwd, &host_env(), timeout).map_err(|e| {
-        // Spawn failures (program not on PATH, bad cwd) surface as IO_ERROR.
-        PolicyError::invalid_argument(format!("failed to run '{program}': {e}"))
+        // Spawn failures (bad cwd, inaccessible binary) surface as IO_ERROR.
+        PolicyError::invalid_argument(format!("failed to run '{}': {e}", exe.display()))
     })
 }
 
@@ -429,5 +446,64 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
             },
         );
         assert_eq!(err.unwrap_err().code, "COMMAND_NOT_ALLOWED");
+    }
+
+    /// Windows-only regression for the two real resolution gaps: cargo lives
+    /// in a registry-PATH dir the app process may not have inherited, and npm
+    /// is npm.cmd (invisible to bare-name CreateProcess).
+    #[cfg(windows)]
+    #[test]
+    fn resolves_cargo_and_npm_from_registry_path_and_pathext() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo = run_command(
+            &root_of(&dir),
+            RunCommandRequest {
+                program: "cargo".into(),
+                args: vec!["--version".to_string()],
+                cwd: None,
+                timeout_ms: Some(60_000),
+            },
+        )
+        .expect("cargo must resolve via registry-fresh PATH");
+        assert_eq!(cargo.exit_code, Some(0));
+        assert!(cargo.stdout.contains("cargo"), "got {:?}", cargo.stdout);
+
+        let npm = run_command(
+            &root_of(&dir),
+            RunCommandRequest {
+                program: "npm".into(),
+                args: vec!["--version".to_string()],
+                cwd: None,
+                timeout_ms: Some(60_000),
+            },
+        )
+        .expect("npm.cmd must resolve via PATHEXT");
+        assert_eq!(npm.exit_code, Some(0));
+        assert!(
+            npm.stdout.trim().chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "expected a semver in stdout, got {:?}",
+            npm.stdout
+        );
+    }
+
+    #[test]
+    fn missing_executable_gives_precise_error() {
+        // An allowlisted name that cannot exist as a file anywhere searchable.
+        let dir = tempfile::tempdir().unwrap();
+        let err = run_command(
+            &root_of(&dir),
+            RunCommandRequest {
+                program: "rustc".into(),
+                args: vec![],
+                cwd: None,
+                timeout_ms: Some(5_000),
+            },
+        );
+        // rustc IS installed here (cargo toolchain), so only assert on the
+        // error shape when it actually fails.
+        if let Err(e) = err {
+            assert_eq!(e.code, "INVALID_ARGUMENT");
+            assert!(e.message.contains("not found in PATH"), "{}", e.message);
+        }
     }
 }

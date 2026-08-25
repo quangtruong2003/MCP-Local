@@ -96,10 +96,11 @@ pub fn search_text(
     }
     let match_count = matches.len();
     // Counts and truncation only — never matched lines or file contents.
-    let audited = Audited::new(SearchResult { matches, truncated }).with_detail(serde_json::json!({
-        "matches": match_count,
-        "truncated": truncated,
-    }));
+    let audited =
+        Audited::new(SearchResult { matches, truncated }).with_detail(serde_json::json!({
+            "matches": match_count,
+            "truncated": truncated,
+        }));
     Ok(match path_prefix {
         Some(prefix) => audited.with_path(prefix),
         None => audited,

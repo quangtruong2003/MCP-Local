@@ -49,10 +49,12 @@ pub fn find_files(
     }
     // Bounded by MAX_FIND_PATHS; paths only — never file contents.
     let audited_paths = serde_json::to_value(&paths).unwrap_or_default();
-    Ok(Audited::new(FindResult { paths, truncated }).with_detail(serde_json::json!({
-        "paths": audited_paths,
-        "truncated": truncated,
-    })))
+    Ok(
+        Audited::new(FindResult { paths, truncated }).with_detail(serde_json::json!({
+            "paths": audited_paths,
+            "truncated": truncated,
+        })),
+    )
 }
 
 #[cfg(test)]

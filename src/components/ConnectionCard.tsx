@@ -92,6 +92,15 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
         primary: { key: "retry", text: "Retry" },
         secondary: { key: "help", text: "Setup help" },
       };
+    case "needs_https_setup":
+      return {
+        label: "Setup required",
+        copy: "Funnel needs HTTPS certificates enabled for your tailnet.",
+        tone: "warning",
+        inProgress: false,
+        primary: { key: "retry", text: "Retry" },
+        secondary: { key: "help", text: "Setup help" },
+      };
     case "online":
       return {
         label: "Online",
@@ -140,6 +149,8 @@ interface Props {
   onStop: () => void;
   onRetry: () => void;
   onSignIn: () => void;
+  /** Opens a Tailscale admin console page in the system browser. */
+  onOpenAdmin: (url: string) => void;
   /** Surface non-lifecycle failures (e.g. clipboard denial) as toasts. */
   onError: (message: string) => void;
 }
@@ -151,6 +162,7 @@ export default function ConnectionCard({
   onStop,
   onRetry,
   onSignIn,
+  onOpenAdmin,
   onError,
 }: Props) {
   const p = presentConnection(state);
@@ -236,9 +248,35 @@ export default function ConnectionCard({
 
       {helpVisible ? (
         <div className="setup-help">
-          Funnel publishing must be approved once for your tailnet. A tailnet admin can enable it
-          in the Tailscale admin console under Access controls (add the funnel node attribute).
-          Once approved, press Retry.
+          {state.state === "needs_https_setup" ? (
+            <>
+              <p>
+                Publishing over Funnel requires HTTPS certificates, which are currently disabled
+                for your tailnet. A tailnet admin can enable them once in the Tailscale admin
+                console. Once enabled, press Retry.
+              </p>
+              <button
+                className="link-button"
+                onClick={() => onOpenAdmin("https://login.tailscale.com/admin/settings/dns")}
+              >
+                Open HTTPS settings →
+              </button>
+            </>
+          ) : (
+            <>
+              <p>
+                Funnel publishing must be approved once for your tailnet. A tailnet admin can
+                enable it in the Tailscale admin console under Access controls (add the funnel
+                node attribute). Once approved, press Retry.
+              </p>
+              <button
+                className="link-button"
+                onClick={() => onOpenAdmin("https://login.tailscale.com/admin/acls")}
+              >
+                Open access controls →
+              </button>
+            </>
+          )}
         </div>
       ) : null}
 

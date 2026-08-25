@@ -14,7 +14,8 @@ Turn the current MVP control panel into a polished Windows desktop application w
 4. Receive a stable public HTTPS MCP endpoint under `*.ts.net`.
 5. Copy that endpoint into ChatGPT.
 6. Stop and restart the app later while keeping the same endpoint identity.
-7. Understand connection, workspace permissions, security state, and recent activity without needing to understand localhost ports, child processes, or MCP internals.
+7. Grant an explicit per-workspace **Execute** capability so ChatGPT can run approved developer commands and, only when separately enabled, Full PowerShell with that workspace as the working directory.
+8. Understand connection, workspace permissions, execution risk, security state, and recent activity without needing to understand localhost ports, child processes, or MCP internals.
 
 The stable endpoint is provided by **Tailscale Funnel** through an app-specific embedded Tailscale node implemented as a small Go `tsnet` sidecar.
 
@@ -24,6 +25,9 @@ The stable endpoint is provided by **Tailscale Funnel** through an app-specific 
 - **First run may require setup; normal runs must not.** Tailscale login and Funnel enablement are onboarding events, not routine workflow.
 - **Stable identity:** preserve the app-specific `tsnet` node state and hostname so the `*.ts.net` FQDN remains stable across app restarts.
 - **Security remains fail-closed:** the existing Rust core policy pipeline remains the only filesystem doorway.
+- **Execution is a separate privilege:** `Execute` is OFF by default and is never implied by Read or Write.
+- **No fake sandbox claims:** setting `cwd` to a workspace does not confine PowerShell or a child process to that folder. The product must describe Approved Commands and Full PowerShell as code-execution capabilities, not filesystem sandboxes.
+- **Full PowerShell is advanced:** arbitrary PowerShell requires Execute ON plus an explicit `Full PowerShell` workspace mode and a risk acknowledgement in the UI.
 - **Do not expose raw no-auth `/mcp` publicly.** The Funnel sidecar exposes only a capability-protected public route and rewrites it to the loopback MCP route.
 - **Local MCP stays loopback-only:** Rust MCP continues binding to `127.0.0.1:<ephemeral-port>`.
 - **The UI reports verified states, not process-spawn guesses.** `Online` means the sidecar is authenticated, Funnel listener is active, and end-to-end public health verification succeeded.
@@ -294,6 +298,60 @@ Responsibilities:
 
 The existing filesystem core remains in `crates/core`.
 
+### 9.1 Workspace execution subsystem
+
+Add execution as a third workspace capability alongside Read and Write:
+
+```text
+Read      ON/OFF
+Write     ON/OFF
+Execute   ON/OFF  (default OFF)
+```
+
+Persist these additional workspace fields:
+
+```text
+can_execute: bool
+execution_mode: "approved_commands" | "full_powershell"
+```
+
+`execution_mode` defaults to `approved_commands`. Turning Execute OFF blocks every process-execution MCP tool regardless of mode.
+
+The MCP surface gains two tools:
+
+```text
+run_command(workspace_id, program, args[], cwd?, timeout_ms?)
+run_powershell(workspace_id, script, cwd?, timeout_ms?)
+```
+
+`run_command` launches an executable directly without `cmd.exe` or PowerShell parsing. Requirements:
+
+- `cwd` is workspace-relative and must pass the same canonical path-confinement checks as file tools;
+- executable basename must match the configured approved-command allowlist;
+- arguments are passed as an argv array, never concatenated into a shell command string;
+- default timeout 60 seconds; configurable hard maximum 10 minutes;
+- stdout and stderr are captured separately and bounded to 512 KiB each, with explicit truncation flags;
+- child process tree is attached to a Windows Job Object so timeout/Stop kills descendants;
+- inherited environment is sanitized and must not expose MCP capability tokens, Tailscale auth URLs, legacy API keys, or other app-owned secrets;
+- audit records command basename, safe args metadata, relative cwd, exit code, duration, timeout/truncation flags, but never captures environment secrets or full script contents.
+
+Initial approved developer commands should be explicit product configuration rather than arbitrary PATH execution. A sensible default set is `git`, `cargo`, `rustc`, `npm`, `npx`, `node`, `pnpm`, `yarn`, `python`, `python3`, `pip`, `go`, and `dotnet`. The UI may allow users to edit this list in Advanced settings.
+
+`run_powershell` is available only when `can_execute == true` and `execution_mode == "full_powershell"`. It launches `pwsh.exe` when available, otherwise Windows PowerShell, with `-NoLogo -NoProfile -NonInteractive`; the script is supplied through stdin so it is not exposed in argv. Full PowerShell is explicitly **not** confined to the workspace by `cwd`; it can potentially access the wider user/system environment according to the Windows account's permissions. The UI must warn about this before enabling the mode.
+
+Stable execution errors:
+
+```text
+EXECUTE_DISABLED
+COMMAND_NOT_ALLOWED
+POWERSHELL_DISABLED
+INVALID_WORKING_DIRECTORY
+COMMAND_TIMEOUT
+EXECUTION_FAILED
+```
+
+A future optional **Strict Isolation** mode may use Windows Sandbox with only the workspace mapped into the VM and networking disabled by default. It is not part of this milestone because Windows Sandbox is edition/virtualization dependent and adds significant startup overhead.
+
 ## 10. UI information architecture
 
 Replace the current one-screen MVP with a compact desktop shell.
@@ -351,15 +409,20 @@ Each workspace row/card shows:
 
 - name;
 - root path;
-- read toggle;
-- write toggle;
+- Read toggle;
+- Write toggle;
+- Execute toggle;
+- execution mode summary (`Approved commands` or `Full PowerShell`) when Execute is enabled;
 - enabled/disabled summary;
-- overflow actions for remove and future settings.
+- overflow actions for remove and advanced execution settings.
 
 Rules:
 
 - Disabling read while write is enabled must also disable write, because write capability cannot exist without read in the current core model.
 - Enabling write when read is disabled first enables read.
+- Execute is independent from Read/Write and defaults OFF for every newly added workspace.
+- Turning Execute ON defaults to `Approved commands`; it must not silently enable Full PowerShell.
+- Enabling `Full PowerShell` requires an explicit confirmation that PowerShell is not restricted to the workspace merely because its working directory is there.
 - Removing requires confirmation and explicitly says disk files are not deleted.
 - Add Workspace uses native folder picker.
 
@@ -381,7 +444,7 @@ Filters:
 - All / Allowed / Blocked / Errors;
 - operation search text.
 
-Selecting an event opens detail with timestamp, tool/op, workspace, decision, stable error code, path, and safe detail JSON.
+Selecting an event opens detail with timestamp, tool/op, workspace, decision, stable error code, path, and safe detail JSON. Execution events additionally show command basename, relative working directory, exit code, duration, timeout state, and output-truncation flags. Do not store or show complete PowerShell script bodies in audit history.
 
 ### 10.5 Security
 
@@ -393,6 +456,9 @@ Show:
 - Path confinement active.
 - Optimistic concurrency active.
 - Write-enabled workspace count.
+- Execute-enabled workspace count.
+- Full-PowerShell-enabled workspace count with a high-risk warning when non-zero.
+- Explicit note that Approved Commands/Full PowerShell are process-execution permissions, not filesystem sandboxes.
 - **Rotate connection URL** destructive action.
 
 Rotating the connection URL:
@@ -417,9 +483,16 @@ Sections:
 - Retry connection.
 - Reset Tailscale identity.
 
+**Execution**
+- Read-only list of approved developer commands for this milestone; custom allowlist editing is deferred.
+- Default command timeout: 60 seconds.
+- Hard maximum timeout: 10 minutes.
+- Explanation that Approved Commands can still execute project code (for example npm scripts, Cargo build scripts, Git hooks) and therefore Execute must remain OFF unless needed.
+- Future Strict Isolation mode status: not available in this milestone.
+
 **Advanced**
 - Local MCP port read-only while running.
-- Copy diagnostics (must redact capability token).
+- Copy diagnostics (must redact capability token and execution environment secrets).
 
 **About**
 - version;
@@ -520,7 +593,13 @@ Track third-party license attribution for Tailscale/Go dependencies as required 
 - URL composition;
 - settings migration;
 - audit enrichment;
-- Windows atomic replacement.
+- Windows atomic replacement;
+- workspace Execute capability migration/defaults;
+- executable allowlist matching and direct argv execution;
+- working-directory confinement;
+- timeout/output bounds and process-tree termination;
+- Full PowerShell gating and stdin script delivery;
+- execution audit redaction.
 
 ### Go unit tests
 
@@ -577,6 +656,11 @@ The milestone is complete only when all are true:
 - Stop closes public access without deleting Tailscale identity.
 - No sidecar remains after normal exit or parent-process death on Windows.
 - Read/write workspace behavior remains enforced by the existing fail-closed pipeline.
+- Execute is a separate per-workspace permission, defaults OFF, and is audited.
+- `run_command` rejects non-allowlisted executables and confines only the requested working directory to the workspace.
+- `run_powershell` is unavailable unless Full PowerShell mode was explicitly enabled for that workspace.
+- Full PowerShell UI copy clearly states it is not filesystem-confined by `cwd`.
+- Timed-out executions terminate their process tree and bounded stdout/stderr results report truncation.
 - Sensitive-file and path-confinement protections still pass.
 - Existing-file `apply_patch` is verified working on Windows.
 - Dashboard, Workspaces, Activity, Security, and Settings screens are implemented with coherent reusable styling.
@@ -588,8 +672,8 @@ To keep the implementation coherent, do not add these in the same milestone:
 
 - OAuth 2.1 authorization server for MCP.
 - Cloudflare/ngrok providers.
-- Git tools.
-- terminal/process-execution MCP tools.
+- Dedicated Git MCP tools beyond invoking approved `git` commands through the execution subsystem.
+- Strict VM/container isolation for arbitrary commands (future Windows Sandbox mode).
 - delete/move/rename filesystem tools.
 - mobile support.
 - macOS/Linux packaging.

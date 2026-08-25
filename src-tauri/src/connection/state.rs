@@ -17,6 +17,9 @@ pub enum ConnectionState {
     NeedsFunnelPermission {
         message: String,
     },
+    NeedsHttpsSetup {
+        message: String,
+    },
     Verifying {
         fqdn: String,
     },
@@ -45,6 +48,7 @@ impl ConnectionState {
             Self::StartingTunnel => "starting_tunnel",
             Self::NeedsLogin { .. } => "needs_login",
             Self::NeedsFunnelPermission { .. } => "needs_funnel_permission",
+            Self::NeedsHttpsSetup { .. } => "needs_https_setup",
             Self::Verifying { .. } => "verifying",
             Self::Online { .. } => "online",
             Self::Degraded { .. } => "degraded",

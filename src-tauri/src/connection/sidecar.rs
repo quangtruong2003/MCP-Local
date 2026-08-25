@@ -264,6 +264,15 @@ pub fn spawn_sidecar_exe(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // The sidecar is a console-subsystem exe; without this flag Windows
+    // allocates a visible (empty, since stdio is piped) console window for
+    // it when spawned from the GUI app.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     let mut child = cmd.spawn().map_err(|_| SidecarSpawnError {
         code: "SIDECAR_SPAWN_FAILED".into(),

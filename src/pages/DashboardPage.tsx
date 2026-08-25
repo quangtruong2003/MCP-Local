@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 import StatCard from "../components/StatCard";
 import ConnectionCard from "../components/ConnectionCard";
 import EmptyState from "../components/EmptyState";
-import { api } from "../api";
+import { api, parseErrorMessage } from "../api";
 import type { AuditEvent, ServerStatus } from "../api";
 import type { ConnectionStatus, ViewId, Workspace } from "../types";
 
@@ -70,7 +70,15 @@ export default function DashboardPage({
         onStart={() => void runLifecycle(api.startConnection)}
         onStop={() => void runLifecycle(api.stopConnection)}
         onRetry={() => void runLifecycle(api.retryConnection)}
-        onSignIn={() => void runLifecycle(() => api.startConnection())}
+        onSignIn={() => {
+          if (connection.state.state !== "needs_login") return;
+          void api
+            .openExternalUrl(connection.state.login_url)
+            .catch((err) => reportError(parseErrorMessage(err)));
+        }}
+        onOpenAdmin={(url) => {
+          void api.openExternalUrl(url).catch((err) => reportError(parseErrorMessage(err)));
+        }}
         onError={reportError}
       />
     );

@@ -39,6 +39,7 @@ export type ConnectionState =
   | { state: "starting_tunnel" }
   | { state: "needs_login"; login_url: string }
   | { state: "needs_funnel_permission"; message: string }
+  | { state: "needs_https_setup"; message: string }
   | { state: "verifying"; fqdn: string }
   | { state: "online"; fqdn: string; endpoint: string }
   | { state: "degraded"; fqdn?: string | null; message: string }

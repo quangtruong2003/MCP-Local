@@ -184,8 +184,8 @@ mod tests {
     #[test]
     fn nested_double_traversal_rejected() {
         let (_d, root) = setup();
-        let e = ensure_inside(&root, &root.join("sub").join("..").join("..").join("x"))
-            .unwrap_err();
+        let e =
+            ensure_inside(&root, &root.join("sub").join("..").join("..").join("x")).unwrap_err();
         assert_eq!(e.code, ErrorCode::PathOutsideWorkspace);
     }
 

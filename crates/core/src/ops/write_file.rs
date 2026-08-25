@@ -38,7 +38,10 @@ fn replace_file(tmp: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     fn wide(p: &Path) -> Vec<u16> {
-        p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+        p.as_os_str()
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect()
     }
 
     let from = wide(tmp);
@@ -96,11 +99,11 @@ pub fn create_file(
     let content_len = content.len();
     let path_str = rel_path.to_string_lossy().replace('\\', "/");
     Ok(Audited::new(CreateResult {
-            path: path_str.clone(),
-            revision: crate::ops::sha256_hex(content.as_bytes()),
-        })
-        .with_path(path_str)
-        .with_detail(serde_json::json!({ "bytes": content_len })))
+        path: path_str.clone(),
+        revision: crate::ops::sha256_hex(content.as_bytes()),
+    })
+    .with_path(path_str)
+    .with_detail(serde_json::json!({ "bytes": content_len })))
 }
 
 #[derive(Debug, Serialize)]
@@ -172,12 +175,12 @@ pub fn apply_patch(
     let bytes_changed = patched.len() as i64 - text.len() as i64;
     let path_str = rel_path.to_string_lossy().replace('\\', "/");
     Ok(Audited::new(PatchResult {
-            path: path_str.clone(),
-            revision: crate::ops::sha256_hex(patched.as_bytes()),
-            bytes_changed,
-        })
-        .with_path(path_str)
-        .with_detail(serde_json::json!({ "bytes_changed": bytes_changed })))
+        path: path_str.clone(),
+        revision: crate::ops::sha256_hex(patched.as_bytes()),
+        bytes_changed,
+    })
+    .with_path(path_str)
+    .with_detail(serde_json::json!({ "bytes_changed": bytes_changed })))
 }
 
 #[cfg(test)]
@@ -433,7 +436,10 @@ mod tests {
         .unwrap_err();
         assert_eq!(e.code, ErrorCode::InvalidArgument);
         // File untouched.
-        assert_eq!(fs::read(d.path().join("ws/bin.dat")).unwrap(), vec![0xFF, 0xFE, 0x00]);
+        assert_eq!(
+            fs::read(d.path().join("ws/bin.dat")).unwrap(),
+            vec![0xFF, 0xFE, 0x00]
+        );
     }
 
     #[test]
@@ -496,7 +502,10 @@ mod tests {
         })
         .unwrap();
         assert_eq!(r.path, "a/b/c/new.txt");
-        assert_eq!(fs::read_to_string(d.path().join("ws/a/b/c/new.txt")).unwrap(), "deep");
+        assert_eq!(
+            fs::read_to_string(d.path().join("ws/a/b/c/new.txt")).unwrap(),
+            "deep"
+        );
     }
 
     #[test]

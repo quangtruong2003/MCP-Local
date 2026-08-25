@@ -247,10 +247,18 @@ export default function OnboardingFlow({
 function isLiveStage(
   connection: ConnectionStatus | null,
 ): connection is ConnectionStatus & {
-  state: Extract<ConnectionStatus["state"], { state: "needs_login" | "needs_funnel_permission" | "online" }>;
+  state: Extract<
+    ConnectionStatus["state"],
+    { state: "needs_login" | "needs_funnel_permission" | "needs_https_setup" | "online" }
+  >;
 } {
   const state = connection?.state.state;
-  return state === "needs_login" || state === "needs_funnel_permission" || state === "online";
+  return (
+    state === "needs_login" ||
+    state === "needs_funnel_permission" ||
+    state === "needs_https_setup" ||
+    state === "online"
+  );
 }
 
 interface LiveStageProps {
@@ -325,6 +333,58 @@ function LiveStage({ connection, starting, onStart, onFinish, reportError }: Liv
           <button className="btn btn-primary" onClick={onStart} disabled={starting}>
             {starting ? <Loader2 aria-hidden="true" className="spinner" /> : null}
             Retry
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => {
+              api
+                .openExternalUrl("https://login.tailscale.com/admin/acls")
+                .catch((err) => reportError(parseErrorMessage(err)));
+            }}
+          >
+            Open admin console
+          </button>
+          <button className="btn btn-secondary" onClick={() => setHelpVisible((v) => !v)} aria-expanded={helpVisible}>
+            <LifeBuoy aria-hidden="true" />
+            Setup help
+          </button>
+        </div>
+        {helpVisible ? (
+          <details className="onboarding-diagnostics">
+            <summary>Technical details</summary>
+            <p>{state.message}</p>
+          </details>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (state.state === "needs_https_setup") {
+    return (
+      <div className="onboarding-stage">
+        <span className="conn-state conn-state-warning">
+          <AlertTriangle aria-hidden="true" />
+          One-time setting needed
+        </span>
+        <p className="conn-copy" aria-live="polite">
+          Publishing over Funnel requires HTTPS certificates, which are currently disabled for
+          your tailnet. A tailnet admin can enable them once in the Tailscale admin console under
+          DNS. Once enabled, press Retry.
+        </p>
+        <div className="conn-actions">
+          <button className="btn btn-primary" onClick={onStart} disabled={starting}>
+            {starting ? <Loader2 aria-hidden="true" className="spinner" /> : null}
+            Retry
+          </button>
+          <button
+            className="btn btn-secondary"
+            onClick={() => {
+              api
+                .openExternalUrl("https://login.tailscale.com/admin/settings/dns")
+                .catch((err) => reportError(parseErrorMessage(err)));
+            }}
+          >
+            Open admin console
           </button>
           <button className="btn btn-secondary" onClick={() => setHelpVisible((v) => !v)} aria-expanded={helpVisible}>
             <LifeBuoy aria-hidden="true" />

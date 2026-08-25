@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Transform the current Windows MVP into a polished desktop MCP manager with a one-click Start/Stop flow, a persistent Tailscale Funnel `*.ts.net` endpoint, capability-protected public routing, verified connection state, improved reliability, and a complete Dashboard/Workspaces/Activity/Security/Settings UX.
+**Goal:** Transform the current Windows MVP into a polished desktop MCP manager with a one-click Start/Stop flow, a persistent Tailscale Funnel `*.ts.net` endpoint, capability-protected public routing, verified connection state, explicit per-workspace Read/Write/Execute permissions with gated PowerShell execution, improved reliability, and a complete Dashboard/Workspaces/Activity/Security/Settings UX.
 
 **Architecture:** Keep the Rust `crates/core` filesystem policy layer unchanged as the only filesystem doorway. Add a small bundled Go `tsnet` sidecar that owns an app-specific persistent Tailscale node, opens a Funnel-only TLS listener on port 443, protects the public route with a 256-bit capability path, and reverse-proxies accepted MCP traffic to the Rust loopback MCP server. Replace the current tunnel lifecycle with a Rust connection state machine, then rebuild the React UI around that state machine.
 
@@ -21,10 +21,13 @@
 - `Online` means end-to-end public health verification succeeded; successful process spawn is not enough.
 - Stop preserves Tailscale identity and capability token so the full endpoint stays stable across normal restarts.
 - Filesystem access continues through the existing `CoreServices` fail-closed policy pipeline.
-- New workspaces default to Read ON, Write OFF.
+- New workspaces default to Read ON, Write OFF, Execute OFF.
+- Execute is a separate workspace capability. Approved Commands is the default execution mode; Full PowerShell requires explicit opt-in and a risk acknowledgement.
+- Never describe `cwd` confinement, PowerShell Constrained Language, or an executable allowlist as an OS/filesystem sandbox. Full PowerShell can access resources allowed to the Windows user outside the workspace.
+- Execution results are bounded: default timeout 60 seconds, hard maximum 10 minutes, stdout/stderr maximum 512 KiB each.
 - UI remains English for this milestone, matching the existing product copy.
 - Pin `tailscale.com` to `v1.102.3` and use Go 1.26.5 or newer; Tailscale v1.102.3 is built on the Go 1.26 toolchain.
-- OAuth 2.1, alternate tunnel providers, Git tools, terminal/process tools, delete/move/rename filesystem tools, macOS/Linux packaging, and mobile support are out of scope.
+- OAuth 2.1, alternate tunnel providers, dedicated Git MCP tools, strict VM/container command isolation, delete/move/rename filesystem tools, macOS/Linux packaging, and mobile support are out of scope.
 
 ---
 
@@ -50,6 +53,18 @@
 - Create `src-tauri/src/connection/health.rs` — public health verification.
 - Create `src-tauri/src/connection/manager.rs` — Start/Stop/Retry/Rotate/Reset state machine.
 - Create `src-tauri/src/connection/test_support.rs` under `#[cfg(test)]` or `src-tauri/tests/support/` — deterministic fake sidecar helpers.
+
+### Rust execution subsystem
+
+- Create `crates/core/src/execution/mod.rs` — execution DTOs, stable error mapping, module exports.
+- Create `crates/core/src/execution/policy.rs` — approved-command allowlist, execution-mode checks, cwd confinement.
+- Create `crates/core/src/execution/runner.rs` — direct process spawning, bounded stdout/stderr, timeout, sanitized environment.
+- Create/refactor `src-tauri/src/process_job.rs` — shared Job Object lifecycle used by both Tailscale sidecar and command execution; if Task 8 already created `connection/windows_job.rs`, Task 13B extracts the generic implementation without changing behavior.
+- Modify `crates/core/src/models.rs` — `can_execute` and `execution_mode` workspace fields.
+- Modify `crates/core/src/db.rs` — additive SQLite migration for execution permission fields.
+- Modify `crates/core/src/workspace_repo.rs` — execution capability CRUD/defaults.
+- Modify `src-tauri/src/server.rs` — expose `run_command` and `run_powershell` MCP tools.
+- Modify `src-tauri/tests/mcp_integration.rs` — execution permission/tool/audit integration coverage.
 
 ### Rust existing files
 
@@ -1394,6 +1409,525 @@ git commit -m "feat: enrich safe MCP audit activity"
 
 ---
 
+### Task 13A: Add Per-Workspace Execute Capability and Execution Mode
+
+**Files:**
+- Modify: `crates/core/src/models.rs`
+- Modify: `crates/core/src/db.rs`
+- Modify: `crates/core/src/workspace_repo.rs`
+- Modify: `crates/core/src/error.rs`
+- Modify: `crates/core/src/pipeline.rs`
+- Modify: `crates/core/src/lib.rs`
+- Modify: `src-tauri/src/commands.rs`
+- Modify: `src-tauri/src/lib.rs`
+- Test: core unit tests in the same modules plus command serialization coverage
+
+**Interfaces:**
+- Produces:
+
+```rust
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    ApprovedCommands,
+    FullPowerShell,
+}
+```
+
+- Extends `Workspace` with:
+
+```rust
+pub can_execute: bool,
+pub execution_mode: ExecutionMode,
+```
+
+- Produces `workspace_repo::update_execution_access(db, id, can_execute, mode)`.
+- Replaces the boolean `needs_write` pipeline argument with an explicit capability enum:
+
+```rust
+pub enum RequiredCapability { Read, Write, Execute }
+```
+
+- [ ] **Step 1: Write migration/default tests before changing the schema**
+
+Required assertions:
+
+```text
+existing pre-execution DB opens successfully
+existing workspace migrates with can_execute=false
+existing workspace migrates with execution_mode=approved_commands
+new workspace defaults Read=true, Write=false, Execute=false
+changing Execute does not silently change Read/Write
+```
+
+Construct the legacy database in a temp directory using the old `workspaces` schema, then call `Database::open` and assert the new columns exist and carry defaults.
+
+- [ ] **Step 2: Add idempotent SQLite migration**
+
+Do not rely on `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`. Query `PRAGMA table_info(workspaces)` and add only missing columns:
+
+```sql
+ALTER TABLE workspaces ADD COLUMN can_execute INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE workspaces ADD COLUMN execution_mode TEXT NOT NULL DEFAULT 'approved_commands';
+```
+
+Reject unknown stored execution-mode values as `IO_ERROR`/data corruption rather than silently enabling PowerShell.
+
+- [ ] **Step 3: Extend the Workspace model and row mapping**
+
+Map exactly:
+
+```text
+0 -> can_execute false
+1 -> can_execute true
+"approved_commands" -> ExecutionMode::ApprovedCommands
+"full_powershell" -> ExecutionMode::FullPowerShell
+```
+
+- [ ] **Step 4: Add execution permission repository method**
+
+```rust
+pub fn update_execution_access(
+    db: &Database,
+    id: &str,
+    can_execute: bool,
+    mode: ExecutionMode,
+) -> Result<(), CoreError>
+```
+
+Keep the existing `update_capabilities(read, write)` API unchanged so an in-progress frontend/backend implementation is not unnecessarily broken.
+
+- [ ] **Step 5: Replace pipeline's `needs_write: bool` with `RequiredCapability`**
+
+Required behavior:
+
+```text
+Read    -> require can_read
+Write   -> require can_read && can_write
+Execute -> require can_execute only
+```
+
+Add stable error code:
+
+```text
+EXECUTE_DISABLED
+```
+
+Pause remains the first gate for every capability.
+
+- [ ] **Step 6: Update existing MCP call sites to pass Read/Write explicitly**
+
+No filesystem behavior should otherwise change.
+
+- [ ] **Step 6A: Expose the execution-permission mutation to the UI**
+
+Add and register this thin Tauri command only after `ExecutionMode` exists:
+
+```rust
+#[tauri::command]
+pub fn set_execution_access(
+    state: State<'_, AppState>,
+    id: String,
+    can_execute: bool,
+    execution_mode: lc_core::models::ExecutionMode,
+) -> Result<(), String> {
+    lc_core::workspace_repo::update_execution_access(
+        &state.core.db,
+        &id,
+        can_execute,
+        execution_mode,
+    )
+    .map_err(err_string)
+}
+```
+
+Write a UI-source audit row for the permission mutation without command/script content. Register `set_execution_access` in `generate_handler!`.
+
+- [ ] **Step 7: Run narrow then full core tests**
+
+```powershell
+cargo test -p core workspace_repo
+cargo test -p core pipeline
+cargo test -p core
+```
+
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```powershell
+git add crates/core src-tauri/src/commands.rs src-tauri/src/lib.rs
+git commit -m "feat: add workspace execute capability"
+```
+
+---
+
+### Task 13B: Implement Bounded Developer Command and PowerShell Runner
+
+**Files:**
+- Create: `src-tauri/src/execution/mod.rs`
+- Create: `src-tauri/src/execution/policy.rs`
+- Create: `src-tauri/src/execution/runner.rs`
+- Create or refactor: `src-tauri/src/process_job.rs`
+- Modify: `src-tauri/src/lib.rs`
+- Modify: `src-tauri/Cargo.toml`
+- Test: unit tests in `execution/policy.rs` and `execution/runner.rs`
+
+**Interfaces:**
+- Produces:
+
+```rust
+pub const DEFAULT_APPROVED_COMMANDS: &[&str] = &[
+    "git", "cargo", "rustc", "npm", "npx", "node", "pnpm", "yarn",
+    "python", "python3", "pip", "go", "dotnet",
+];
+
+pub struct RunCommandRequest {
+    pub program: String,
+    pub args: Vec<String>,
+    pub cwd: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+pub struct RunPowerShellRequest {
+    pub script: String,
+    pub cwd: Option<String>,
+    pub timeout_ms: Option<u64>,
+}
+
+pub struct ExecutionResult {
+    pub exit_code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+    pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
+    pub duration_ms: u64,
+}
+```
+
+- Constants:
+
+```rust
+DEFAULT_TIMEOUT_MS = 60_000
+MAX_TIMEOUT_MS = 600_000
+MAX_STREAM_BYTES = 512 * 1024
+```
+
+- [ ] **Step 1: If Task 8 already created a connection-specific Job Object helper, extract it first**
+
+Move only the generic child-process Job Object implementation to:
+
+```text
+src-tauri/src/process_job.rs
+```
+
+Both Tailscale sidecar lifecycle and command execution must use the same `JobHandle` implementation with `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`. Run the existing Task 8 Job Object test after the extraction before changing execution behavior.
+
+- [ ] **Step 2: Write policy tests before implementation**
+
+Cover:
+
+```text
+cargo -> allowed
+C:\Tools\cargo.exe -> reject absolute executable path
+cmd.exe -> COMMAND_NOT_ALLOWED
+powershell.exe through run_command -> COMMAND_NOT_ALLOWED
+program containing slash/backslash -> COMMAND_NOT_ALLOWED
+cwd '.' -> workspace root
+cwd 'src' -> accepted when inside workspace
+cwd '..' -> PATH_OUTSIDE_WORKSPACE
+cwd through junction/symlink outside -> PATH_OUTSIDE_WORKSPACE
+timeout omitted -> 60s
+timeout > 10m -> clamp/reject as INVALID_ARGUMENT (choose reject and pin test)
+```
+
+Executable matching is case-insensitive on Windows and accepts the `.exe` suffix for allowlisted basenames, e.g. `cargo.exe` maps to `cargo`.
+
+- [ ] **Step 3: Implement direct-exec policy with no shell parsing**
+
+`run_command` must call `Command::new(resolved_program)` with `.args(&request.args)`. Never construct:
+
+```text
+cmd.exe /C ...
+powershell -Command "<joined args>"
+```
+
+for the Approved Commands path.
+
+Resolve programs through `PATH`, but validate the requested basename against `DEFAULT_APPROVED_COMMANDS` before lookup. Reject user-supplied absolute/relative executable paths in this milestone.
+
+- [ ] **Step 4: Constrain only the requested working directory honestly**
+
+Resolve `cwd` with the existing `lc_core::confinement::ensure_inside(workspace_root, workspace_root.join(cwd))` logic. The resulting directory becomes `Command::current_dir`.
+
+Document in code comments and user-facing copy:
+
+```text
+cwd confinement does not prevent the executed program from opening paths outside the workspace.
+```
+
+Do not claim otherwise in error messages or UI.
+
+- [ ] **Step 5: Build a sanitized child environment**
+
+Start with `env_clear()` and copy only required non-secret host variables needed for Windows developer tooling:
+
+```text
+SystemRoot
+WINDIR
+PATH
+PATHEXT
+TEMP
+TMP
+USERPROFILE
+APPDATA
+LOCALAPPDATA
+ProgramFiles
+ProgramFiles(x86)
+ProgramData
+```
+
+Never forward variables whose names contain case-insensitive secret markers:
+
+```text
+TOKEN
+SECRET
+PASSWORD
+API_KEY
+APIKEY
+AUTH
+CREDENTIAL
+MCP_CAPABILITY
+TAILSCALE
+```
+
+The explicit deny rule wins over the allowlist.
+
+- [ ] **Step 6: Implement bounded concurrent stdout/stderr capture**
+
+Drain both pipes concurrently so a full stderr pipe cannot deadlock stdout. Keep at most 512 KiB per stream, continue draining/discarding after the cap, and set the matching truncation flag.
+
+Decode output with UTF-8 lossy conversion only at result construction; retain byte counting internally.
+
+- [ ] **Step 7: Implement timeout and process-tree termination**
+
+Assign the process to a Job Object immediately after spawn. On timeout:
+
+```text
+kill job/process tree
+wait for child reap
+return timed_out=true
+exit_code=None or actual code if available after termination
+```
+
+Do not leave grandchildren such as `npm -> node` or `cargo -> rustc` running.
+
+- [ ] **Step 8: Implement Full PowerShell as a separate runner**
+
+PowerShell resolution order:
+
+```text
+pwsh.exe
+powershell.exe
+```
+
+Launch with:
+
+```text
+-NoLogo -NoProfile -NonInteractive -Command -
+```
+
+Write `request.script` to stdin, close stdin, then capture output using the same timeout/bounds/Job Object path. Do not place the script in argv, diagnostics, or audit detail.
+
+This function does not decide authorization; Task 13C gates it by workspace execution mode.
+
+- [ ] **Step 9: Add runner tests with deterministic helper executables**
+
+Use Windows built-ins or a tiny test fixture to prove:
+
+```text
+stdout captured
+stderr captured
+large output truncates without deadlock
+60s default is represented correctly without waiting 60s (inject clock/timeout in test helper)
+short test timeout kills sleeper
+child/grandchild is killed by Job Object
+PowerShell script arrives through stdin and returns expected output
+```
+
+- [ ] **Step 10: Run tests**
+
+```powershell
+cargo test -p local-workspace-mcp-manager execution -- --nocapture
+```
+
+Expected: PASS on Windows.
+
+- [ ] **Step 11: Commit**
+
+```powershell
+git add src-tauri/src/execution src-tauri/src/process_job.rs src-tauri/src/connection src-tauri/src/lib.rs src-tauri/Cargo.toml Cargo.lock
+git commit -m "feat: add bounded workspace command runner"
+```
+
+---
+
+### Task 13C: Expose `run_command` and Full PowerShell MCP Tools with Audit
+
+**Files:**
+- Modify: `src-tauri/src/server.rs`
+- Modify: `crates/core/src/audit.rs`
+- Modify: `crates/core/src/error.rs`
+- Modify: `src-tauri/tests/mcp_integration.rs`
+- Modify: `README.md` only if tool list is documented before Task 25
+
+**Interfaces:**
+- Adds MCP tools:
+
+```text
+run_command(workspace_id, program, args?, cwd?, timeout_ms?)
+run_powershell(workspace_id, script, cwd?, timeout_ms?)
+```
+
+- Adds stable errors:
+
+```text
+COMMAND_NOT_ALLOWED
+POWERSHELL_DISABLED
+INVALID_WORKING_DIRECTORY
+COMMAND_TIMEOUT
+EXECUTION_FAILED
+```
+
+- [ ] **Step 1: Write MCP integration tests for authorization before adding handlers**
+
+Required scenarios:
+
+```text
+Execute OFF + run_command -> EXECUTE_DISABLED
+Execute ON/Approved + cargo --version -> allowed
+Execute ON/Approved + cmd.exe -> COMMAND_NOT_ALLOWED
+Execute ON/Approved + run_powershell -> POWERSHELL_DISABLED
+Execute ON/FullPowerShell + run_powershell "Write-Output ok" -> allowed
+Pause ON + either execution tool -> ACCESS_PAUSED
+cwd '..' -> PATH_OUTSIDE_WORKSPACE
+```
+
+Use a deterministic approved test executable if a developer tool is not guaranteed in CI; do not make the test suite depend on Cargo being discoverable through the spawned child environment unless Cargo is explicitly part of the CI contract.
+
+- [ ] **Step 2: Add MCP argument schemas**
+
+```rust
+pub struct RunCommandArgs {
+    pub workspace_id: String,
+    pub program: String,
+    #[serde(default)] pub args: Vec<String>,
+    #[serde(default)] pub cwd: Option<String>,
+    #[serde(default)] pub timeout_ms: Option<u64>,
+}
+
+pub struct RunPowerShellArgs {
+    pub workspace_id: String,
+    pub script: String,
+    #[serde(default)] pub cwd: Option<String>,
+    #[serde(default)] pub timeout_ms: Option<u64>,
+}
+```
+
+Set `read_only_hint = false` for both. Execution can mutate files even when the command text appears read-only.
+
+- [ ] **Step 3: Gate both tools through `RequiredCapability::Execute`**
+
+Inside the audited closure:
+
+```text
+run_command:
+  workspace.can_execute must already be true from pipeline
+  policy validates approved program + cwd
+  runner executes
+
+run_powershell:
+  workspace.can_execute must already be true
+  workspace.execution_mode must equal FullPowerShell
+  otherwise POWERSHELL_DISABLED
+```
+
+Do not make Write permission a prerequisite for Execute; Execute is its own high-risk permission and may itself mutate files.
+
+- [ ] **Step 4: Add safe execution audit metadata**
+
+For `run_command`, store only:
+
+```json
+{
+  "program":"cargo",
+  "arg_count":2,
+  "cwd":".",
+  "exit_code":0,
+  "duration_ms":1234,
+  "timed_out":false,
+  "stdout_truncated":false,
+  "stderr_truncated":false
+}
+```
+
+For `run_powershell`, store:
+
+```json
+{
+  "script_bytes":42,
+  "script_sha256":"<hash>",
+  "cwd":".",
+  "exit_code":0,
+  "duration_ms":1234,
+  "timed_out":false,
+  "stdout_truncated":false,
+  "stderr_truncated":false
+}
+```
+
+Never store the PowerShell script body, stdout, stderr, environment, capability URL, or Tailscale auth URL in audit detail.
+
+- [ ] **Step 5: Map timeouts to a stable tool error only when no useful process result exists**
+
+Preferred result contract: a completed timeout returns `ExecutionResult { timed_out: true, ... }` so ChatGPT can reason about partial output. Reserve `COMMAND_TIMEOUT` for failures where the runner cannot terminate/reap safely and must surface an error.
+
+- [ ] **Step 6: Verify tool discovery now exposes 10 tools**
+
+Expected MCP tool surface:
+
+```text
+list_workspaces
+list_directory
+find_files
+search_text
+read_file
+read_files
+create_file
+apply_patch
+run_command
+run_powershell
+```
+
+- [ ] **Step 7: Run integration and core tests**
+
+```powershell
+cargo test -p core
+cargo test -p local-workspace-mcp-manager --test mcp_integration -- --nocapture
+```
+
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```powershell
+git add crates/core src-tauri/src/server.rs src-tauri/tests/mcp_integration.rs README.md
+git commit -m "feat: expose audited MCP execution tools"
+```
+
+---
+
 ### Task 14: Create the Frontend Design System and Desktop Shell
 
 **Files:**
@@ -1519,6 +2053,26 @@ git commit -m "feat: add polished desktop app shell"
 - Consumes Rust `ConnectionStatus`, workspace, audit, settings DTOs.
 - Produces typed frontend API methods and `connection-status` event subscription.
 
+- [ ] **Step 0A: Extend the frontend Workspace contract for execution**
+
+```ts
+export type ExecutionMode = "approved_commands" | "full_powershell";
+
+export interface Workspace {
+  id: string;
+  name: string;
+  root_path: string;
+  can_read: boolean;
+  can_write: boolean;
+  can_execute: boolean;
+  execution_mode: ExecutionMode;
+  created_at: string;
+  updated_at: string;
+}
+```
+
+Use these exact serialized names from the Rust model; do not invent frontend-only aliases.
+
 - [ ] **Step 1: Define discriminated TypeScript connection state**
 
 ```ts
@@ -1544,6 +2098,7 @@ stopConnection()
 retryConnection()
 rotateConnectionUrl()
 resetTailscaleIdentity()
+setExecutionAccess(id, canExecute, executionMode)
 getAppSettings()
 updateAppSettings(settings)
 ```
@@ -1642,6 +2197,7 @@ Dashboard must answer at a glance:
 ```text
 How many workspaces are available?
 How many allow write?
+How many allow execute / Full PowerShell?
 Is global access paused?
 What happened recently?
 ```
@@ -1739,7 +2295,8 @@ git commit -m "feat: add guided Tailscale onboarding"
 - Modify CSS
 
 **Interfaces:**
-- Consumes existing workspace CRUD commands.
+- Consumes existing workspace CRUD commands plus `set_execution_access` from Task 13A.
+- Shows `Read`, `Write`, and `Execute` as the three top-level workspace permissions.
 
 - [ ] **Step 1: Preserve native folder picker add flow**
 
@@ -1762,6 +2319,27 @@ otherwise:
 
 Backend remains authoritative.
 
+- [ ] **Step 2A: Add Execute permission and execution-mode UX**
+
+Rules:
+
+```text
+new workspace -> Execute OFF + Approved Commands mode stored
+Execute OFF -> hide/disable mode selector
+Execute ON -> default Approved Commands
+Approved Commands -> show concise list of allowed developer executables
+Full PowerShell -> show high-risk warning and require explicit confirmation
+```
+
+Full PowerShell confirmation copy:
+
+```text
+Enable Full PowerShell?
+PowerShell will start in this workspace, but the working directory is not a security sandbox. Scripts may access files, processes, the network, and other resources allowed to your Windows account. Enable this only for workspaces you trust.
+```
+
+Do not enable Execute or Full PowerShell as a side effect of enabling Write.
+
 - [ ] **Step 3: Replace native confirm with `ConfirmDialog`**
 
 Exact destructive copy:
@@ -1773,7 +2351,7 @@ ChatGPT will lose access to this folder. Files on disk will not be deleted.
 
 - [ ] **Step 4: Add empty state and permission summaries**
 
-Do not add per-tool permission switches yet because the backend permission model remains read/write in this milestone.
+Do not add per-tool switches for every MCP tool. This milestone exposes only the three top-level workspace capabilities Read / Write / Execute, with execution mode nested under Execute.
 
 - [ ] **Step 5: Build**
 
@@ -1842,6 +2420,20 @@ path if present
 
 Display safe JSON with pretty formatting. Never synthesize or fetch file contents from an audit event.
 
+For execution events, render dedicated fields when present:
+
+```text
+program / PowerShell
+relative working directory
+exit code
+duration
+timed out
+stdout truncated
+stderr truncated
+```
+
+Never render a complete PowerShell script body from history; the backend audit contract stores only script byte length + SHA-256.
+
 - [ ] **Step 5: Refresh activity after workspace/security mutations and MCP connection events**
 
 Keep refresh explicit/event-driven; no sub-second polling.
@@ -1876,7 +2468,15 @@ Sensitive files              Protected
 Path confinement             Active
 Concurrent edit protection   Active
 Write-enabled workspaces     <count>
+Execute-enabled workspaces   <count>
+Full PowerShell workspaces   <count> · High risk when > 0
 Global MCP access            Active/Paused
+```
+
+If any workspace has Full PowerShell enabled, show a persistent security callout on this page:
+
+```text
+Full PowerShell is enabled for one or more workspaces. Working-directory confinement is not a Windows security sandbox; scripts may access other resources available to your account.
 ```
 
 - [ ] **Step 2: Move Pause/Resume here while retaining a compact paused warning globally**
@@ -1949,6 +2549,27 @@ Tailscale state location: read-only, path elided with reveal/copy action
 ```
 
 Changing hostname while identity exists must show reset/re-enrollment warning and must not silently mutate a running node identity.
+
+- [ ] **Step 2A: Add Execution settings section**
+
+Show the fixed approved-command list from Task 13B and the execution bounds:
+
+```text
+Approved Commands
+  git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet
+
+Default timeout     60 seconds
+Maximum timeout     10 minutes
+Output limit        512 KiB per stdout/stderr stream
+```
+
+Include this explanation:
+
+```text
+Approved Commands limits which executable ChatGPT may launch, but those tools can still execute project code such as npm scripts, Cargo build scripts, or Git hooks. Enable Execute only for trusted workspaces.
+```
+
+Custom command allowlist editing and Strict Isolation are deferred; do not add non-functional controls.
 
 - [ ] **Step 3: Add redacted diagnostics command**
 
@@ -2094,6 +2715,30 @@ Verify Activity records each call.
 
 Enable write, read the file for revision, apply a patch, and verify disk content changed exactly once.
 
+- [ ] **Step 6A: Run MCP execution scenarios**
+
+With Execute initially OFF, ask ChatGPT to run an approved command and verify `EXECUTE_DISABLED`.
+
+Then enable Execute in `Approved commands` mode and verify:
+
+```text
+run_command("git", ["--version"]) -> result with exit code/output
+run_command("cmd.exe", ["/C", "echo hi"]) -> COMMAND_NOT_ALLOWED
+run_powershell("Write-Output ok") -> POWERSHELL_DISABLED
+cwd=".." -> PATH_OUTSIDE_WORKSPACE
+```
+
+Switch the same workspace to Full PowerShell only after the UI warning/confirmation and verify:
+
+```powershell
+Write-Output "ok"
+Get-Location
+```
+
+returns successfully with the workspace as the initial working directory. Do not use this E2E to claim filesystem sandboxing; explicitly verify the UI warning remains visible in Security/Workspace details.
+
+Use a short sleeper command to verify timeout terminates the process tree and Activity records timeout/truncation metadata without script/output contents.
+
 - [ ] **Step 7: Verify security boundaries**
 
 Test:
@@ -2232,8 +2877,11 @@ Funnel is public internet ingress.
 The displayed MCP URL is a secret capability URL.
 Do not share it.
 Raw /mcp is not exposed.
-Filesystem access is still constrained to approved workspaces.
+Filesystem read/write tools are still constrained to approved workspaces.
 Sensitive files remain blocked.
+Execute is a separate per-workspace permission and defaults OFF.
+Approved Commands limits executable selection but is not an OS/filesystem sandbox.
+Full PowerShell is an advanced high-risk mode; cwd only sets the initial working directory and does not prevent access to other resources allowed to the Windows user.
 ```
 
 - [ ] **Step 3: Document Tailscale prerequisites**
@@ -2320,7 +2968,15 @@ git commit -m "docs: finalize Tailscale Funnel release"
 - [ ] Sidecar stdout is structured NDJSON and stderr is continuously drained/redacted.
 - [ ] Windows Job Object prevents orphan sidecar processes.
 - [ ] Existing-file patch replacement is proven working on Windows.
-- [ ] Workspace read/write and sensitive-file protections still pass all tests.
+- [ ] Workspace Read/Write/Execute permissions and sensitive-file protections still pass all tests.
+- [ ] New workspaces default to Execute OFF and Approved Commands mode.
+- [ ] MCP tool discovery exposes exactly 10 tools, including `run_command` and `run_powershell`.
+- [ ] `run_command` uses direct argv execution, rejects non-allowlisted/absolute executable paths, and validates workspace-relative cwd.
+- [ ] `run_powershell` remains blocked unless Full PowerShell is explicitly enabled for that workspace.
+- [ ] Full PowerShell scripts are sent through stdin, not argv or audit logs.
+- [ ] Command timeout kills the complete process tree and stdout/stderr stay bounded to 512 KiB each.
+- [ ] Activity/diagnostics never persist PowerShell script bodies, command output, child environment secrets, capability tokens, or Tailscale auth URLs.
+- [ ] Workspaces and Security UI clearly warn that cwd/allowlists are not an OS/filesystem sandbox.
 - [ ] Activity UI shows safe path/metrics without file content leakage.
 - [ ] Dashboard, Workspaces, Activity, Security, and Settings are complete and visually coherent.
 - [ ] Onboarding supports first workspace, Tailscale login, Funnel approval recovery, and endpoint copy.
@@ -2337,9 +2993,10 @@ Use the tasks in order. Treat these as hard review gates:
 1. **After Task 4:** review Go sidecar security and tsnet behavior before bundling.
 2. **After Task 10:** review Rust state machine and secret-handling boundaries before frontend work.
 3. **After Task 13:** review that audit enrichment does not leak content/secrets.
-4. **After Task 17:** review the complete Start/Login/Online UX before building secondary pages.
-5. **After Task 23:** real Tailscale + ChatGPT E2E must pass before deleting legacy runtime.
-6. **After Task 25:** release only after automated verification and clean-install smoke test.
+4. **After Task 13C:** review Execute/PowerShell authorization, process-tree cleanup, output bounds, and audit redaction before exposing execution controls in the UI.
+5. **After Task 17:** review the complete Start/Login/Online UX before building secondary pages.
+6. **After Task 23:** real Tailscale + ChatGPT E2E, including Execute/PowerShell scenarios, must pass before deleting legacy runtime.
+7. **After Task 25:** release only after automated verification and clean-install smoke test.
 
 ## Implementation Notes for Agentic Execution
 
@@ -2350,4 +3007,8 @@ Use the tasks in order. Treat these as hard review gates:
 - Do not store the capability token in `settings.json`, SQLite audit records, environment dumps, command lines, or frontend persistent storage.
 - Do not infer `*.ts.net` hostname from the configured hostname; use `tsnet.Server.CertDomains()` after the node is running.
 - Do not report `Online` from process spawn or `funnel_listening` alone; wait for public protected health verification.
+- Do not implement Approved Commands by joining user input into `cmd.exe /C`, `powershell -Command`, or another shell string; launch the validated executable directly with an argv array.
+- Do not label Approved Commands, `cwd` validation, Execution Policy, or PowerShell Constrained Language as a filesystem sandbox.
+- Never enable Execute or Full PowerShell by default, and never couple them implicitly to Write permission.
+- Do not record PowerShell script bodies, stdout/stderr, or inherited environment values in audit/diagnostics.
 - If a real Tailscale API/tsnet behavior differs from the pinned official v1.102.3 API, stop that task, verify against official Tailscale docs/source for v1.102.3, update the spec/plan with the exact verified behavior, then continue.

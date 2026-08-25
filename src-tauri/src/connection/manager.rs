@@ -547,6 +547,13 @@ async fn run_loop(
                     shared
                         .set_state(gen, ConnectionState::NeedsFunnelPermission { message })
                         .await;
+                } else if code == "TAILSCALE_HTTPS_NOT_READY" {
+                    // One-time tailnet setting (admin console → DNS → HTTPS
+                    // certificates). The sidecar exits on its own after this
+                    // failure; the state persists so the UI can guide the user.
+                    shared
+                        .set_state(gen, ConnectionState::NeedsHttpsSetup { message })
+                        .await;
                 } else {
                     shared
                         .set_state(gen, ConnectionState::Error { code, message })

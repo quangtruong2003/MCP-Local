@@ -9,4 +9,5 @@
 #![allow(dead_code)]
 
 pub(crate) mod policy;
+pub(crate) mod resolver;
 pub(crate) mod runner;
