@@ -3,7 +3,7 @@
 //! errors that never echo the capability token or its URL path.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Marker header the bridge must return on the public health endpoint.
 const HEALTH_MARKER_HEADER: &str = "x-mcp-bridge-health";
@@ -16,6 +16,22 @@ const REQUEST_TIMEOUT_SECS: u64 = 2;
 /// Delays (ms) between five total probe attempts. The first probe is always
 /// immediate; these four waits total only 1.5s instead of the old 5.5s.
 pub const RETRY_DELAYS_MS: [u64; 4] = [100, 200, 400, 800];
+
+/// After the five fast probes, keep probing once per second until this total
+/// verification window expires. A cold tsnet start can need several extra
+/// seconds before Tailscale's public ingress routes the funnel name — the old
+/// budget gave up right there, so the first start failed while a manual Retry
+/// (clicked seconds later) succeeded. Success still returns on the first good
+/// probe, so a warm start is never slowed down.
+const VERIFY_TOTAL_DEADLINE_SECS: u64 = 20;
+
+/// Delay between slow-tail probes once the fast schedule is exhausted.
+const TAIL_PROBE_DELAY_MS: u64 = 1_000;
+
+/// Re-run DNS fallback resolution at most this often while probes keep
+/// failing with connection errors and no usable IPv4 pin is known (a fresh
+/// funnel name may appear on DoH resolvers later than on none).
+const RESOLVE_RETRY_SECS: u64 = 3;
 
 /// DNS-over-HTTPS JSON resolvers tried in order when the system resolver
 /// yields no usable IPv4 address for the funnel host.
@@ -247,17 +263,27 @@ async fn resolve_probe_addrs(fqdn: &str) -> Vec<SocketAddr> {
         .collect()
 }
 
-/// Probes the public Funnel health endpoint up to five times with the
-/// [`RETRY_DELAYS_MS`] backoff schedule, requiring HTTP 204 plus the
-/// `x-mcp-bridge-health: ok` marker on success.
-pub async fn verify_public_health(fqdn: &str, capability: &str) -> Result<(), HealthError> {
-    let url = health_url(fqdn, capability)?;
-    let direct_client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-        .build()
-        .map_err(|_| {
-            HealthError::Request("request to public health endpoint failed: client".into())
-        })?;
+/// Builds a probe client, optionally pinning `fqdn` to known-global IPv4
+/// addresses (defeats ISP resolvers that answer AAAA-only for `*.ts.net`).
+fn probe_client(fqdn: &str, pin: Option<&[SocketAddr]>) -> Result<reqwest::Client, HealthError> {
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    if let Some(addrs) = pin {
+        builder = builder.resolve_to_addrs(fqdn, addrs);
+    }
+    builder.build().map_err(|_| {
+        HealthError::Request("request to public health endpoint failed: client".into())
+    })
+}
+
+/// Verifies the public Funnel health endpoint for an already-constructed URL.
+///
+/// Schedule: one immediate probe (with background IPv4 fallback resolution),
+/// four fast retries, then a one-second slow tail up to `deadline`. A
+/// connection-type failure re-runs DNS fallback (bounded by
+/// [`RESOLVE_RETRY_SECS`]) so a funnel name that shows up on resolvers late is
+/// still picked up without a manual retry.
+async fn verify_url(url: &url::Url, fqdn: &str, deadline: Duration) -> Result<(), HealthError> {
+    let direct_client = probe_client(fqdn, None)?;
 
     // DNS fallback used to block the happy path before the first request. Run
     // it concurrently instead: if ordinary HTTPS works, Online can be reached
@@ -266,32 +292,71 @@ pub async fn verify_public_health(fqdn: &str, capability: &str) -> Result<(), He
     let fqdn_owned = fqdn.to_string();
     let resolver = tokio::spawn(async move { resolve_probe_addrs(&fqdn_owned).await });
     let (first, resolved) =
-        first_probe_with_background_resolution(&direct_client, &url, resolver).await;
+        first_probe_with_background_resolution(&direct_client, url, resolver).await;
     let mut last = match first {
         Ok(()) => return Ok(()),
         Err(e) => e,
     };
 
-    let retry_client = if let Some(addrs) = resolved.filter(|addrs| !addrs.is_empty()) {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
-            .resolve_to_addrs(fqdn, &addrs)
-            .build()
-            .map_err(|_| {
-                HealthError::Request("request to public health endpoint failed: client".into())
-            })?
-    } else {
-        direct_client
+    let mut client = match resolved.filter(|addrs| !addrs.is_empty()) {
+        Some(addrs) => probe_client(fqdn, Some(&addrs))?,
+        None => direct_client,
     };
+    let mut last_resolve = Instant::now();
+    let started = Instant::now();
+
+    // A connect-type failure may mean the fallback resolution came back
+    // empty (transient DoH failure, late DNS propagation of a fresh funnel
+    // name) — re-resolve on a bounded cadence and re-pin the client.
+    macro_rules! maybe_repin {
+        () => {
+            if matches!(last, HealthError::Request(_))
+                && last_resolve.elapsed() >= Duration::from_secs(RESOLVE_RETRY_SECS)
+            {
+                last_resolve = Instant::now();
+                let addrs = resolve_probe_addrs(fqdn).await;
+                if !addrs.is_empty() {
+                    client = probe_client(fqdn, Some(&addrs))?;
+                }
+            }
+        };
+    }
 
     for delay_ms in RETRY_DELAYS_MS {
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
-        match try_once(&retry_client, &url).await {
+        match try_once(&client, url).await {
             Ok(()) => return Ok(()),
-            Err(e) => last = e,
+            Err(e) => {
+                last = e;
+                maybe_repin!();
+            }
+        }
+    }
+
+    // Slow tail: tolerate cold-start funnel/ingress propagation instead of
+    // failing and requiring a manual Retry.
+    while started.elapsed() < deadline {
+        tokio::time::sleep(Duration::from_millis(TAIL_PROBE_DELAY_MS)).await;
+        if started.elapsed() >= deadline {
+            break;
+        }
+        match try_once(&client, url).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                last = e;
+                maybe_repin!();
+            }
         }
     }
     Err(last)
+}
+
+/// Probes the public Funnel health endpoint: five fast attempts, then a
+/// one-second slow tail up to [`VERIFY_TOTAL_DEADLINE_SECS`], requiring HTTP
+/// 204 plus the `x-mcp-bridge-health: ok` marker on success.
+pub async fn verify_public_health(fqdn: &str, capability: &str) -> Result<(), HealthError> {
+    let url = health_url(fqdn, capability)?;
+    verify_url(&url, fqdn, Duration::from_secs(VERIFY_TOTAL_DEADLINE_SECS)).await
 }
 
 #[cfg(test)]
@@ -502,5 +567,81 @@ mod tests {
             try_once(&client, &url).await,
             Err(HealthError::InvalidMarker)
         ));
+    }
+
+    /// Server that answers 404 until `flip_after_ms` elapses, then the real
+    /// 204 + marker — modeling a cold start whose public ingress routes a few
+    /// seconds after FunnelListening.
+    async fn spawn_flipping_health_server(flip_after_ms: u64) -> url::Url {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let ready = Arc::new(AtomicBool::new(false));
+        let flip = ready.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(flip_after_ms)).await;
+            flip.store(true, Ordering::Relaxed);
+        });
+        let handler = move || async move {
+            if ready.load(Ordering::Relaxed) {
+                let mut headers = axum::http::HeaderMap::new();
+                headers.insert(HEALTH_MARKER_HEADER, "ok".parse().unwrap());
+                (axum::http::StatusCode::NO_CONTENT, headers)
+            } else {
+                (
+                    axum::http::StatusCode::NOT_FOUND,
+                    axum::http::HeaderMap::new(),
+                )
+            }
+        };
+        let app = axum::Router::new().route("/abc/health", axum::routing::get(handler));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        url::Url::parse(&format!("http://{addr}/abc/health")).unwrap()
+    }
+
+    /// Regression: the old five-probe budget (~1.5s) expired while public
+    /// ingress was still propagating on a cold start, so the first start
+    /// failed with HEALTH_VERIFY_FAILED and only a manual Retry succeeded.
+    /// The verification must keep probing (slow tail) and go Online on its
+    /// own once the endpoint becomes ready.
+    #[tokio::test]
+    async fn cold_start_ingress_propagation_is_tolerated_without_manual_retry() {
+        // Ready at 3s — well past the old 1.5s fast schedule.
+        let url = spawn_flipping_health_server(3_000).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(15),
+            verify_url(&url, "127.0.0.1", Duration::from_secs(20)),
+        )
+        .await
+        .expect("verification must finish inside its own deadline");
+        assert!(result.is_ok(), "expected eventual Online, got {result:?}");
+    }
+
+    /// The slow tail is bounded: a never-ready endpoint surfaces the last
+    /// error only after the full deadline, not after the fast schedule.
+    #[tokio::test]
+    async fn verification_gives_up_at_deadline_not_at_fast_schedule() {
+        let url = spawn_health_server(axum::http::StatusCode::NOT_FOUND, None).await;
+        let started = std::time::Instant::now();
+        let result = verify_url(&url, "127.0.0.1", Duration::from_secs(2)).await;
+        let elapsed = started.elapsed();
+        assert!(matches!(
+            result,
+            Err(HealthError::UnexpectedStatus { status: 404 })
+        ));
+        // The fast schedule alone finishes in ~1.5s; running past it proves
+        // the tail actually extended the window up to the deadline.
+        assert!(
+            elapsed >= Duration::from_millis(1_900),
+            "verification gave up too early: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "deadline not honored: {elapsed:?}"
+        );
     }
 }
