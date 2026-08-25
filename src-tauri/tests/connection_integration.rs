@@ -48,7 +48,9 @@ fn fake_sidecar_exe() -> PathBuf {
             return candidate;
         }
     }
-    PathBuf::from(env!("CARGO_TARGET_DIR"))
+    // `env!` would fail to compile when the variable is unset (plain
+    // `cargo test` outside CI); fall back to the workspace-local default.
+    PathBuf::from(option_env!("CARGO_TARGET_DIR").unwrap_or("target"))
         .join("debug")
         .join("examples")
         .join(name)
