@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { CheckCircle2, Info, XOctagon } from "lucide-react";
+import { CheckCircle2, Info, PauseCircle, XOctagon } from "lucide-react";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
+import SecurityPage from "./pages/SecurityPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
 import type { AuditEvent, ServerStatus } from "./api";
@@ -133,7 +134,18 @@ export default function App() {
     setOnboardingVisible(false);
   }
 
+  // Security page (plan Task 20): re-pull status after setPaused; rotate/reset
+  // return the fresh ConnectionStatus directly.
+  const refreshConnection = useCallback(async () => {
+    try {
+      setConnection(await api.connectionStatus());
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+    }
+  }, [reportError]);
+
   const meta = VIEW_META[page];
+  const paused = connection?.paused === true;
 
   return (
     <AppShell page={page} onNavigate={setPage} ready={connectionReady} title={meta.title} subtitle={meta.subtitle}>
@@ -149,6 +161,15 @@ export default function App() {
           onFinish={() => finishOnboarding()}
           reportError={reportError}
         />
+      ) : null}
+
+      {/* Global paused strip (plan Task 20 Step 2): shown on every page while
+          MCP access is paused, regardless of connection state. */}
+      {paused ? (
+        <div className="paused-strip" role="status">
+          <PauseCircle aria-hidden="true" />
+          <span>MCP access is paused. Connection may be online, but file tools are blocked.</span>
+        </div>
       ) : null}
 
       {!initialLoadDone ? (
@@ -176,6 +197,14 @@ export default function App() {
           auditEvents={auditEvents}
           workspaces={workspaces}
           onRefresh={async () => setAuditEvents(await api.recentAudit())}
+          reportError={reportError}
+        />
+      ) : page === "security" ? (
+        <SecurityPage
+          connection={connection}
+          workspaces={workspaces}
+          onPauseChanged={refreshConnection}
+          onConnectionChanged={setConnection}
           reportError={reportError}
         />
       ) : (

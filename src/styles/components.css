@@ -1283,3 +1283,115 @@
   font-size: var(--text-dense);
   color: var(--text-secondary);
 }
+
+/* ---------- Global paused strip ---------- */
+
+.paused-strip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 28px;
+  background: var(--warning-soft);
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 25%, transparent);
+  font-size: var(--text-dense);
+  font-weight: 600;
+  color: var(--warning);
+}
+
+.paused-strip svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+}
+
+/* ---------- Security page ---------- */
+
+.security-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.sec-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  box-shadow: var(--shadow-card);
+}
+
+.sec-card-danger {
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+.protection-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.protection-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border-default);
+  font-size: var(--text-dense);
+}
+
+.protection-row:first-child {
+  border-top: none;
+}
+
+.protection-row strong {
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.security-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--text-dense);
+  color: var(--danger);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 25%, transparent);
+}
+
+.security-callout svg {
+  width: 15px;
+  height: 15px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.sec-state-label {
+  font-size: var(--text-dense);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+.reset-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 12px 0 0 48px;
+  font-size: var(--text-dense);
+  color: var(--text-secondary);
+}
+
+.reset-confirm input {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  letter-spacing: 0.08em;
+}
+
