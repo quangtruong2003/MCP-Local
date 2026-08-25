@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { PauseCircle } from "lucide-react";
 import { Toaster } from "sonner";
-import AppShell from "./components/AppShell";
-import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
+import EmptyState from "./components/EmptyState";
+import { AppShell } from "./components/layout/app-shell";
 import { ThemeProvider, useTheme } from "./hooks/use-theme";
 import { useToast } from "./hooks/use-toast";
 import { useAudit } from "./hooks/use-audit";
@@ -131,7 +130,7 @@ export default function App() {
       initialTheme={savedTheme}
       onThemeChange={(t) => void handleThemeChange(t)}
     >
-      <AppShell page={page} onNavigate={setPage} ready={connectionReady} title={meta.title} subtitle={meta.subtitle}>
+      <AppShell page={page} onNavigate={setPage} ready={connectionReady} paused={paused}>
       {onboardingVisible ? (
         <OnboardingFlow
           connection={connection}
@@ -143,15 +142,6 @@ export default function App() {
           onFinish={() => finishOnboarding()}
           reportError={reportError}
         />
-      ) : null}
-
-      {/* Global paused strip (plan Task 20 Step 2): shown on every page while
-          MCP access is paused, regardless of connection state. */}
-      {paused ? (
-        <div className="paused-strip" role="status">
-          <PauseCircle aria-hidden="true" />
-          <span>MCP access is paused. Connection may be online, but file tools are blocked.</span>
-        </div>
       ) : null}
 
       {!initialLoadDone ? (
