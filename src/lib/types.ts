@@ -11,6 +11,7 @@ export interface AppSettings {
   theme: ThemePreference;
   launch_on_startup: boolean;
   close_to_tray: boolean;
+  start_minimized_to_tray: boolean;
 }
 
 // --- Backend contracts (mirror crates/core/src/models.rs serde output) ---

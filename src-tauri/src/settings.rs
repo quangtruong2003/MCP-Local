@@ -154,6 +154,9 @@ pub struct AppSettings {
     /// Closing the window hides to tray instead of exiting.
     #[serde(default = "default_true")]
     pub close_to_tray: bool,
+    /// Launch with the main window hidden (app lives in the tray).
+    #[serde(default)]
+    pub start_minimized_to_tray: bool,
 }
 
 fn default_tailscale_hostname() -> String {
@@ -191,6 +194,7 @@ impl Default for AppSettings {
             theme: default_theme(),
             launch_on_startup: false,
             close_to_tray: true,
+            start_minimized_to_tray: false,
         }
     }
 }
@@ -344,6 +348,7 @@ mod tests {
         assert_eq!(loaded.theme, "system");
         assert!(!loaded.launch_on_startup);
         assert!(loaded.close_to_tray);
+        assert!(!loaded.start_minimized_to_tray);
     }
 
     /// A pre-v3 file (no theme/tray/startup keys) parses with the new
@@ -406,6 +411,7 @@ mod tests {
             theme: "dark".into(),
             launch_on_startup: true,
             close_to_tray: false,
+            start_minimized_to_tray: true,
         };
         save_app_settings(dir.path(), &settings).unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();

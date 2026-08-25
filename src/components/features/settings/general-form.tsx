@@ -14,6 +14,7 @@ interface Flags {
   start_on_launch: boolean;
   launch_on_startup: boolean;
   close_to_tray: boolean;
+  start_minimized_to_tray: boolean;
 }
 
 const ROWS: ReadonlyArray<{
@@ -35,6 +36,13 @@ const ROWS: ReadonlyArray<{
     description: "Registers the app to launch automatically when you sign in to Windows.",
   },
   {
+    key: "start_minimized_to_tray",
+    id: "setting-start-tray",
+    label: "Start minimized to the system tray",
+    description:
+      "Launches the app hidden in the tray instead of opening a window. Reopen it any time from the tray icon.",
+  },
+  {
     key: "close_to_tray",
     id: "setting-close-tray",
     label: "Keep running in the system tray when closed",
@@ -48,6 +56,7 @@ export function GeneralForm({ settings, onSaveSettings, reportError }: Props) {
     start_on_launch: false,
     launch_on_startup: false,
     close_to_tray: true,
+    start_minimized_to_tray: false,
   });
 
   // Re-seed local toggles whenever App loads/replaces settings.
@@ -57,6 +66,7 @@ export function GeneralForm({ settings, onSaveSettings, reportError }: Props) {
       start_on_launch: settings.start_on_launch,
       launch_on_startup: settings.launch_on_startup,
       close_to_tray: settings.close_to_tray,
+      start_minimized_to_tray: settings.start_minimized_to_tray,
     });
   }, [settings]);
 

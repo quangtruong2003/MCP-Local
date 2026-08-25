@@ -95,6 +95,17 @@ pub fn run() {
 
             tray::build(app.handle()).map_err(|e| format!("tray init failed: {e}"))?;
 
+            // The window is created hidden (config `visible: false`) so a
+            // minimized-to-tray launch never flashes it. Show it unless the
+            // user opted to start in the tray; the tray menu and the
+            // single-instance handler reveal it on demand.
+            if !app_settings.start_minimized_to_tray {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+
             if app_settings.start_on_launch {
                 let handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
