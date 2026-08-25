@@ -4,6 +4,7 @@ import { CheckCircle2, Info, PauseCircle, XOctagon } from "lucide-react";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
+import { ThemeProvider } from "./hooks/use-theme";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
 import SecurityPage from "./pages/SecurityPage";
@@ -12,7 +13,15 @@ import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
 import type { AuditEvent, ServerStatus } from "./api";
 import { VIEW_META } from "./types";
-import type { AppSettings, ConnectionStatus, Toast, ToastTone, ViewId, Workspace } from "./types";
+import type {
+  AppSettings,
+  ConnectionStatus,
+  ThemePreference,
+  Toast,
+  ToastTone,
+  ViewId,
+  Workspace,
+} from "./types";
 
 const TOAST_TTL_MS = 5000;
 const TOAST_ICONS: Record<ToastTone, typeof Info> = {
@@ -154,9 +163,26 @@ export default function App() {
 
   const meta = VIEW_META[page];
   const paused = connection?.paused === true;
+  const savedTheme: ThemePreference = settings?.theme ?? "system";
+
+  const handleThemeChange = useCallback(
+    async (t: ThemePreference) => {
+      if (!settings) return;
+      try {
+        await saveSettings({ ...settings, theme: t });
+      } catch (err) {
+        reportError(parseErrorMessage(err));
+      }
+    },
+    [settings, saveSettings, reportError],
+  );
 
   return (
-    <AppShell page={page} onNavigate={setPage} ready={connectionReady} title={meta.title} subtitle={meta.subtitle}>
+    <ThemeProvider
+      initialTheme={savedTheme}
+      onThemeChange={(t) => void handleThemeChange(t)}
+    >
+      <AppShell page={page} onNavigate={setPage} ready={connectionReady} title={meta.title} subtitle={meta.subtitle}>
       {onboardingVisible ? (
         <OnboardingFlow
           connection={connection}
@@ -240,6 +266,7 @@ export default function App() {
           );
         })}
       </div>
-    </AppShell>
+      </AppShell>
+    </ThemeProvider>
   );
 }
