@@ -134,8 +134,8 @@ pub fn save(dir: &Path, settings: &ConnectionSettings) -> Result<(), String> {
     std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
-/// Versioned application settings (`version: 2`), replacing the legacy
-/// Cloudflare-era `ConnectionSettings` shape above.
+/// Versioned application settings (`version: 3`). All non-version fields are
+/// serde-defaulted so older files keep parsing after upgrades.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub version: u32,
@@ -145,19 +145,52 @@ pub struct AppSettings {
     pub tailscale_hostname: String,
     #[serde(default)]
     pub onboarding_complete: bool,
+    /// UI theme preference: "system" | "light" | "dark".
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// Register the app to launch at Windows login.
+    #[serde(default)]
+    pub launch_on_startup: bool,
+    /// Closing the window hides to tray instead of exiting.
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
 }
 
 fn default_tailscale_hostname() -> String {
     "local-workspace-mcp".into()
 }
 
+fn default_theme() -> String {
+    "system".into()
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl AppSettings {
+    /// Normalizes free-form fields loaded from disk into their canonical set.
+    pub fn normalize(&mut self) {
+        if !matches!(self.theme.as_str(), "light" | "dark" | "system") {
+            self.theme = default_theme();
+        }
+        self.tailscale_hostname = self.tailscale_hostname.trim().to_string();
+        if self.tailscale_hostname.is_empty() {
+            self.tailscale_hostname = default_tailscale_hostname();
+        }
+    }
+}
+
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             start_on_launch: false,
             tailscale_hostname: default_tailscale_hostname(),
             onboarding_complete: false,
+            theme: default_theme(),
+            launch_on_startup: false,
+            close_to_tray: true,
         }
     }
 }
@@ -203,15 +236,13 @@ pub fn load_app_settings(dir: &Path) -> Result<AppSettings, String> {
     } else {
         let mut settings: AppSettings = serde_json::from_value(value)
             .map_err(|e| format!("SETTINGS_INVALID: unsupported settings.json layout: {e}"))?;
-        if settings.tailscale_hostname.trim().is_empty() {
-            settings.tailscale_hostname = default_tailscale_hostname();
-        }
+        settings.normalize();
         settings
     };
     Ok(settings)
 }
 
-/// Persists [`AppSettings`] as pretty v2 JSON, written atomically.
+/// Persists [`AppSettings`] as pretty v3 JSON, written atomically.
 pub fn save_app_settings(dir: &Path, settings: &AppSettings) -> Result<(), String> {
     let path = dir.join("settings.json");
     let json = serde_json::to_vec_pretty(settings).map_err(|e| e.to_string())?;
@@ -302,14 +333,47 @@ mod tests {
     }
 
     #[test]
-    fn app_settings_missing_file_yields_defaults_v2() {
+    fn app_settings_missing_file_yields_defaults_v3() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();
         assert_eq!(loaded, AppSettings::default());
-        assert_eq!(loaded.version, 2);
+        assert_eq!(loaded.version, 3);
         assert!(!loaded.start_on_launch);
         assert_eq!(loaded.tailscale_hostname, "local-workspace-mcp");
         assert!(!loaded.onboarding_complete);
+        assert_eq!(loaded.theme, "system");
+        assert!(!loaded.launch_on_startup);
+        assert!(loaded.close_to_tray);
+    }
+
+    /// A pre-v3 file (no theme/tray/startup keys) parses with the new
+    /// defaults instead of failing SETTINGS_INVALID.
+    #[test]
+    fn v2_file_upgrades_to_v3_defaults_for_new_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"version":2,"start_on_launch":true,"tailscale_hostname":"h","onboarding_complete":true}"#,
+        )
+        .unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert!(loaded.start_on_launch);
+        assert_eq!(loaded.theme, "system");
+        assert!(loaded.close_to_tray);
+        assert!(!loaded.launch_on_startup);
+    }
+
+    #[test]
+    fn invalid_theme_and_blank_host_normalize_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"version":2,"tailscale_hostname":"  ","theme":"midnight"}"#,
+        )
+        .unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(loaded.theme, "system");
+        assert_eq!(loaded.tailscale_hostname, "local-workspace-mcp");
     }
 
     #[test]
@@ -335,10 +399,13 @@ mod tests {
     fn app_settings_roundtrip_preserves_all_fields() {
         let dir = tempfile::tempdir().unwrap();
         let settings = AppSettings {
-            version: 2,
+            version: 3,
             start_on_launch: true,
             tailscale_hostname: "my-machine.tailnet-name.ts.net".into(),
             onboarding_complete: true,
+            theme: "dark".into(),
+            launch_on_startup: true,
+            close_to_tray: false,
         };
         save_app_settings(dir.path(), &settings).unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();

@@ -356,7 +356,9 @@ pub fn get_app_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, 
 }
 
 /// Validates then persists application settings; rejects an invalid
-/// `tailscale_hostname` before touching disk.
+/// `tailscale_hostname` before touching disk. After saving, runtime behavior
+/// that follows these settings is synced (launch-at-login registration,
+/// close-to-tray flag).
 #[tauri::command]
 pub fn update_app_settings(
     app: tauri::AppHandle,
@@ -366,7 +368,31 @@ pub fn update_app_settings(
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     settings::save_app_settings(&dir, &settings)
         .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e))?;
+
+    sync_launch_on_startup(&app, settings.launch_on_startup)?;
+    use std::sync::atomic::Ordering;
+    app.state::<crate::UiFlags>()
+        .close_to_tray
+        .store(settings.close_to_tray, Ordering::Relaxed);
     Ok(settings)
+}
+
+/// Aligns the OS launch-at-login registration with the saved preference.
+fn sync_launch_on_startup(app: &tauri::AppHandle, want: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt as _;
+    let auto = app.autolaunch();
+    let have = auto
+        .is_enabled()
+        .map_err(|e| settings_err("AUTOSTART_FAILED", e))?;
+    if want && !have {
+        auto.enable()
+            .map_err(|e| settings_err("AUTOSTART_FAILED", e))
+    } else if !want && have {
+        auto.disable()
+            .map_err(|e| settings_err("AUTOSTART_FAILED", e))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]

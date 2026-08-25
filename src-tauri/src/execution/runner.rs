@@ -89,6 +89,15 @@ fn run_bounded(
     });
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // Console-subsystem children (powershell.exe, git.exe, ...) get a visible
+    // console window when spawned from this GUI-subsystem process unless
+    // suppressed; stdio is piped anyway so the window is dead weight.
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     apply_env(&mut cmd, env);
 
     let mut child = cmd.spawn()?;

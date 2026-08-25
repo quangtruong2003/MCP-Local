@@ -53,12 +53,17 @@ export interface ConnectionStatus {
   paused: boolean;
 }
 
-/** Versioned app settings persisted by the backend (`version: 2`). */
+export type ThemePreference = "system" | "light" | "dark";
+
+/** Versioned app settings persisted by the backend (`version: 3`). */
 export interface AppSettings {
   version: number;
   start_on_launch: boolean;
   tailscale_hostname: string;
   onboarding_complete: boolean;
+  theme: ThemePreference;
+  launch_on_startup: boolean;
+  close_to_tray: boolean;
 }
 
 /** Structured shape backend errors are serialized into ({code,message,detail}). */

@@ -109,6 +109,20 @@ fn output_error(action: &str, output: &Output) -> String {
     }
 }
 
+/// Marks a spawned child as CREATE_NO_WINDOW: this is a GUI-subsystem
+/// process, so console children (tunnel-client) would otherwise pop up a
+/// visible console window on every call.
+fn hide_console(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 pub fn create_tunnel(
     admin_key: &str,
     name: &str,
@@ -118,10 +132,12 @@ pub fn create_tunnel(
     if non_blank(organization_id).is_none() && non_blank(workspace_id).is_none() {
         return Err("an Organization ID or Workspace ID is required to create a tunnel".into());
     }
-    let output = Command::new(sidecar_path())
-        .args(build_create_args(name, organization_id, workspace_id))
+    let mut cmd = Command::new(sidecar_path());
+    cmd.args(build_create_args(name, organization_id, workspace_id))
         .env("OPENAI_ADMIN_KEY", admin_key)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    hide_console(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to launch tunnel-client admin create: {e}"))?;
     if !output.status.success() {
@@ -131,10 +147,12 @@ pub fn create_tunnel(
 }
 
 pub fn get_tunnel(runtime_key: &str, tunnel_id: &str) -> Result<TunnelRecord, String> {
-    let output = Command::new(sidecar_path())
-        .args(build_get_args(tunnel_id))
+    let mut cmd = Command::new(sidecar_path());
+    cmd.args(build_get_args(tunnel_id))
         .env("CONTROL_PLANE_API_KEY", runtime_key)
-        .stdin(Stdio::null())
+        .stdin(Stdio::null());
+    hide_console(&mut cmd);
+    let output = cmd
         .output()
         .map_err(|e| format!("failed to launch tunnel-client admin get: {e}"))?;
     if !output.status.success() {
@@ -156,12 +174,14 @@ pub fn spawn_runtime(
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let _ = std::fs::remove_file(health_url_file);
-    let child = Command::new(sidecar_path())
-        .args(build_runtime_args(tunnel_id, port, health_url_file))
+    let mut cmd = Command::new(sidecar_path());
+    cmd.args(build_runtime_args(tunnel_id, port, health_url_file))
         .env("CONTROL_PLANE_API_KEY", runtime_key)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    hide_console(&mut cmd);
+    let child = cmd
         .spawn()
         .map_err(|e| format!("failed to spawn tunnel-client runtime: {e}"))?;
     *handle.child.lock().unwrap() = Some(child);

@@ -5,8 +5,10 @@ mod process_job;
 pub mod secret_store;
 pub mod server;
 pub mod settings;
+pub mod tray;
 pub mod tunnel;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -15,9 +17,24 @@ pub struct AppState {
     pub port: u16,
 }
 
+/// Runtime UI behavior flags mirrored from [`settings::AppSettings`] so the
+/// window-close handler can read them without touching disk.
+pub struct UiFlags {
+    pub close_to_tray: AtomicBool,
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Single instance: a second launch focuses the running window instead
+        // of failing to bind the same MCP port.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::show_main_window(app);
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
@@ -51,11 +68,20 @@ pub fn run() {
                 }
             }
 
-            // Versioned v2 settings drive the Tailscale connection manager.
+            // Versioned v3 settings drive the Tailscale connection manager
+            // and the runtime UI flags (tray, autostart).
             let app_settings = settings::load_app_settings(&dir).unwrap_or_else(|e| {
                 eprintln!("app settings load failed: {e}");
                 settings::AppSettings::default()
             });
+            app.manage(UiFlags {
+                close_to_tray: AtomicBool::new(app_settings.close_to_tray),
+            });
+
+            // Self-heal the autostart registration to match the persisted
+            // preference (covers registry edits and setting races).
+            sync_autostart(app.handle(), app_settings.launch_on_startup);
+
             let tailscale_manager = connection::manager::ConnectionManager::with_parts(
                 std::sync::Arc::new(connection::manager::ProcessSidecarDriver),
                 std::sync::Arc::new(connection::manager::ReqwestHealthVerifier),
@@ -66,6 +92,8 @@ pub fn run() {
                 port,
             );
             app.manage(tailscale_manager);
+
+            tray::build(app.handle()).map_err(|e| format!("tray init failed: {e}"))?;
 
             if app_settings.start_on_launch {
                 let handle = app.handle().clone();
@@ -98,9 +126,46 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { .. } = event {
+        .run(|app_handle, event| match event {
+            // Close-to-tray: hide instead of exiting when the user closes the
+            // main window and the setting allows it. Quit stays available via
+            // the tray menu.
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == "main" => {
+                let hide =
+                    app_handle.state::<UiFlags>().close_to_tray.load(Ordering::Relaxed);
+                if hide {
+                    api.prevent_close();
+                    if let Some(window) = app_handle.get_webview_window("main") {
+                        let _ = window.hide();
+                    }
+                }
+            }
+            tauri::RunEvent::ExitRequested { .. } => {
                 tunnel::stop(app_handle);
             }
+            _ => {}
         });
+}
+
+/// Enables/disables the OS-level launch-at-login registration so it matches
+/// `launch_on_startup`. Failures are logged, not fatal (the stored setting
+/// remains the source of truth for the next attempt).
+fn sync_autostart(app: &tauri::AppHandle, want: bool) {
+    use tauri_plugin_autostart::ManagerExt as _;
+    let auto = app.autolaunch();
+    let have = auto.is_enabled().unwrap_or(false);
+    let result = if want && !have {
+        auto.enable()
+    } else if !want && have {
+        auto.disable()
+    } else {
+        return;
+    };
+    if let Err(e) = result {
+        eprintln!("autostart sync failed: {e}");
+    }
 }
