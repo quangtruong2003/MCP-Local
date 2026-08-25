@@ -8,7 +8,7 @@ import { useToast } from "./hooks/use-toast";
 import { useAudit } from "./hooks/use-audit";
 import { useConnection } from "./hooks/use-connection";
 import { useWorkspaces } from "./hooks/use-workspaces";
-import ActivityPage from "./pages/ActivityPage";
+import ActivityPage from "./pages/activity-page";
 import DashboardPage from "./pages/dashboard-page";
 import SecurityPage from "./pages/security-page";
 import SettingsPage from "./pages/settings-page";
