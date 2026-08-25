@@ -224,7 +224,10 @@ pub fn set_paused(
         None,
     );
     use tauri::Emitter;
-    app.emit("access-paused", paused).map_err(|e| e.to_string())
+    app.emit("access-paused", paused).map_err(|e| e.to_string())?;
+    // Keep the tray Pause/Resume label + status line in sync with the UI.
+    crate::tray::update_paused(&app);
+    Ok(())
 }
 
 #[tauri::command]

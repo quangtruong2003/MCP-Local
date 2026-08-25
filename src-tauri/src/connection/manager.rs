@@ -273,6 +273,8 @@ impl ConnectionManager {
         Arc::new(move |status: &ConnectionStatus| {
             use tauri::Emitter;
             let _ = app.emit("connection-status", status);
+            // Keep the tray menu/tooltip mirroring live state.
+            crate::tray::update_status(&app, status);
         })
     }
 
