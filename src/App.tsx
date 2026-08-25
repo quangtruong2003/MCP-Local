@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { CheckCircle2, Info, PauseCircle, XOctagon } from "lucide-react";
+import { PauseCircle } from "lucide-react";
+import { Toaster } from "sonner";
 import AppShell from "./components/AppShell";
 import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
-import { ThemeProvider } from "./hooks/use-theme";
+import { ThemeProvider, useTheme } from "./hooks/use-theme";
+import { useToast } from "./hooks/use-toast";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
 import SecurityPage from "./pages/SecurityPage";
@@ -17,23 +19,14 @@ import type {
   AppSettings,
   ConnectionStatus,
   ThemePreference,
-  Toast,
-  ToastTone,
   ViewId,
   Workspace,
 } from "./types";
 
-const TOAST_TTL_MS = 5000;
-const TOAST_ICONS: Record<ToastTone, typeof Info> = {
-  info: Info,
-  success: CheckCircle2,
-  error: XOctagon,
-};
-
 export default function App() {
   // --- Shell state (plan Step 6): page, data load, toasts/errors, onboarding ---
   const [page, setPage] = useState<ViewId>("dashboard");
-  const [toasts, setToasts] = useState<Toast[]>([]);
+  const toast = useToast();
   // Null until settings load decides whether onboarding should run at all.
   const [onboardingVisible, setOnboardingVisible] = useState<boolean | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -42,25 +35,12 @@ export default function App() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [server, setServer] = useState<ServerStatus | null>(null);
-  const nextToastId = useRef(1);
-
-  const pushToast = useCallback((tone: ToastTone, message: string) => {
-    const id = nextToastId.current++;
-    setToasts((current) => [...current, { id, tone, message }]);
-    window.setTimeout(() => {
-      setToasts((current) => current.filter((toast) => toast.id !== id));
-    }, TOAST_TTL_MS);
-  }, []);
-
-  const dismissToast = useCallback((id: number) => {
-    setToasts((current) => current.filter((toast) => toast.id !== id));
-  }, []);
 
   const reportError = useCallback(
     (message: string) => {
-      pushToast("error", message);
+      toast.error(message);
     },
-    [pushToast],
+    [toast],
   );
 
   // Event-driven audit refresh (plan Task 19 Step 5): called after mutations
@@ -252,21 +232,15 @@ export default function App() {
         <EmptyState title={`${meta.title} coming soon`} message="This page is wired up by the next milestone." />
       )}
 
-      <div className="toast-stack">
-        {toasts.map((toast) => {
-          const Icon = TOAST_ICONS[toast.tone];
-          return (
-            <div key={toast.id} className={`toast toast-${toast.tone}`} role={toast.tone === "error" ? "alert" : "status"}>
-              <Icon aria-hidden="true" />
-              <span>{toast.message}</span>
-              <button className="icon-button" aria-label="Dismiss notification" onClick={() => dismissToast(toast.id)}>
-                ×
-              </button>
-            </div>
-          );
-        })}
-      </div>
       </AppShell>
+      <ThemedToaster />
     </ThemeProvider>
   );
+}
+
+/** Renders the themed toaster; lives inside ThemeProvider so it can read the
+ * resolved light/dark value. */
+function ThemedToaster() {
+  const { resolvedTheme } = useTheme();
+  return <Toaster position="bottom-right" theme={resolvedTheme} richColors closeButton />;
 }
