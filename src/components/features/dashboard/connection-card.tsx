@@ -1,22 +1,14 @@
 import { useState } from "react";
-import {
-  AlertTriangle,
-  CheckCircle2,
-  CircleSlash,
-  Copy,
-  LifeBuoy,
-  Loader2,
-  XOctagon,
-} from "lucide-react";
-import type { LucideIcon } from "lucide-react";
+import { AlertTriangle, ExternalLink, LifeBuoy, Loader2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { CopyButton } from "@/components/shared/copy-button";
+import { StatusBadge } from "@/components/shared/status-badge";
 import type { ConnectionState } from "@/lib/types";
-
-export type ConnectionTone = "ready" | "offline" | "warning" | "error";
 
 export interface ConnectionPresentation {
   label: string;
   copy: string;
-  tone: ConnectionTone;
   /** Backend is mid-transition; all actions must be inert. */
   inProgress: boolean;
   primary: { key: "start" | "retry" | "signin" | "stop" | "wait"; text: string };
@@ -25,15 +17,14 @@ export interface ConnectionPresentation {
 
 /**
  * Single source of truth mapping a ConnectionState to everything the card
- * renders (status label, body copy, severity tone, available actions).
+ * renders (status label, body copy, available actions).
  */
-export function presentConnection(state: ConnectionState): ConnectionPresentation {
+function presentConnection(state: ConnectionState): ConnectionPresentation {
   switch (state.state) {
     case "stopped":
       return {
         label: "Offline",
         copy: "Your local MCP connection is offline.",
-        tone: "offline",
         inProgress: false,
         primary: { key: "start", text: "Start" },
         secondary: null,
@@ -42,7 +33,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Starting",
         copy: "Starting local MCP server…",
-        tone: "warning",
         inProgress: true,
         primary: { key: "wait", text: "Starting…" },
         secondary: null,
@@ -51,7 +41,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Connecting",
         copy: "Starting secure Tailscale connection…",
-        tone: "warning",
         inProgress: true,
         primary: { key: "wait", text: "Connecting…" },
         secondary: null,
@@ -60,7 +49,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Verifying",
         copy: "Verifying the public MCP endpoint…",
-        tone: "warning",
         inProgress: true,
         primary: { key: "wait", text: "Verifying…" },
         secondary: null,
@@ -69,7 +57,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Stopping",
         copy: "Closing public access…",
-        tone: "warning",
         inProgress: true,
         primary: { key: "wait", text: "Stopping…" },
         secondary: null,
@@ -78,7 +65,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Sign-in required",
         copy: "Sign in to Tailscale to connect this app.",
-        tone: "warning",
         inProgress: false,
         primary: { key: "signin", text: "Sign in to Tailscale" },
         secondary: { key: "stop", text: "Stop" },
@@ -87,7 +73,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Setup required",
         copy: "Funnel needs one-time approval for this tailnet.",
-        tone: "warning",
         inProgress: false,
         primary: { key: "retry", text: "Retry" },
         secondary: { key: "help", text: "Setup help" },
@@ -96,7 +81,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Setup required",
         copy: "Funnel needs HTTPS certificates enabled for your tailnet.",
-        tone: "warning",
         inProgress: false,
         primary: { key: "retry", text: "Retry" },
         secondary: { key: "help", text: "Setup help" },
@@ -105,7 +89,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Online",
         copy: "Ready for ChatGPT.",
-        tone: "ready",
         inProgress: false,
         primary: { key: "stop", text: "Stop" },
         secondary: null,
@@ -114,7 +97,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Degraded",
         copy: "Connection started, but end-to-end verification failed.",
-        tone: "warning",
         inProgress: false,
         primary: { key: "retry", text: "Retry" },
         secondary: null,
@@ -123,7 +105,6 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
       return {
         label: "Error",
         copy: state.message,
-        tone: "error",
         inProgress: false,
         primary: { key: "retry", text: "Retry" },
         secondary: null,
@@ -131,18 +112,12 @@ export function presentConnection(state: ConnectionState): ConnectionPresentatio
   }
 }
 
-const TONE_ICONS: Record<ConnectionTone, LucideIcon> = {
-  ready: CheckCircle2,
-  offline: CircleSlash,
-  warning: AlertTriangle,
-  error: XOctagon,
-};
-
 const ENDPOINT_WARNING =
   "Anyone with this URL may attempt to use this MCP connection. Keep it private.";
 
 interface Props {
   state: ConnectionState;
+  paused?: boolean;
   /** True while a lifecycle request (start/stop/retry) is in flight. */
   pending: boolean;
   onStart: () => void;
@@ -151,23 +126,20 @@ interface Props {
   onSignIn: () => void;
   /** Opens a Tailscale admin console page in the system browser. */
   onOpenAdmin: (url: string) => void;
-  /** Surface non-lifecycle failures (e.g. clipboard denial) as toasts. */
-  onError: (message: string) => void;
 }
 
-export default function ConnectionCard({
+export function ConnectionCard({
   state,
+  paused = false,
   pending,
   onStart,
   onStop,
   onRetry,
   onSignIn,
   onOpenAdmin,
-  onError,
 }: Props) {
   const p = presentConnection(state);
   const [helpVisible, setHelpVisible] = useState(false);
-  const [copied, setCopied] = useState(false);
   const endpoint = state.state === "online" ? state.endpoint : null;
 
   const busy = pending || p.inProgress;
@@ -191,63 +163,42 @@ export default function ConnectionCard({
     }
   }
 
-  async function copyEndpoint() {
-    if (!endpoint) return;
-    try {
-      await navigator.clipboard.writeText(endpoint);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      onError("Could not access the clipboard to copy the endpoint URL.");
-    }
-  }
-
-  const ToneIcon = p.inProgress ? Loader2 : TONE_ICONS[p.tone];
-
   return (
-    <section className="conn-card">
-      <div className="conn-card-top">
-        <span className={`conn-state conn-state-${p.tone}`}>
-          <ToneIcon aria-hidden="true" className={p.inProgress ? "spinner" : undefined} />
-          {p.label}
-        </span>
+    <Card className="gap-4 p-6">
+      <div className="flex items-center justify-between gap-2">
+        <StatusBadge state={state} paused={paused} />
+        <span className="text-[13px] font-medium text-muted-foreground">{p.label}</span>
       </div>
-      <p className="conn-copy" aria-live="polite">
+      <p aria-live="polite" className="text-sm text-muted-foreground">
         {p.copy}
       </p>
 
-      <div className="conn-actions">
-        <button
-          className="btn btn-primary"
-          onClick={runPrimary}
-          disabled={busy || p.primary.key === "wait"}
-        >
-          {p.primary.key === "wait" ? (
-            <Loader2 aria-hidden="true" className="spinner" />
-          ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="lg" onClick={runPrimary} disabled={busy || p.primary.key === "wait"}>
+          {busy ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
           {p.primary.text}
-        </button>
+        </Button>
         {p.secondary ? (
           p.secondary.key === "help" ? (
-            <button
-              className="btn btn-secondary"
+            <Button
+              variant="secondary"
               onClick={() => setHelpVisible((visible) => !visible)}
               aria-expanded={helpVisible}
               disabled={busy}
             >
               <LifeBuoy aria-hidden="true" />
               {p.secondary.text}
-            </button>
+            </Button>
           ) : (
-            <button className="btn btn-danger" onClick={onStop} disabled={busy}>
+            <Button variant="outline" onClick={onStop} disabled={busy}>
               {p.secondary.text}
-            </button>
+            </Button>
           )
         ) : null}
       </div>
 
       {helpVisible ? (
-        <div className="setup-help">
+        <div className="rounded-md border bg-muted/50 p-4 text-sm">
           {state.state === "needs_https_setup" ? (
             <>
               <p>
@@ -255,12 +206,13 @@ export default function ConnectionCard({
                 for your tailnet. A tailnet admin can enable them once in the Tailscale admin
                 console. Once enabled, press Retry.
               </p>
-              <button
-                className="link-button"
+              <Button
+                variant="link"
+                className="mt-1 h-auto px-0"
                 onClick={() => onOpenAdmin("https://login.tailscale.com/admin/settings/dns")}
               >
                 Open HTTPS settings →
-              </button>
+              </Button>
             </>
           ) : (
             <>
@@ -269,33 +221,47 @@ export default function ConnectionCard({
                 enable it in the Tailscale admin console under Access controls (add the funnel
                 node attribute). Once approved, press Retry.
               </p>
-              <button
-                className="link-button"
+              <Button
+                variant="link"
+                className="mt-1 h-auto px-0"
                 onClick={() => onOpenAdmin("https://login.tailscale.com/admin/acls")}
               >
                 Open access controls →
-              </button>
+              </Button>
             </>
           )}
         </div>
       ) : null}
 
       {endpoint ? (
-        <div className="endpoint-panel">
-          <label htmlFor="public-endpoint">Public MCP endpoint</label>
-          <div className="endpoint-row">
-            <input id="public-endpoint" type="text" readOnly value={endpoint} />
-            <button className="btn btn-secondary" onClick={() => void copyEndpoint()}>
-              <Copy aria-hidden="true" />
-              {copied ? "Copied" : "Copy"}
-            </button>
+        <div className="flex flex-col gap-2 rounded-md border bg-muted/50 p-4">
+          <label htmlFor="public-endpoint" className="text-[13px] font-medium">
+            Public MCP endpoint
+          </label>
+          <div className="flex items-center gap-2">
+            <code
+              id="public-endpoint"
+              className="min-w-0 flex-1 truncate rounded-sm bg-background px-2 py-1.5 font-mono text-xs"
+              title={endpoint}
+            >
+              {endpoint}
+            </code>
+            <CopyButton value={endpoint} label="Copy endpoint URL" />
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="Open endpoint in browser"
+              onClick={() => onOpenAdmin(endpoint)}
+            >
+              <ExternalLink aria-hidden="true" />
+            </Button>
           </div>
-          <p className="endpoint-warning">
-            <AlertTriangle aria-hidden="true" />
+          <p className="flex items-start gap-1.5 text-[13px] text-warning-foreground">
+            <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-warning" />
             {ENDPOINT_WARNING}
           </p>
         </div>
       ) : null}
-    </section>
+    </Card>
   );
 }

@@ -9,7 +9,7 @@ import { useAudit } from "./hooks/use-audit";
 import { useConnection } from "./hooks/use-connection";
 import { useWorkspaces } from "./hooks/use-workspaces";
 import ActivityPage from "./pages/ActivityPage";
-import DashboardPage from "./pages/DashboardPage";
+import DashboardPage from "./pages/dashboard-page";
 import SecurityPage from "./pages/SecurityPage";
 import SettingsPage from "./pages/SettingsPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
