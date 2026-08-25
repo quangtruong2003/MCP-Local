@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"net"
+	"net/http"
+	"testing"
+)
 
 func TestExtractAuthURL(t *testing.T) {
 	msg := "To start this tsnet server, restart with TS_AUTHKEY set, or go to: https://login.tailscale.com/a/1234567890"
@@ -34,6 +39,34 @@ func TestFunnelErrorCodeMapping(t *testing.T) {
 		if got := funnelErrorCode(errString(c.err)); got != c.want {
 			t.Errorf("funnelErrorCode(%q) = %q, want %q", c.err, got, c.want)
 		}
+	}
+}
+
+func TestStartHTTPServerReturnsOnlyAfterAcceptLoopIsReady(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+
+	errCh := startHTTPServer(server, ln)
+
+	resp, err := http.Get("http://" + ln.Addr().String())
+	if err != nil {
+		t.Fatalf("request immediately after startHTTPServer failed: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusNoContent)
+	}
+
+	if err := server.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-errCh; err != nil && !errors.Is(err, http.ErrServerClosed) {
+		t.Fatalf("Serve returned unexpected error: %v", err)
 	}
 }
 

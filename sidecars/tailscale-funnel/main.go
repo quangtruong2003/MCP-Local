@@ -11,11 +11,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"mcp-gptweb/tailscale-funnel-sidecar/internal/bridge"
@@ -94,6 +96,32 @@ func funnelErrorCode(err error) string {
 	return "TAILSCALE_START_FAILED"
 }
 
+type acceptReadyListener struct {
+	net.Listener
+	once  sync.Once
+	ready chan struct{}
+}
+
+func (l *acceptReadyListener) Accept() (net.Conn, error) {
+	l.once.Do(func() { close(l.ready) })
+	return l.Listener.Accept()
+}
+
+// startHTTPServer starts Serve in the background and returns only after the
+// server has entered its first Accept call. That makes any subsequent
+// funnel_listening event truthful: the HTTP bridge is already accepting
+// connections instead of racing the Rust verifier.
+func startHTTPServer(server *http.Server, ln net.Listener) <-chan error {
+	ready := make(chan struct{})
+	wrapped := &acceptReadyListener{Listener: ln, ready: ready}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- server.Serve(wrapped)
+	}()
+	<-ready
+	return errCh
+}
+
 func main() {
 	token := strings.TrimSpace(os.Getenv("MCP_CAPABILITY_TOKEN"))
 	cfg, err := parseArgs(os.Args[1:], token)
@@ -144,8 +172,6 @@ func run(cfg *config, token string, out *events.Writer) error {
 		_ = out.Emit(events.Event{Type: "error", Code: code, Message: "no certificate domain available"})
 		return errors.New(code)
 	}
-	_ = out.Emit(events.Event{Type: "authenticated"})
-	_ = out.Emit(events.Event{Type: "funnel_listening", FQDN: domains[0]})
 
 	handler := bridge.NewHandler(token, cfg.target)
 	server := &http.Server{
@@ -158,7 +184,11 @@ func run(cfg *config, token string, out *events.Writer) error {
 		_ = server.Shutdown(ctx)
 	}()
 
-	err = server.Serve(ln)
+	serveErr := startHTTPServer(server, ln)
+	_ = out.Emit(events.Event{Type: "authenticated"})
+	_ = out.Emit(events.Event{Type: "funnel_listening", FQDN: domains[0]})
+
+	err = <-serveErr
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		_ = out.Emit(events.Event{Type: "error", Code: "FUNNEL_SERVE_FAILED", Message: redact(token, err.Error())})
 		return fmt.Errorf("serve: %w", err)
