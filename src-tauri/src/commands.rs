@@ -1,8 +1,9 @@
 //! Tauri IPC commands backing the manager UI.
 //!
-//! Every mutating command writes an audit row with `source: "ui"` and
-//! returns `Result<T, String>` where the string is serialized CoreError
-//! JSON (stable `code` + `message`).
+//! Workspace/security administrative mutations record best-effort UI audit
+//! rows after the backend mutation succeeds. This is intentionally distinct
+//! from MCP tool auditing, which is fail-closed before a tool response is
+//! returned. Commands use stable JSON errors where applicable.
 
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -224,7 +225,8 @@ pub fn set_paused(
         None,
     );
     use tauri::Emitter;
-    app.emit("access-paused", paused).map_err(|e| e.to_string())?;
+    app.emit("access-paused", paused)
+        .map_err(|e| e.to_string())?;
     // Keep the tray Pause/Resume label + status line in sync with the UI.
     crate::tray::update_paused(&app);
     Ok(())

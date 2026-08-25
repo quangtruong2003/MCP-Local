@@ -6,7 +6,6 @@ pub mod secret_store;
 pub mod server;
 pub mod settings;
 pub mod tray;
-pub mod tunnel;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -45,7 +44,6 @@ pub fn run() {
             );
             let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
             app.manage(AppState { core, port });
-            app.manage(tunnel::TunnelHandle::default());
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 
             // One-time migration from the MVP plaintext tunnel_api_key. Only
@@ -152,8 +150,10 @@ pub fn run() {
                 event: tauri::WindowEvent::CloseRequested { api, .. },
                 ..
             } if label == "main" => {
-                let hide =
-                    app_handle.state::<UiFlags>().close_to_tray.load(Ordering::Relaxed);
+                let hide = app_handle
+                    .state::<UiFlags>()
+                    .close_to_tray
+                    .load(Ordering::Relaxed);
                 if hide {
                     api.prevent_close();
                     if let Some(window) = app_handle.get_webview_window("main") {
@@ -162,16 +162,13 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } => {
-                // Graceful shutdown for BOTH connection paths: the Tailscale
-                // ConnectionManager (current runtime) stops its sidecar via
-                // the stop command before the process tears down, and the
-                // legacy tunnel handle is killed as before. The sidecar's Job
-                // Object remains the orphan-safety net if this is interrupted.
+                // Gracefully stop the single supported Tailscale connection
+                // path. The sidecar's Job Object remains the orphan-safety net
+                // if process teardown interrupts this async stop.
                 let manager = app_handle.state::<connection::manager::ConnectionManager>();
                 if let Err(e) = tauri::async_runtime::block_on(manager.stop()) {
                     eprintln!("graceful connection stop on exit failed: {}", e.message);
                 }
-                tunnel::stop(app_handle);
             }
             _ => {}
         });

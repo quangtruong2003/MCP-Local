@@ -2,7 +2,7 @@
 
 A Windows desktop app that lets **ChatGPT Web** (Developer Mode) securely read, search, list, and edit files inside folders you explicitly approve — and optionally run approved developer commands. Built as a single-process Rust/Tauri application embedding an MCP server (Streamable HTTP on `127.0.0.1`) that is published to ChatGPT through **Tailscale Funnel**.
 
-There is exactly one doorway to your filesystem: a fail-closed policy pipeline. Both the MCP tools and the app's own UI go through it.
+There is exactly one MCP doorway to your filesystem: a fail-closed policy pipeline. Every MCP tool call goes through it. The desktop UI is a separate administrative control plane for workspace permissions, connection settings, and lifecycle; UI audit rows are operational history rather than the MCP pipeline's fail-closed response gate.
 
 ## How the connection works
 
@@ -39,7 +39,7 @@ Artifacts land under `src-tauri/target/release/` (executable) and `src-tauri/tar
 
 ### Sidecar binaries
 
-The Tailscale Funnel sidecar (Go, in `sidecars/tailscale-funnel`) is built by the packaging step (`npm run build:sidecar` → `scripts/build-tailscale-sidecar.ps1`) and bundled as `binaries/tailscale-funnel-sidecar`. The legacy Cloudflare-era sidecars (`tunnel-client`, `cloudflared`) are still declared for the transition period; they are unused by the default connection path and will be removed after the real-world E2E gate.
+The Tailscale Funnel sidecar (Go, in `sidecars/tailscale-funnel`) is built by the packaging step (`npm run build:sidecar` → `scripts/build-tailscale-sidecar.ps1`) and is the only connection sidecar bundled as `binaries/tailscale-funnel-sidecar`. The retired OpenAI/Cloudflare tunnel runtime is no longer compiled or packaged; legacy settings parsing remains only for upgrade compatibility.
 
 ## First-run setup
 
@@ -77,7 +77,7 @@ Ten tools are exposed. `list_workspaces` returns approved workspace ids (redacte
 
 - Working-directory confinement is not a Windows security sandbox: an executed program can still open paths outside the workspace with your account's permissions.
 - Funnel is public ingress; the endpoint's only protection is the secrecy of the capability URL. Rotate it if in doubt.
-- The legacy Cloudflare tunnel path (`tunnel-client`, `cloudflared`) is still packaged for the transition period and will be removed after the real-world E2E gate.
+- Real Tailscale-tailnet + ChatGPT connector acceptance remains environment-dependent and must still be run before calling a release production-certified; the automated local lifecycle/MCP suites do not substitute for that external check.
 
 ## Error codes
 
