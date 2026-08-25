@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { PauseCircle } from "lucide-react";
 import { Toaster } from "sonner";
 import AppShell from "./components/AppShell";
@@ -7,33 +6,26 @@ import EmptyState from "./components/EmptyState";
 import OnboardingFlow from "./components/OnboardingFlow";
 import { ThemeProvider, useTheme } from "./hooks/use-theme";
 import { useToast } from "./hooks/use-toast";
+import { useAudit } from "./hooks/use-audit";
+import { useConnection } from "./hooks/use-connection";
+import { useWorkspaces } from "./hooks/use-workspaces";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
 import SecurityPage from "./pages/SecurityPage";
 import SettingsPage from "./pages/SettingsPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
-import type { AuditEvent, ServerStatus } from "./api";
+import type { ServerStatus } from "./api";
 import { VIEW_META } from "./types";
-import type {
-  AppSettings,
-  ConnectionStatus,
-  ThemePreference,
-  ViewId,
-  Workspace,
-} from "./types";
+import type { AppSettings, ThemePreference, ViewId } from "./types";
 
 export default function App() {
-  // --- Shell state (plan Step 6): page, data load, toasts/errors, onboarding ---
   const [page, setPage] = useState<ViewId>("dashboard");
   const toast = useToast();
   // Null until settings load decides whether onboarding should run at all.
   const [onboardingVisible, setOnboardingVisible] = useState<boolean | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [initialLoadDone, setInitialLoadDone] = useState(false);
-  const [connection, setConnection] = useState<ConnectionStatus | null>(null);
-  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
-  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
   const [server, setServer] = useState<ServerStatus | null>(null);
 
   const reportError = useCallback(
@@ -45,67 +37,54 @@ export default function App() {
 
   // Event-driven audit refresh (plan Task 19 Step 5): called after mutations
   // and connection events; no polling.
-  const refreshAudit = useCallback(async () => {
-    try {
-      setAuditEvents(await api.recentAudit());
-    } catch (err) {
-      reportError(parseErrorMessage(err));
-    }
-  }, [reportError]);
+  const { auditEvents, refreshAudit } = useAudit(reportError);
+  const { workspaces, reloadWorkspaces } = useWorkspaces(reportError);
+  const { connection, refreshConnection, setConnection } = useConnection(
+    reportError,
+    () => void refreshAudit(),
+  );
 
+  // Settings load decides whether onboarding runs at all.
   useEffect(() => {
     let disposed = false;
-    let unlisten: (() => void) | null = null;
-
     void (async () => {
       try {
-        const [status, appSettings] = await Promise.all([
-          api.connectionStatus(),
-          api.getAppSettings(),
-        ]);
-        if (disposed) return;
-        setConnection(status);
-        setSettings(appSettings);
-        setOnboardingVisible(!appSettings.onboarding_complete);
-      } catch (err) {
-        reportError(parseErrorMessage(err));
-      }
-
-      try {
-        unlisten = await listen<ConnectionStatus>("connection-status", (e) => {
-          setConnection(e.payload);
-          void refreshAudit();
-        });
+        const appSettings = await api.getAppSettings();
+        if (!disposed) {
+          setSettings(appSettings);
+          setOnboardingVisible(!appSettings.onboarding_complete);
+        }
       } catch (err) {
         reportError(parseErrorMessage(err));
       }
     })();
-
     return () => {
       disposed = true;
-      unlisten?.();
     };
-  }, [reportError, refreshAudit]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Initial data load: workspaces, audit trail and server state.
   useEffect(() => {
+    let disposed = false;
     void (async () => {
       try {
-        const [wsList, events, status] = await Promise.all([
-          api.listWorkspaces(),
-          api.recentAudit(),
+        const [, , status] = await Promise.all([
+          reloadWorkspaces(),
+          refreshAudit(),
           api.serverStatus(),
         ]);
-        setWorkspaces(wsList);
-        setAuditEvents(events);
-        setServer(status);
+        if (!disposed) setServer(status);
       } catch (err) {
-        reportError(parseErrorMessage(err));
+        if (!disposed) reportError(parseErrorMessage(err));
       } finally {
-        setInitialLoadDone(true);
+        if (!disposed) setInitialLoadDone(true);
       }
     })();
-  }, [reportError]);
+    return () => {
+      disposed = true;
+    };
+  }, [reportError, reloadWorkspaces, refreshAudit]);
 
   // Ready only when the funnel connection is fully online.
   const connectionReady = connection?.state.state === "online";
@@ -123,16 +102,6 @@ export default function App() {
     }
     setOnboardingVisible(false);
   }
-
-  // Security page (plan Task 20): re-pull status after setPaused; rotate/reset
-  // return the fresh ConnectionStatus directly.
-  const refreshConnection = useCallback(async () => {
-    try {
-      setConnection(await api.connectionStatus());
-    } catch (err) {
-      reportError(parseErrorMessage(err));
-    }
-  }, [reportError]);
 
   // Settings page (plan Task 21): persists then applies the returned value;
   // throws propagate to SettingsPage, which reports and rolls back.
@@ -168,8 +137,7 @@ export default function App() {
           connection={connection}
           workspaces={workspaces}
           onWorkspacesChanged={async () => {
-            const [wsList] = await Promise.all([api.listWorkspaces(), refreshAudit()]);
-            setWorkspaces(wsList);
+            await Promise.all([reloadWorkspaces(), refreshAudit()]);
           }}
           onClose={() => setOnboardingVisible(false)}
           onFinish={() => finishOnboarding()}
@@ -201,8 +169,7 @@ export default function App() {
         <WorkspacesPage
           workspaces={workspaces}
           onWorkspacesChanged={async () => {
-            const [wsList] = await Promise.all([api.listWorkspaces(), refreshAudit()]);
-            setWorkspaces(wsList);
+            await Promise.all([reloadWorkspaces(), refreshAudit()]);
           }}
           reportError={reportError}
         />
@@ -210,7 +177,7 @@ export default function App() {
         <ActivityPage
           auditEvents={auditEvents}
           workspaces={workspaces}
-          onRefresh={async () => setAuditEvents(await api.recentAudit())}
+          onRefresh={refreshAudit}
           reportError={reportError}
         />
       ) : page === "security" ? (
@@ -231,7 +198,6 @@ export default function App() {
       ) : (
         <EmptyState title={`${meta.title} coming soon`} message="This page is wired up by the next milestone." />
       )}
-
       </AppShell>
       <ThemedToaster />
     </ThemeProvider>
