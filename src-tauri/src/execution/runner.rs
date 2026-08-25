@@ -13,13 +13,17 @@ use std::time::{Duration, Instant};
 use crate::process_job::JobHandle;
 
 use super::policy::{
-    resolve_cwd, resolve_program_with, resolve_timeout, ExecutionResult, PolicyError,
+    resolve_cwd, resolve_program_with, resolve_timeout_with, ExecutionResult, PolicyError,
     RunCommandRequest, RunPowerShellRequest,
 };
 use super::resolver::{merged_path_string, resolve_executable};
 
-/// Per-stream output retention cap; excess bytes are drained and discarded.
+/// Per-stream output retention cap in the default posture; excess bytes are
+/// drained and discarded.
 const MAX_STREAM_BYTES: usize = 512 * 1024;
+/// Relaxed cap while unrestricted access is on: 32 MiB per stream — generous
+/// for real command output yet bounded so a chatty child cannot OOM the app.
+const UNRESTRICTED_MAX_STREAM_BYTES: usize = 32 * 1024 * 1024;
 
 /// PowerShell resolution order: PowerShell 7 first, then Windows built-in.
 const POWERSHELL_CANDIDATES: &[&str] = &["pwsh.exe", "powershell.exe"];
@@ -80,6 +84,7 @@ fn run_bounded(
     cwd: &Path,
     env: &[(String, String)],
     timeout: Duration,
+    max_stream_bytes: usize,
 ) -> Result<ExecutionResult, std::io::Error> {
     cmd.current_dir(cwd);
     cmd.stdin(if stdin_bytes.is_some() {
@@ -129,8 +134,8 @@ fn run_bounded(
 
     // Concurrent drains: a full stderr pipe must never block stdout reading
     // and vice versa.
-    let mut out_sink = BoundedSink::new(MAX_STREAM_BYTES);
-    let mut err_sink = BoundedSink::new(MAX_STREAM_BYTES);
+    let mut out_sink = BoundedSink::new(max_stream_bytes);
+    let mut err_sink = BoundedSink::new(max_stream_bytes);
     let out_thread = std::thread::spawn(move || {
         out_sink.drain(&mut stdout_pipe);
         out_sink
@@ -196,7 +201,10 @@ pub fn run_command(
 ) -> Result<ExecutionResult, PolicyError> {
     let program = resolve_program_with(&req.program, req.unrestricted)?;
     let cwd = resolve_cwd(workspace_root, req.cwd.as_deref())?;
-    let timeout = Duration::from_millis(resolve_timeout(req.timeout_ms)?);
+    let timeout = Duration::from_millis(resolve_timeout_with(
+        req.timeout_ms,
+        req.unrestricted,
+    )?);
 
     let exe = resolve_executable(&program).ok_or_else(|| {
         PolicyError::invalid_argument(format!(
@@ -206,7 +214,12 @@ pub fn run_command(
     let mut cmd = Command::new(&exe);
     cmd.args(&req.args);
 
-    run_bounded(cmd, None, &cwd, &host_env(), timeout).map_err(|e| {
+    let stream_cap = if req.unrestricted {
+        UNRESTRICTED_MAX_STREAM_BYTES
+    } else {
+        MAX_STREAM_BYTES
+    };
+    run_bounded(cmd, None, &cwd, &host_env(), timeout, stream_cap).map_err(|e| {
         // Spawn failures (bad cwd, inaccessible binary) surface as IO_ERROR.
         PolicyError::invalid_argument(format!("failed to run '{}': {e}", exe.display()))
     })
@@ -221,7 +234,15 @@ pub fn run_power_shell(
     req: RunPowerShellRequest,
 ) -> Result<ExecutionResult, PolicyError> {
     let cwd = resolve_cwd(workspace_root, req.cwd.as_deref())?;
-    let timeout = Duration::from_millis(resolve_timeout(req.timeout_ms)?);
+    let timeout = Duration::from_millis(resolve_timeout_with(
+        req.timeout_ms,
+        req.unrestricted,
+    )?);
+    let stream_cap = if req.unrestricted {
+        UNRESTRICTED_MAX_STREAM_BYTES
+    } else {
+        MAX_STREAM_BYTES
+    };
 
     let mut last_err: Option<String> = None;
     for candidate in POWERSHELL_CANDIDATES {
@@ -233,6 +254,7 @@ pub fn run_power_shell(
             &cwd,
             &host_env(),
             timeout,
+            stream_cap,
         ) {
             Ok(result) => return Ok(result),
             Err(e) => last_err = Some(format!("{candidate}: {e}")),
@@ -438,6 +460,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 script: "Write-Output ('stdin-ok-' + (6 * 7))".to_string(),
                 cwd: None,
                 timeout_ms: Some(60_000),
+                unrestricted: false,
             },
         )
         .unwrap();

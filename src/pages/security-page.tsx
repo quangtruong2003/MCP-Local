@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
-import { CopyButton } from "@/components/shared/copy-button";
+import { EndpointField } from "@/components/shared/endpoint-field";
 import { api, parseErrorMessage } from "../api";
 import type { AppSettings, ConnectionStatus, Workspace } from "@/lib/types";
 
@@ -29,7 +29,7 @@ const RESET_BODY =
 const RESET_KEYWORD = "RESET";
 const UNRESTRICTED_TITLE = "Enable unrestricted access?";
 const UNRESTRICTED_BODY =
-  "ChatGPT will be able to read, create and edit ANY file in your workspaces — including credentials (.env, *.pem, *.key), run ANY installed program, and run full PowerShell in every workspace, with no sensitive-file filtering. The folder boundary, the Pause kill switch and the audit log stay in force. Only enable this if you fully trust the conversations you use it in.";
+  "ChatGPT will be able to read, create and edit ANY file in your workspaces — including credentials (.env, *.pem, *.key) — run ANY installed program, and run full PowerShell in every workspace. Execution bounds are lifted too: timeouts up to 24 hours and 32 MiB of output per stream. The folder boundary, the Pause kill switch and the audit log stay in force. Only enable this if you fully trust the conversations you use it in.";
 const UNRESTRICTED_KEYWORD = "UNRESTRICTED";
 
 interface Props {
@@ -162,7 +162,7 @@ export default function SecurityPage({
           ))}
         </ul>
         {fullPowershellCount > 0 ? (
-          <p role="alert" className="flex items-start gap-2 text-[13px] text-warning-foreground">
+          <p role="alert" className="flex items-start gap-2 text-[13px] text-warning">
             <ShieldAlert aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
             Full PowerShell is enabled for one or more workspaces. Working-directory confinement is
             not a Windows security sandbox; scripts may access other resources available to your
@@ -198,15 +198,11 @@ export default function SecurityPage({
           </p>
         </div>
         {rotatedEndpoint ? (
-          <div className="flex items-center gap-2">
-            <code
-              className="min-w-0 flex-1 truncate rounded-sm bg-muted px-2 py-1.5 font-mono text-xs"
-              title={rotatedEndpoint}
-            >
-              {rotatedEndpoint}
-            </code>
-            <CopyButton value={rotatedEndpoint} label="Copy new endpoint URL" />
-          </div>
+          <EndpointField
+            url={rotatedEndpoint}
+            label="New public MCP endpoint"
+            hint="Update the endpoint in ChatGPT with this new URL — the old one stopped working."
+          />
         ) : null}
         <div>
           <Button variant="secondary" onClick={() => setRotateOpen(true)} disabled={pending}>
@@ -223,9 +219,9 @@ export default function SecurityPage({
               Unrestricted access
             </Label>
             <p className="text-[13px] text-muted-foreground">
-              Bypass capability gates, the sensitive-file deny list, the approved-command list and
-              the Full-PowerShell gate in every workspace. The folder boundary, Pause and the audit
-              log stay in force.
+              Bypass capability gates, the sensitive-file deny list, the approved-command list, the
+              Full-PowerShell gate and the execution bounds (timeout, output) in every workspace.
+              The folder boundary, Pause and the audit log stay in force.
             </p>
           </div>
           <Switch

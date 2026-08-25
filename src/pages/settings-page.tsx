@@ -1,10 +1,22 @@
 import { useEffect, useState } from "react";
-import { AlertTriangle, Loader2 } from "lucide-react";
+import { AlertTriangle, Loader2, ShieldAlert } from "lucide-react";
 import { GeneralForm } from "@/components/features/settings/general-form";
 import { AppearanceForm } from "@/components/features/settings/appearance-form";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { CopyButton } from "@/components/shared/copy-button";
 import { api, parseErrorMessage } from "../api";
 import type { AppSettings, ConnectionStatus } from "@/lib/types";
@@ -14,6 +26,11 @@ const APPROVED_COMMANDS =
 
 const EXECUTION_WARNING =
   "Approved Commands limits which executable ChatGPT may launch, but those tools can still execute project code such as npm scripts, Cargo build scripts, or Git hooks. Enable Execute only for trusted workspaces.";
+
+const UNRESTRICTED_TITLE = "Enable unrestricted execution?";
+const UNRESTRICTED_BODY =
+  "Every workspace loses its guards: ANY file becomes readable and editable (including .env, *.pem, *.key), ANY installed program can run, full PowerShell is always available, and execution bounds are lifted (timeouts up to 24 hours, 32 MiB of output per stream). The folder boundary, the Pause kill switch and the audit log stay in force. Only enable this if you fully trust the conversations you use it in.";
+const UNRESTRICTED_KEYWORD = "UNRESTRICTED";
 
 /** Middle-truncates to roughly `max` characters for display. */
 function elide(text: string, max = 40): string {
@@ -35,6 +52,28 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
   const [stateDir, setStateDir] = useState<string | null>(null);
   const [copiedDiag, setCopiedDiag] = useState(false);
   const [savingHostname, setSavingHostname] = useState(false);
+  const [unrestrictedOpen, setUnrestrictedOpen] = useState(false);
+  const [unrestrictedText, setUnrestrictedText] = useState("");
+  const unrestrictedOn = settings?.unrestricted_access === true;
+
+  function requestUnrestrictedToggle(next: boolean) {
+    if (next) {
+      setUnrestrictedText("");
+      setUnrestrictedOpen(true);
+    } else {
+      // Disabling the dangerous mode needs no confirmation.
+      void setUnrestricted(false);
+    }
+  }
+
+  async function setUnrestricted(next: boolean) {
+    if (!settings) return;
+    try {
+      await onSaveSettings({ ...settings, unrestricted_access: next });
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+    }
+  }
 
   // Re-seed when App loads/replaces settings.
   useEffect(() => {
@@ -134,12 +173,12 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
             </Button>
           </div>
           {!hostnameValid ? (
-            <p className="text-[13px] text-warning-foreground" role="alert">
+            <p className="text-[13px] text-warning" role="alert">
               Hostname must be non-empty, without spaces.
             </p>
           ) : null}
           {hostnameChanged && hostnameValid && identityExists ? (
-            <p role="alert" className="flex items-start gap-1.5 text-[13px] text-warning-foreground">
+            <p role="alert" className="flex items-start gap-1.5 text-[13px] text-warning">
               <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-warning" />
               Changing the hostname requires a Tailscale reset and re-enrollment; your *.ts.net name
               may change. Use “Reset Tailscale identity…” on the Security page afterwards.
@@ -159,17 +198,37 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
         {stateDir ? <CopyButton value={stateDir} label="Copy full path" /> : null}
       </Card>
 
-      <Card className="gap-4 p-6">
-        <div>
-          <h2 className="text-sm font-semibold">Execution</h2>
-          <p className="text-[13px] text-muted-foreground">
-            What ChatGPT may run inside approved workspaces.
-          </p>
+      <Card className={unrestrictedOn ? "gap-4 border-destructive/40 p-6" : "gap-4 p-6"}>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h2 className="text-sm font-semibold">Execution</h2>
+            <p className="text-[13px] text-muted-foreground">
+              What ChatGPT may run inside approved workspaces.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-[13px] text-muted-foreground">Full access</span>
+            <Switch
+              id="setting-unrestricted-execution"
+              checked={unrestrictedOn}
+              disabled={!settings}
+              onCheckedChange={requestUnrestrictedToggle}
+              aria-label="Unrestricted execution"
+            />
+          </div>
         </div>
         <ul className="flex flex-col divide-y">
           <li className="flex items-center justify-between gap-3 py-2 text-sm first:pt-0">
             <span>Approved Commands</span>
-            <strong className="text-right font-medium">{APPROVED_COMMANDS}</strong>
+            <strong
+              className={
+                unrestrictedOn
+                  ? "text-right font-medium text-destructive"
+                  : "text-right font-medium"
+              }
+            >
+              {unrestrictedOn ? "All programs allowed" : APPROVED_COMMANDS}
+            </strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm">
             <span>Default timeout</span>
@@ -177,17 +236,43 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm">
             <span>Maximum timeout</span>
-            <strong className="font-medium">10 minutes</strong>
+            <strong
+              className={
+                unrestrictedOn
+                  ? "font-medium text-destructive"
+                  : "font-medium"
+              }
+            >
+              {unrestrictedOn ? "24 hours" : "10 minutes"}
+            </strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm last:pb-0">
             <span>Output limit</span>
-            <strong className="font-medium">512 KiB per stdout/stderr stream</strong>
+            <strong
+              className={
+                unrestrictedOn
+                  ? "font-medium text-destructive"
+                  : "font-medium"
+              }
+            >
+              {unrestrictedOn
+                ? "32 MiB per stdout/stderr stream"
+                : "512 KiB per stdout/stderr stream"}
+            </strong>
           </li>
         </ul>
-        <p role="note" className="flex items-start gap-1.5 text-[13px] text-warning-foreground">
-          <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-warning" />
-          {EXECUTION_WARNING}
-        </p>
+        {unrestrictedOn ? (
+          <p role="alert" className="flex items-start gap-1.5 text-[13px] text-destructive">
+            <ShieldAlert aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+            Unrestricted execution is ON — the guards above are bypassed in every workspace. The
+            red banner across the app and the audit trail mark everything done in this mode.
+          </p>
+        ) : (
+          <p role="note" className="flex items-start gap-1.5 text-[13px] text-warning">
+            <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+            {EXECUTION_WARNING}
+          </p>
+        )}
       </Card>
 
       <Card className="gap-4 p-6">
@@ -203,6 +288,52 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
           </Button>
         </div>
       </Card>
+
+      {/* Typed-keyword confirm for unrestricted execution (enable only). */}
+      <AlertDialog
+        open={unrestrictedOpen}
+        onOpenChange={(o) => {
+          if (!o) setUnrestrictedOpen(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <ShieldAlert aria-hidden="true" className="size-5 text-destructive" />
+              {UNRESTRICTED_TITLE}
+            </AlertDialogTitle>
+            <AlertDialogDescription>{UNRESTRICTED_BODY}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="unrestricted-execution-input">
+              Type {UNRESTRICTED_KEYWORD} to confirm
+            </Label>
+            <Input
+              id="unrestricted-execution-input"
+              value={unrestrictedText}
+              autoFocus
+              onChange={(event) => setUnrestrictedText(event.target.value)}
+              placeholder={UNRESTRICTED_KEYWORD}
+              spellCheck={false}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setUnrestrictedOpen(false)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setUnrestrictedOpen(false);
+                void setUnrestricted(true);
+              }}
+              disabled={unrestrictedText !== UNRESTRICTED_KEYWORD}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Enable unrestricted access
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

@@ -522,6 +522,7 @@ impl WorkspaceServer {
                     script: a.script.clone(),
                     cwd: a.cwd.clone(),
                     timeout_ms: a.timeout_ms,
+                    unrestricted,
                 };
                 let result = crate::execution::runner::run_power_shell(root, req)
                     .map_err(execution_error)?;

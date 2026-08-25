@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { AlertTriangle, ExternalLink, LifeBuoy, Loader2 } from "lucide-react";
+import { LifeBuoy, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { CopyButton } from "@/components/shared/copy-button";
+import { EndpointField } from "@/components/shared/endpoint-field";
 import { StatusBadge } from "@/components/shared/status-badge";
 import type { ConnectionState } from "@/lib/types";
 
@@ -141,6 +141,13 @@ export function ConnectionCard({
   const p = presentConnection(state);
   const [helpVisible, setHelpVisible] = useState(false);
   const endpoint = state.state === "online" ? state.endpoint : null;
+  const fqdn =
+    state.state === "online" || state.state === "verifying"
+      ? state.fqdn
+      : state.state === "degraded"
+        ? (state.fqdn ?? null)
+        : null;
+  const online = state.state === "online";
 
   const busy = pending || p.inProgress;
 
@@ -165,16 +172,32 @@ export function ConnectionCard({
 
   return (
     <Card className="gap-4 p-6">
-      <div className="flex items-center justify-between gap-2">
+      <div className="flex items-center justify-between gap-3">
         <StatusBadge state={state} paused={paused} />
-        <span className="text-[13px] font-medium text-muted-foreground">{p.label}</span>
+        {/* Online/verifying: the hostname is the useful companion fact — the
+            state label itself would only duplicate the badge. */}
+        {fqdn ? (
+          <span
+            className="min-w-0 truncate font-mono text-xs text-muted-foreground"
+            title={fqdn}
+          >
+            {fqdn}
+          </span>
+        ) : null}
       </div>
       <p aria-live="polite" className="text-sm text-muted-foreground">
         {p.copy}
       </p>
 
       <div className="flex flex-wrap items-center gap-2">
-        <Button size="lg" onClick={runPrimary} disabled={busy || p.primary.key === "wait"}>
+        {/* Online: Stop is routine teardown, not the hero action — the
+            endpoint panel above is what the user came for. */}
+        <Button
+          size={online ? "default" : "lg"}
+          variant={online ? "outline" : "default"}
+          onClick={runPrimary}
+          disabled={busy || p.primary.key === "wait"}
+        >
           {busy ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
           {p.primary.text}
         </Button>
@@ -234,33 +257,11 @@ export function ConnectionCard({
       ) : null}
 
       {endpoint ? (
-        <div className="flex flex-col gap-2 rounded-md border bg-muted/50 p-4">
-          <label htmlFor="public-endpoint" className="text-[13px] font-medium">
-            Public MCP endpoint
-          </label>
-          <div className="flex items-center gap-2">
-            <code
-              id="public-endpoint"
-              className="min-w-0 flex-1 truncate rounded-sm bg-background px-2 py-1.5 font-mono text-xs"
-              title={endpoint}
-            >
-              {endpoint}
-            </code>
-            <CopyButton value={endpoint} label="Copy endpoint URL" />
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="Open endpoint in browser"
-              onClick={() => onOpenAdmin(endpoint)}
-            >
-              <ExternalLink aria-hidden="true" />
-            </Button>
-          </div>
-          <p className="flex items-start gap-1.5 text-[13px] text-warning-foreground">
-            <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-warning" />
-            {ENDPOINT_WARNING}
-          </p>
-        </div>
+        <EndpointField
+          url={endpoint}
+          hint={ENDPOINT_WARNING}
+          onOpen={() => onOpenAdmin(endpoint)}
+        />
       ) : null}
     </Card>
   );

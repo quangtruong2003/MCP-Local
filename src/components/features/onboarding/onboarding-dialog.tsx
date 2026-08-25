@@ -18,7 +18,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
-import { CopyButton } from "@/components/shared/copy-button";
+import { EndpointField } from "@/components/shared/endpoint-field";
 import { api, parseErrorMessage } from "@/api";
 import type { ConnectionStatus, Workspace } from "@/lib/types";
 
@@ -370,21 +370,11 @@ function LiveStage({ connection, starting, onStart, onFinish, reportError }: Liv
           ChatGPT.
         </DialogDescription>
       </DialogHeader>
-      <div className="flex flex-col gap-1.5">
-        <label htmlFor="onboarding-endpoint" className="text-[13px] font-medium">
-          Public MCP endpoint (secret capability URL)
-        </label>
-        <div className="flex items-center gap-2">
-          <code
-            id="onboarding-endpoint"
-            title={state.endpoint}
-            className="min-w-0 flex-1 truncate rounded-sm bg-muted px-2 py-1.5 font-mono text-xs"
-          >
-            {state.endpoint}
-          </code>
-          <CopyButton value={state.endpoint} label="Copy endpoint URL" />
-        </div>
-      </div>
+      <EndpointField
+        url={state.endpoint}
+        label="Public MCP endpoint (secret capability URL)"
+        hint="Anyone who has this URL can call this MCP connection — share it only with your own ChatGPT."
+      />
       <DialogFooter>
         <Button onClick={() => void onFinish()}>Finish</Button>
       </DialogFooter>

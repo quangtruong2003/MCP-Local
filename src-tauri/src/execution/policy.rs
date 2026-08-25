@@ -62,6 +62,9 @@ pub const DEFAULT_APPROVED_COMMANDS: &[&str] = &[
 
 pub const DEFAULT_TIMEOUT_MS: u64 = 60_000;
 pub const MAX_TIMEOUT_MS: u64 = 600_000;
+/// Absolute ceiling even in unrestricted mode: effectively unlimited for any
+/// real command, while a nonsense value cannot hang the runner forever.
+pub const UNRESTRICTED_MAX_TIMEOUT_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug)]
 pub struct RunCommandRequest {
@@ -79,6 +82,8 @@ pub struct RunPowerShellRequest {
     pub script: String,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
+    /// Unrestricted access mode: lifts the timeout cap and output bounds.
+    pub unrestricted: bool,
 }
 
 #[derive(Debug)]
@@ -151,10 +156,24 @@ pub fn resolve_cwd(workspace_root: &Path, cwd: Option<&str>) -> Result<PathBuf, 
 /// INVALID_ARGUMENT (pinned choice — no silent clamping), defaults to
 /// [`DEFAULT_TIMEOUT_MS`] when omitted.
 pub fn resolve_timeout(timeout_ms: Option<u64>) -> Result<u64, PolicyError> {
+    resolve_timeout_with(timeout_ms, false)
+}
+
+/// `allow_any` (unrestricted access mode) lifts the 10-minute cap to a 24h
+/// absolute ceiling; the 60 s default still applies when omitted.
+pub fn resolve_timeout_with(
+    timeout_ms: Option<u64>,
+    allow_any: bool,
+) -> Result<u64, PolicyError> {
+    let max = if allow_any {
+        UNRESTRICTED_MAX_TIMEOUT_MS
+    } else {
+        MAX_TIMEOUT_MS
+    };
     match timeout_ms {
         None => Ok(DEFAULT_TIMEOUT_MS),
-        Some(t) if t > MAX_TIMEOUT_MS => Err(PolicyError::invalid_argument(format!(
-            "timeout_ms {t} exceeds the maximum of {MAX_TIMEOUT_MS}"
+        Some(t) if t > max => Err(PolicyError::invalid_argument(format!(
+            "timeout_ms {t} exceeds the maximum of {max}"
         ))),
         Some(t) => Ok(t),
     }

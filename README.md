@@ -1,20 +1,27 @@
 # Local Workspace MCP Manager
 
-A Windows desktop app that lets **ChatGPT Web** (Developer Mode) securely read, search, list, and edit files inside folders you explicitly approve. Built as a single-process Rust/Tauri application embedding an MCP server (Streamable HTTP on `127.0.0.1`) that is bridged to ChatGPT via OpenAI's official Secure MCP Tunnel (`tunnel-client` sidecar).
+A Windows desktop app that lets **ChatGPT Web** (Developer Mode) securely read, search, list, and edit files inside folders you explicitly approve — and optionally run approved developer commands. Built as a single-process Rust/Tauri application embedding an MCP server (Streamable HTTP on `127.0.0.1`) that is published to ChatGPT through **Tailscale Funnel**.
 
 There is exactly one doorway to your filesystem: a fail-closed policy pipeline. Both the MCP tools and the app's own UI go through it.
 
+## How the connection works
+
+- The MCP server binds **loopback only** (`127.0.0.1:<ephemeral port>`).
+- A bundled **Tailscale Funnel sidecar** publishes that loopback server to the public internet at `https://<your-hostname>.ts.net` (Funnel requires a one-time tailnet admin enablement: HTTPS certificates + the funnel node attribute).
+- The public URL embeds a **secret capability token**. Funnel is *public ingress* — the secret URL is what protects the endpoint, so treat it like a password: anyone who obtains it can call your MCP connection. Rotate it any time from **Security → Rotate connection URL**.
+
 ## Tech stack
 
-- **Shell**: Tauri 2 (Rust) with a system tray (open, start/stop tunnel, pause MCP access, quit), optional close-to-tray behavior, and launch-at-login registration
-- **UI**: React 18 + TypeScript (strict), styled with Tailwind CSS v4 and vendored shadcn/ui primitives (new-york/zinc, 2px radius "Quiet Console" tokens); toasts via sonner; bundled Inter Variable / JetBrains Mono Variable fonts
-- **Theming**: Light/Dark/System toggle in **Settings → Appearance**, persisted in `settings.json` (`theme` field); System mode tracks the OS preference live
+- **Shell**: Tauri 2 (Rust) with a system tray (open, start/stop tunnel, pause MCP access, quit), close-to-tray, launch-at-login, start-minimized-to-tray, and single-instance enforcement
+- **UI**: React 18 + TypeScript (strict), styled with Tailwind CSS v4 and vendored shadcn/ui primitives (new-york/zinc, 2px-radius "Quiet Console" tokens); toasts via sonner; bundled Inter Variable / JetBrains Mono Variable fonts; Light/Dark/System theme persisted in settings
+- **Core pipeline**: `crates/core` — the fail-closed policy pipeline (pause → workspace → capability → confinement → sensitive-file deny list → execution) with an append-only SQLite audit log
 
 ## Prerequisites
 
 - Windows 10/11
 - Rust toolchain with the MSVC target (`rustup default stable-x86_64-pc-windows-msvc`) and Visual Studio Build Tools (C++ workload)
 - Node.js (LTS) + npm
+- A Tailscale account (free tier works); a tailnet admin must enable Funnel once (HTTPS certificates under DNS settings + the funnel node attribute under Access controls)
 
 ## Build & run
 
@@ -30,58 +37,47 @@ npx tauri build
 
 Artifacts land under `src-tauri/target/release/` (executable) and `src-tauri/target/release/bundle/nsis/` (installer).
 
-## Sidecar binaries (required)
+### Sidecar binaries
 
-Two sidecar executables are **gitignored and not in this repository**. The release build and bundling step fails without them.
-
-1. Download **tunnel-client v0.0.12** from <https://github.com/openai/tunnel-client/releases> (Windows amd64 archive). Verify the SHA256 of the downloaded archive against the release's `SHA256SUMS.txt` before extracting:
-
-   ```powershell
-   Get-FileHash .\tunnel-client-v0.0.12-windows-amd64.zip -Algorithm SHA256
-   ```
-
-2. Extract both binaries from the archive into `src-tauri/binaries/`, renamed with Tauri's target-triple suffix:
-
-   ```
-   src-tauri/binaries/tunnel-client-x86_64-pc-windows-msvc.exe
-   src-tauri/binaries/cloudflared-x86_64-pc-windows-msvc.exe
-   ```
-
-3. Place `cloudflared` beside `tunnel-client` in the same directory (the tunnel-client release bundles it; it is declared as an external binary alongside it in `src-tauri/tauri.conf.json`).
-
-The archive's `LICENSE`, `NOTICE`, SPDX, and license-text files are tracked in git under `src-tauri/binaries/` for attribution.
+The Tailscale Funnel sidecar (Go, in `sidecars/tailscale-funnel`) is built by the packaging step (`npm run build:sidecar` → `scripts/build-tailscale-sidecar.ps1`) and bundled as `binaries/tailscale-funnel-sidecar`. The legacy Cloudflare-era sidecars (`tunnel-client`, `cloudflared`) are still declared for the transition period; they are unused by the default connection path and will be removed after the real-world E2E gate.
 
 ## First-run setup
 
-1. Launch the app and add at least one **Workspace**. Read access starts on; write stays off until you explicitly enable it.
-2. Open **Settings → Secure MCP Tunnel** and enter a Runtime API key (Tunnels Read + Use), an Admin API key for tunnel creation, and at least one Organization ID or ChatGPT Workspace ID.
-3. Return to **Dashboard** and press **Start**.
-4. If no tunnel exists yet, the app creates one with `tunnel-client admin --json tunnels create`, saves the returned Tunnel ID, and reuses that ID on future starts. A newly created tunnel can take roughly 25–30 seconds to become active.
-5. The Dashboard becomes **Ready** only after tunnel-client's loopback `/readyz` endpoint reports success; process spawn alone is not considered connected.
+1. Launch the app and complete the onboarding wizard: add at least one **Workspace** (Read starts on, Write/Execute off), then sign in to Tailscale when prompted.
+2. Press **Start** on the Dashboard. The app starts the local MCP server, spawns the Funnel sidecar, and walks you through any one-time tailnet approvals.
+3. When the card turns **Online**, copy the **secret capability URL** into ChatGPT (Developer Mode → create a connector of type MCP / remote endpoint) and keep it private.
 
-Normal **Stop → Start** and app restarts reuse the saved Tunnel ID. Creating a replacement is an explicit **Regenerate tunnel** action in Settings.
+Everyday behavior is configurable in **Settings**:
 
-## Connect ChatGPT
+- **General**: auto-start the tunnel when the app opens, start with Windows, start minimized to the tray, keep running in the tray when the window closes
+- **Appearance**: Light / Dark / System theme
+- **Connection**: the Funnel hostname label (changes require a Tailscale identity reset)
 
-1. In ChatGPT Web, enable **Developer Mode** (Settings → Apps & Connectors / Developer Mode).
-2. Create an app/connection with **connection type: Tunnel** and select the tunnel endpoint you created above.
-3. Enable the app in a chat and ask it to list/read/edit files in your workspace folder.
+The system tray mirrors the essentials: open the window, start/stop the tunnel, pause/resume MCP access, quit.
+
+## MCP tool surface
+
+Ten tools are exposed. `list_workspaces` returns approved workspace ids (redacted — never absolute paths; it is pause-gated and audited like every tool). The nine workspace-scoped tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), `apply_patch`, `run_command` (approved basenames: git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet), and `run_powershell` (requires the workspace's Full PowerShell mode). Read tools return bounded results (`read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` (sha256) that `apply_patch` requires as `base_revision`.
 
 ## Security model
 
-- **Loopback-only binding**: the MCP server listens strictly on `127.0.0.1:<ephemeral port>` — never on all interfaces. The only external connection is the sidecar's outbound HTTPS to OpenAI.
-- **Fail-closed policy pipeline**: every tool invocation passes through one pipeline — pause kill-switch check first, workspace lookup, capability gates (`READ_DISABLED`/`WRITE_DISABLED`), path confinement (canonicalized, component-wise containment; symlinks/junctions cannot escape), sensitive-file deny-list, then execution. Any failure short-circuits to a structured error plus an audit row.
-- **Pause kill switch**: one button suspends all MCP tool calls (`ACCESS_PAUSED`); UI operations keep working.
-- **Sensitive-file deny-list**: `.env*`, `*.pem`, `*.key`, `id_rsa*`, `.git/config`, `credentials*`, `*.pfx`, `*.p12`, `secrets.*`, and all of `node_modules/**` are blocked at any depth, for reads and writes alike. Overriding requires a code change.
+- **Loopback-only binding**: the MCP server listens strictly on `127.0.0.1` — never on all interfaces. The only external exposure is the sidecar's outbound HTTPS funnel.
+- **Secret capability URL**: the public endpoint embeds an unguessable capability token; there is no login flow on the endpoint. Rotate it from the Security page if it leaks.
+- **Pause kill switch**: one toggle (UI, tray) suspends all MCP tool calls (`ACCESS_PAUSED`), including `list_workspaces`; UI operations keep working. Pause wins even in unrestricted mode.
+- **Fail-closed pipeline**: every tool invocation passes one pipeline — pause check, workspace lookup, capability gates (`READ_DISABLED`/`WRITE_DISABLED`/`EXECUTE_DISABLED`), path confinement (canonicalized, component-wise containment; symlinks/junctions cannot escape), sensitive-file deny-list, execution policy — then writes exactly one audit row. Any pipeline failure short-circuits to a structured error, and an unrecordable audit row fails the call.
+- **Sensitive-file deny-list**: `.env*`, `*.pem`, `*.key`, `id_rsa*`, `.git/config`, `credentials*`, `*.pfx`, `*.p12`, `secrets.*`, and all of `node_modules/**` are blocked at any depth, for reads and writes alike. Overriding requires unrestricted mode (see below) or a code change.
 - **Patch-first editing**: edits are anchored string replacements (`apply_patch`), not whole-file writes; every edit carries a `base_revision` (SHA-256 of content as last seen) and fails with `FILE_CHANGED_SINCE_READ` if the file changed externally. New files are written atomically via temp-file + rename.
-- **Append-only audit log**: every MCP request writes exactly one audit row (allow, deny, or error) before its response is sent; rows can never be updated or deleted. The latest 100 events are visible in the UI.
-- **Secret handling**: Runtime/Admin API keys are never written to command-line arguments and never have a UI read-back path. Windows builds encrypt the credential payload with DPAPI before writing it under the current user's LocalAppData; `settings.json` contains only non-secret connection metadata. Existing MVP `tunnel_api_key` values are migrated on startup after the protected-store write succeeds.
-- **Readiness**: tunnel-client gets an ephemeral loopback health listener and URL file. `/healthz` is liveness only; the app reports **Ready** only when `/readyz` succeeds.
+- **Append-only audit log**: every MCP request writes exactly one audit row (allow / deny / error) before its response is sent; rows can never be updated or deleted. Rows produced in unrestricted mode are marked. The latest 100 events are visible in the UI.
+- **Bounded execution**: commands run without a shell (no quoting/parsing surface), inside a Windows Job Object (timeout kills the whole process tree), with sanitized environment, 60 s default / 10 min max timeout, and 512 KiB captured per output stream. PowerShell scripts travel through stdin only — never argv, audit detail, or diagnostics — and child console windows are never shown.
+- **Unrestricted access (opt-in)**: a Security-page switch, gated behind a typed confirmation and a persistent red banner. It relaxes capability gates, the sensitive-file deny list, the approved-command allowlist, and the Full-PowerShell workspace gate — for every workspace. The folder boundary (paths still resolve inside registered workspaces), the pause kill switch, and audit recording remain in force. Leave it off unless you fully trust your conversations.
+- **Secret handling**: the capability token never appears in UI read-back paths, command lines, or diagnostics. Connection secrets live in a DPAPI-protected store under the current user's LocalAppData; `settings.json` holds only non-secret preferences.
+- **Hardened webview**: a non-null Content-Security-Policy (`default-src 'self'`, IPC-restricted `connect-src`, inline styles allowed for Radix positioning); the opener plugin allowlists only `login.tailscale.com`, `tailscale.com`, and `*.ts.net` URLs.
 
 ### Known limitations (honesty notes)
 
-- If the app hard-crashes, the sidecar process may still be orphaned because an OS-level Windows Job Object is not yet attached; normal exit tears it down cleanly.
-- Automatic tunnel creation requires an Admin API key plus at least one organization/workspace scope. Runtime operation uses a separate restricted key.
+- Working-directory confinement is not a Windows security sandbox: an executed program can still open paths outside the workspace with your account's permissions.
+- Funnel is public ingress; the endpoint's only protection is the secrecy of the capability URL. Rotate it if in doubt.
+- The legacy Cloudflare tunnel path (`tunnel-client`, `cloudflared`) is still packaged for the transition period and will be removed after the real-world E2E gate.
 
 ## Error codes
 
@@ -92,6 +88,8 @@ Tool errors surface as structured results `{ code, message, detail? }` with thes
 | `ACCESS_PAUSED` | kill switch engaged |
 | `WORKSPACE_NOT_FOUND` | unknown workspace_id |
 | `READ_DISABLED` / `WRITE_DISABLED` | capability off |
+| `EXECUTE_DISABLED` / `POWERSHELL_DISABLED` | execution off / workspace not in Full-PowerShell mode |
+| `COMMAND_NOT_ALLOWED` | program not on the approved list (or a path was given) |
 | `PATH_OUTSIDE_WORKSPACE` | confinement violation (audited with detail) |
 | `SENSITIVE_FILE_BLOCKED` | deny-list hit |
 | `FILE_NOT_FOUND` | target missing |
@@ -102,6 +100,12 @@ Tool errors surface as structured results `{ code, message, detail? }` with thes
 | `INVALID_ARGUMENT` | malformed client input (bad regex/glob, >8 read_files paths) |
 | `IO_ERROR` | filesystem failure (OS message included) |
 
-## MCP tool surface
+## Development
 
-Eight tools are exposed. `list_workspaces` returns the approved workspace IDs. The seven workspace-scoped filesystem tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), and `apply_patch`. Read tools return bounded results (for example `read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` usable by `apply_patch`.
+```powershell
+npx tsc --noEmit        # frontend type gate
+npm run build           # frontend production build
+cargo test --workspace  # 240+ Rust unit + integration tests
+```
+
+The integration suites drive the real sidecar spawn/parse pipeline against a fake sidecar fixture — no Tailscale network needed.

@@ -128,7 +128,7 @@ export function WorkspaceCard({
               ))}
             </div>
           ) : (
-            <p className="flex items-start gap-1.5 text-[13px] text-warning-foreground">
+            <p className="flex items-start gap-1.5 text-[13px] text-warning">
               <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0 text-warning" />
               High risk: unrestricted PowerShell scripts run with your Windows account permissions.
             </p>
