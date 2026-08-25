@@ -1,8 +1,44 @@
 # Tailscale Funnel E2E Test Report (Plan Task 23)
 
-Date: 2026-08-25 · Branch: `feat/tailscale-funnel` · Build: release bundle from `56645ed`
+Date: 2026-08-25 (updated same day after security-hardening pass) · Branch: `feat/tailscale-funnel` · Build: release bundle from `8cd312a`
 
-## Status: IN PROGRESS
+## Status: IN PROGRESS — NOT production-ready
+
+**The gate below has NOT been met.** No scenario in this report has been
+executed against a real Tailscale tailnet or a real ChatGPT connector yet.
+Do not claim the Funnel milestone complete until every checkbox passes or
+carries a documented external prerequisite.
+
+### What IS already proven (automated, no network)
+
+- `cargo test --workspace` green: 247 tests, including
+  - 6 connection-lifecycle integration tests driving the REAL sidecar spawn +
+    NDJSON parse pipeline against a fake sidecar binary;
+  - 17 MCP integration tests over the live axum/rmcp server: pipeline denies
+    (pause, capability, confinement, sensitive deny-list), audit-row
+    invariants (exactly one row per call, fail-closed on audit-write failure),
+    bounded execution (timeout kills the tree, truncation metadata);
+  - settings v3 round-trip incl. theme, tray, autostart and unrestricted flags.
+- Release build + NSIS installer packaging succeeds; app boots to the new
+  shadcn/Tailwind UI (light and dark verified visually), tray menu, hidden
+  child consoles and start-to-tray verified by manual smoke.
+- Still unproven: everything requiring the real tailnet (login, funnel
+  publish, public reachability, ChatGPT connector) — the scenarios below.
+
+### New manual checks added with the 2026-08-25 hardening pass
+
+- [ ] Unrestricted access: enabling requires typing UNRESTRICTED; red banner
+      shows; with it ON a write to a `.env`-style file SUCCEEDS and its audit
+      row carries `"unrestricted": true`; Pause still blocks calls; turning
+      the switch off restores SENSITIVE_FILE_BLOCKED.
+- [ ] list_workspaces from ChatGPT shows ids/names only (no absolute paths)
+      and is denied with ACCESS_PAUSED while paused.
+- [ ] Dashboard "open endpoint" button opens `https://<fqdn>.ts.net` in the
+      browser (opener capability now allows `*.ts.net`).
+- [ ] Quitting via tray menu stops the sidecar gracefully (no orphan after
+      normal exit; Job Object still covers force-kill per Step 10).
+- [ ] App boots hidden to tray when Settings → "Start minimized to the system
+      tray" is on; window reappears via tray or a second launch attempt.
 
 ## Prerequisites (done before scenarios)
 - [x] Go sidecar built (`npm run build:sidecar` → go test pass, binary in `src-tauri/binaries/`)
