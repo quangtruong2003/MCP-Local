@@ -6,14 +6,21 @@
 //! one-audit-row-per-request guarantee covers requests that reach these
 //! handlers. Flagged for spec Task 15 ruling.
 
+use crate::screen_capture::{
+    filter_targets_for_scope, CaptureTarget, CapturedImage, ScreenCaptureProvider,
+    SystemScreenCaptureProvider,
+};
 use axum::Router;
+use base64::Engine as _;
 use lc_core::error::ErrorCode;
 use lc_core::pipeline::{Audited, RequiredCapability};
 use lc_core::{error::CoreError, CoreServices};
 use rmcp::{
-    handler::server::{common::schema_for_output, wrapper::Parameters},
+    handler::server::{
+        common::schema_for_output, router::prompt::PromptRouter, wrapper::Parameters,
+    },
     model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo},
-    tool, tool_handler, tool_router,
+    prompt_handler, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
@@ -51,6 +58,9 @@ fn ok_json<T: serde::Serialize>(v: &T) -> CallToolResult {
 #[derive(Clone)]
 pub struct WorkspaceServer {
     core: Arc<CoreServices>,
+    agent_policy: Arc<crate::settings::AgentPolicyState>,
+    capture_provider: Arc<dyn ScreenCaptureProvider>,
+    pub(crate) prompt_router: PromptRouter<Self>,
 }
 
 /// Client-facing workspace summary. Deliberately omits `root_path`: the
@@ -77,8 +87,39 @@ fn summary_of(ws: &lc_core::models::Workspace) -> WorkspaceSummary {
     }
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct AgentPolicyOutput {
+    pub mode: crate::settings::AgentMode,
+    pub paused: bool,
+    pub unrestricted_access: bool,
+    pub screen_capture_enabled: bool,
+    pub capture_scope: crate::settings::CaptureScope,
+    pub visual_verification: bool,
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct EmptyArgs {}
+
+#[derive(serde::Deserialize, schemars::JsonSchema)]
+pub struct CaptureScreenArgs {
+    pub target_id: String,
+    #[serde(default)]
+    pub max_edge: Option<u32>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct CaptureMetadataOutput {
+    pub target_id: String,
+    pub target_kind: crate::screen_capture::CaptureTargetKind,
+    pub name: String,
+    pub application: Option<String>,
+    pub original_width: u32,
+    pub original_height: u32,
+    pub returned_width: u32,
+    pub returned_height: u32,
+    pub encoded_bytes: usize,
+    pub sha256: String,
+}
 
 // ---- argument structs (all take workspace_id first) ----
 
@@ -212,12 +253,244 @@ fn execution_error(e: crate::execution::policy::PolicyError) -> CoreError {
 // consumed by #[tool_handler]; no runtime field is needed.
 #[tool_router]
 impl WorkspaceServer {
-    pub fn new(core: Arc<CoreServices>) -> Self {
-        Self { core }
+    pub fn new(
+        core: Arc<CoreServices>,
+        agent_policy: Arc<crate::settings::AgentPolicyState>,
+        capture_provider: Arc<dyn ScreenCaptureProvider>,
+    ) -> Self {
+        Self {
+            core,
+            agent_policy,
+            capture_provider,
+            prompt_router: crate::agent_skills::workspace_prompt_router(),
+        }
     }
 
     #[tool(
-        description = "List the approved workspaces. Call this first to get valid workspace_id values for every other tool.",
+        description = "Read the live Local Workspaces agent/privacy policy before acting. Returns Agent mode, screen-capture authorization/scope, visual-verification preference, Pause state, and unrestricted-access state. Pause remains authoritative and denies the call when active.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<AgentPolicyOutput>()
+    )]
+    fn get_agent_policy(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
+        let paused = self.core.pause.is_paused();
+        let audited: Result<AgentPolicyOutput, CoreError> = if paused {
+            Err(CoreError::new(
+                ErrorCode::AccessPaused,
+                "access is paused by the user",
+            ))
+        } else {
+            let snapshot = self.agent_policy.snapshot();
+            Ok(AgentPolicyOutput {
+                mode: snapshot.mode,
+                paused,
+                unrestricted_access: self.core.unrestricted.get(),
+                screen_capture_enabled: snapshot.screen_capture_enabled,
+                capture_scope: snapshot.capture_scope,
+                visual_verification: snapshot.visual_verification,
+            })
+        };
+        let decision = match &audited {
+            Ok(_) => "allow",
+            Err(e) if e.code == ErrorCode::AccessPaused => "deny",
+            Err(_) => "error",
+        };
+        let detail = audited.as_ref().ok().map(|p| {
+            serde_json::json!({
+                "mode": p.mode,
+                "screen_capture_enabled": p.screen_capture_enabled,
+                "capture_scope": p.capture_scope,
+                "visual_verification": p.visual_verification,
+                "unrestricted": p.unrestricted_access,
+            })
+        });
+        if let Err(e) = lc_core::audit::record_simple(
+            &self.core.db,
+            "mcp",
+            Some("get_agent_policy"),
+            None,
+            "get_agent_policy",
+            decision,
+            audited.as_ref().err().map(|e| e.code.as_str()),
+            None,
+            detail,
+        ) {
+            return err_result(&e);
+        }
+        match audited {
+            Ok(policy) => ok_structured(&policy),
+            Err(e) => err_result(&e),
+        }
+    }
+
+    #[tool(
+        description = "List screen-capture targets allowed by the live agent policy. Requires explicit screen-capture enablement; Pause always wins. When capture scope is windows_only, full displays are omitted.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<Vec<CaptureTarget>>()
+    )]
+    fn list_capture_targets(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
+        let snapshot = self.agent_policy.snapshot();
+        let audited: Result<Vec<CaptureTarget>, CoreError> = (|| {
+            if self.core.pause.is_paused() {
+                return Err(CoreError::new(
+                    ErrorCode::AccessPaused,
+                    "access is paused by the user",
+                ));
+            }
+            if !snapshot.screen_capture_enabled {
+                return Err(CoreError::new(
+                    ErrorCode::ScreenCaptureDisabled,
+                    "screen capture is disabled by the user",
+                ));
+            }
+            let targets = self.capture_provider.list_targets()?;
+            Ok(filter_targets_for_scope(targets, snapshot.capture_scope))
+        })();
+        let decision = match &audited {
+            Ok(_) => "allow",
+            Err(e)
+                if matches!(
+                    e.code,
+                    ErrorCode::AccessPaused | ErrorCode::ScreenCaptureDisabled
+                ) =>
+            {
+                "deny"
+            }
+            Err(_) => "error",
+        };
+        let detail = audited.as_ref().ok().map(|targets| {
+            serde_json::json!({
+                "count": targets.len(),
+                "capture_scope": snapshot.capture_scope,
+            })
+        });
+        if let Err(e) = lc_core::audit::record_simple(
+            &self.core.db,
+            "mcp",
+            Some("list_capture_targets"),
+            None,
+            "list_capture_targets",
+            decision,
+            audited.as_ref().err().map(|e| e.code.as_str()),
+            None,
+            detail,
+        ) {
+            return err_result(&e);
+        }
+        match audited {
+            Ok(targets) => ok_structured(&targets),
+            Err(e) => err_result(&e),
+        }
+    }
+
+    #[tool(
+        description = "Capture one PNG frame from a target returned by list_capture_targets. Requires explicit screen-capture enablement; Pause always wins. Returns an MCP image block plus dimensions, encoded byte count, and SHA-256 metadata. Never use execution tools to bypass a disabled capture capability.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<CaptureMetadataOutput>()
+    )]
+    fn capture_screen(&self, Parameters(a): Parameters<CaptureScreenArgs>) -> CallToolResult {
+        let snapshot = self.agent_policy.snapshot();
+        let captured: Result<CapturedImage, CoreError> = (|| {
+            if self.core.pause.is_paused() {
+                return Err(CoreError::new(
+                    ErrorCode::AccessPaused,
+                    "access is paused by the user",
+                ));
+            }
+            if !snapshot.screen_capture_enabled {
+                return Err(CoreError::new(
+                    ErrorCode::ScreenCaptureDisabled,
+                    "screen capture is disabled by the user",
+                ));
+            }
+
+            let allowed_targets = filter_targets_for_scope(
+                self.capture_provider.list_targets()?,
+                snapshot.capture_scope,
+            );
+            if !allowed_targets
+                .iter()
+                .any(|target| target.id == a.target_id)
+            {
+                return Err(CoreError::new(
+                    ErrorCode::CaptureTargetNotFound,
+                    format!(
+                        "capture target '{}' is not available in the current scope",
+                        a.target_id
+                    ),
+                ));
+            }
+            self.capture_provider.capture(&a.target_id, a.max_edge)
+        })();
+
+        let decision = match &captured {
+            Ok(_) => "allow",
+            Err(e)
+                if matches!(
+                    e.code,
+                    ErrorCode::AccessPaused | ErrorCode::ScreenCaptureDisabled
+                ) =>
+            {
+                "deny"
+            }
+            Err(_) => "error",
+        };
+        let detail = match &captured {
+            Ok(image) => Some(serde_json::json!({
+                "target_id": image.target.id,
+                "target_kind": image.target.kind,
+                "original_width": image.original_width,
+                "original_height": image.original_height,
+                "returned_width": image.returned_width,
+                "returned_height": image.returned_height,
+                "encoded_bytes": image.png_bytes.len(),
+                "sha256": lc_core::ops::sha256_hex(&image.png_bytes),
+            })),
+            Err(_) => Some(serde_json::json!({ "target_id": a.target_id })),
+        };
+        if let Err(e) = lc_core::audit::record_simple(
+            &self.core.db,
+            "mcp",
+            Some("capture_screen"),
+            None,
+            "capture_screen",
+            decision,
+            captured.as_ref().err().map(|e| e.code.as_str()),
+            None,
+            detail,
+        ) {
+            return err_result(&e);
+        }
+
+        match captured {
+            Ok(image) => {
+                let sha256 = lc_core::ops::sha256_hex(&image.png_bytes);
+                let metadata = CaptureMetadataOutput {
+                    target_id: image.target.id.clone(),
+                    target_kind: image.target.kind,
+                    name: image.target.name.clone(),
+                    application: image.target.application.clone(),
+                    original_width: image.original_width,
+                    original_height: image.original_height,
+                    returned_width: image.returned_width,
+                    returned_height: image.returned_height,
+                    encoded_bytes: image.png_bytes.len(),
+                    sha256,
+                };
+                let json = serde_json::to_value(&metadata).unwrap_or(serde_json::Value::Null);
+                let encoded = base64::engine::general_purpose::STANDARD.encode(&image.png_bytes);
+                let mut result = CallToolResult::success(vec![
+                    ContentBlock::image(encoded, "image/png"),
+                    ContentBlock::text(serde_json::to_string_pretty(&metadata).unwrap_or_default()),
+                ]);
+                result.structured_content = Some(json);
+                result
+            }
+            Err(e) => err_result(&e),
+        }
+    }
+
+    #[tool(
+        description = "Discover user-approved workspaces and their Read/Write/Execute permissions. Call this first when workspace_id is not already known, then reuse the returned id for later tools. If access is paused, stop and report the user-controlled blocker.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<Vec<WorkspaceSummary>>()
     )]
@@ -265,7 +538,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "List entries of a directory inside an approved workspace",
+        description = "Inspect directory structure inside an approved workspace. Use this when the relevant subtree is known; prefer non-recursive or focused listings before broad recursive scans.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<lc_core::ops::list_dir::ListDirResult>()
     )]
@@ -285,7 +558,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Find files by glob pattern inside an approved workspace",
+        description = "Locate files by glob pattern inside an approved workspace. Use this before opening many files when names/extensions can narrow the relevant set.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<lc_core::ops::find_files::FindResult>()
     )]
@@ -305,7 +578,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Search text (literal or regex) across files in an approved workspace",
+        description = "Search literal text or regex across an approved workspace. Prefer this before reading many files when symbols, errors, strings, or references can identify the relevant code; then read only the matching files.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<lc_core::ops::search_text::SearchResult>()
     )]
@@ -335,7 +608,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Read a file (with line offset/limit). Returns sha256 revision for patching.",
+        description = "Read a targeted file window and return its sha256 revision. Read an existing file before apply_patch and use the latest returned revision as base_revision; re-read after external/stale changes.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<lc_core::ops::read_file::ReadResult>()
     )]
@@ -363,7 +636,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Read up to 8 files at once; per-file results",
+        description = "Read up to 8 targeted files in one call, with per-file results and revisions. Use this for a small independent batch after search/listing has narrowed the relevant files; avoid broad repository dumps.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<Vec<lc_core::ops::read_file::FileResult>>()
     )]
@@ -383,7 +656,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Create a new file (fails if it exists)",
+        description = "Create a genuinely new file inside the workspace; this fails if the path already exists. For an existing file, read it and use apply_patch instead of recreating or overwriting it.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<lc_core::ops::write_file::CreateResult>()
     )]
@@ -403,7 +676,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Replace one unique occurrence of old_string in a file. Requires base_revision from a prior read.",
+        description = "Patch an existing file by replacing one unique old_string. Requires base_revision from the latest read_file/read_files result. On FILE_CHANGED_SINCE_READ, re-read the file, recompute the patch against the new content, and retry only if still valid.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<lc_core::ops::write_file::PatchResult>()
     )]
@@ -434,7 +707,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Run an approved developer command (git, cargo, npm, node, python, ...) inside a workspace. Requires command execution to be enabled for the workspace.",
+        description = "Run an approved developer command (git, cargo, npm, node, python, ...) inside the workspace. Use this to inspect project state and verify changes with targeted tests/build/lint commands. Requires Execute permission; pass a bare approved program name, never a path or shell command string.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<ExecutionOutput>()
     )]
@@ -488,7 +761,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Run a PowerShell script (via stdin) inside a workspace. Requires FullPowerShell execution mode; ApprovedCommands mode returns POWERSHELL_DISABLED.",
+        description = "Run a PowerShell script via stdin inside the workspace. Only use when the task genuinely needs PowerShell and run_command cannot express it. Requires FullPowerShell mode (unless the user explicitly enabled unrestricted access); never use this to bypass workspace or execution policy.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<ExecutionOutput>()
     )]
@@ -556,13 +829,16 @@ impl WorkspaceServer {
 }
 
 #[tool_handler]
+#[prompt_handler(router = self.prompt_router)]
 impl ServerHandler for WorkspaceServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "File access scoped to user-approved workspace folders. \
-                 Every tool takes workspace_id. Read tools return a `revision` \
-                 (sha256) that apply_patch requires as base_revision.",
+        ServerInfo::new(
+            ServerCapabilities::builder()
+                .enable_prompts()
+                .enable_tools()
+                .build(),
         )
+        .with_instructions(crate::agent_skills::AGENT_INSTRUCTIONS)
     }
 }
 
@@ -572,13 +848,23 @@ impl ServerHandler for WorkspaceServer {
 /// Requests arrive through tunnels with the public tunnel hostname in
 /// `Host`, so host validation is disabled here — access control stays at
 /// the workspace/pipeline layer, and the server still binds loopback only.
-pub async fn serve(core: Arc<CoreServices>) -> std::io::Result<u16> {
+pub async fn serve(
+    core: Arc<CoreServices>,
+    agent_policy: Arc<crate::settings::AgentPolicyState>,
+) -> std::io::Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let mut config = StreamableHttpServerConfig::default();
     config.allowed_hosts = vec![]; // empty = Host validation off (see doc comment)
+    let capture_provider: Arc<dyn ScreenCaptureProvider> = Arc::new(SystemScreenCaptureProvider);
     let service = StreamableHttpService::new(
-        move || Ok(WorkspaceServer::new(core.clone())),
+        move || {
+            Ok(WorkspaceServer::new(
+                core.clone(),
+                agent_policy.clone(),
+                capture_provider.clone(),
+            ))
+        },
         LocalSessionManager::default().into(),
         config,
     );

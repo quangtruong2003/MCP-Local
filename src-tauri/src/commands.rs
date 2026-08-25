@@ -379,11 +379,11 @@ pub fn update_app_settings(
     app.state::<crate::UiFlags>()
         .close_to_tray
         .store(settings.close_to_tray, Ordering::Relaxed);
-    // Unrestricted access is a runtime pipeline flag mirrored from settings.
-    app.state::<AppState>()
-        .core
-        .unrestricted
-        .set(settings.unrestricted_access);
+    // Runtime policy mirrors persisted preferences only after the save
+    // succeeds, so MCP never observes a setting the UI failed to persist.
+    let state = app.state::<AppState>();
+    state.core.unrestricted.set(settings.unrestricted_access);
+    state.agent_policy.apply(&settings);
     Ok(settings)
 }
 

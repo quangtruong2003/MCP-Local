@@ -1,7 +1,9 @@
+mod agent_skills;
 mod commands;
 pub mod connection;
 mod execution;
 mod process_job;
+pub mod screen_capture;
 pub mod secret_store;
 pub mod server;
 pub mod settings;
@@ -14,6 +16,7 @@ use tauri::Manager;
 pub struct AppState {
     pub core: Arc<lc_core::CoreServices>,
     pub port: u16,
+    pub agent_policy: Arc<settings::AgentPolicyState>,
 }
 
 /// Runtime UI behavior flags mirrored from [`settings::AppSettings`] so the
@@ -42,8 +45,14 @@ pub fn run() {
             let core = Arc::new(
                 lc_core::CoreServices::open(&dir.join("manager.db")).map_err(|e| e.to_string())?,
             );
-            let port = tauri::async_runtime::block_on(server::serve(core.clone()))?;
-            app.manage(AppState { core, port });
+            let agent_policy = Arc::new(settings::AgentPolicyState::default());
+            let port =
+                tauri::async_runtime::block_on(server::serve(core.clone(), agent_policy.clone()))?;
+            app.manage(AppState {
+                core,
+                port,
+                agent_policy: agent_policy.clone(),
+            });
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 
             // One-time migration from the MVP plaintext tunnel_api_key. Only
@@ -75,6 +84,7 @@ pub fn run() {
             app.manage(UiFlags {
                 close_to_tray: AtomicBool::new(app_settings.close_to_tray),
             });
+            agent_policy.apply(&app_settings);
             // Mirror the persisted unrestricted-access preference into the
             // live pipeline flag (default off).
             app.state::<AppState>()

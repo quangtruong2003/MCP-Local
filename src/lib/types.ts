@@ -1,8 +1,10 @@
 export type ViewId = "dashboard" | "workspaces" | "activity" | "security" | "settings";
 
 export type ThemePreference = "system" | "light" | "dark";
+export type AgentMode = "autonomous" | "conservative";
+export type CaptureScope = "windows_and_displays" | "windows_only";
 
-/** Versioned app settings persisted by the backend (`version: 3`). */
+/** Versioned app settings persisted by the backend (`version: 4`). */
 export interface AppSettings {
   version: number;
   start_on_launch: boolean;
@@ -13,6 +15,10 @@ export interface AppSettings {
   close_to_tray: boolean;
   start_minimized_to_tray: boolean;
   unrestricted_access: boolean;
+  agent_mode: AgentMode;
+  screen_capture_enabled: boolean;
+  capture_scope: CaptureScope;
+  visual_verification: boolean;
 }
 
 // --- Backend contracts (mirror crates/core/src/models.rs serde output) ---

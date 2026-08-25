@@ -134,7 +134,77 @@ pub fn save(dir: &Path, settings: &ConnectionSettings) -> Result<(), String> {
     std::fs::write(&path, text).map_err(|e| e.to_string())
 }
 
-/// Versioned application settings (`version: 3`). All non-version fields are
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentMode {
+    #[default]
+    Autonomous,
+    Conservative,
+}
+
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureScope {
+    #[default]
+    WindowsAndDisplays,
+    WindowsOnly,
+}
+
+/// Runtime copy of behavior/privacy preferences used by MCP handlers. This is
+/// guidance/capture authorization state, not a replacement for the core
+/// workspace capability pipeline.
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct AgentPolicySnapshot {
+    pub mode: AgentMode,
+    pub screen_capture_enabled: bool,
+    pub capture_scope: CaptureScope,
+    pub visual_verification: bool,
+}
+
+impl Default for AgentPolicySnapshot {
+    fn default() -> Self {
+        Self {
+            mode: AgentMode::Autonomous,
+            screen_capture_enabled: false,
+            capture_scope: CaptureScope::WindowsAndDisplays,
+            visual_verification: true,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct AgentPolicyState {
+    inner: std::sync::RwLock<AgentPolicySnapshot>,
+}
+
+impl AgentPolicyState {
+    pub fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            inner: std::sync::RwLock::new(AgentPolicySnapshot::from(settings)),
+        }
+    }
+
+    pub fn snapshot(&self) -> AgentPolicySnapshot {
+        *self
+            .inner
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub fn apply(&self, settings: &AppSettings) {
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            AgentPolicySnapshot::from(settings);
+    }
+}
+
+/// Versioned application settings (`version: 4`). All non-version fields are
 /// serde-defaulted so older files keep parsing after upgrades.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
@@ -163,6 +233,30 @@ pub struct AppSettings {
     /// active. Default off; the UI gates enabling behind a typed confirm.
     #[serde(default)]
     pub unrestricted_access: bool,
+    /// How assertively the Agent Skill should proceed when intent is clear.
+    #[serde(default)]
+    pub agent_mode: AgentMode,
+    /// Explicit privacy capability. Independent from filesystem/execution
+    /// unrestricted access and off by default.
+    #[serde(default)]
+    pub screen_capture_enabled: bool,
+    /// Whether capture target discovery may include full displays.
+    #[serde(default)]
+    pub capture_scope: CaptureScope,
+    /// Guidance preference for visually checking UI changes when useful.
+    #[serde(default = "default_true")]
+    pub visual_verification: bool,
+}
+
+impl From<&AppSettings> for AgentPolicySnapshot {
+    fn from(settings: &AppSettings) -> Self {
+        Self {
+            mode: settings.agent_mode,
+            screen_capture_enabled: settings.screen_capture_enabled,
+            capture_scope: settings.capture_scope,
+            visual_verification: settings.visual_verification,
+        }
+    }
 }
 
 fn default_tailscale_hostname() -> String {
@@ -193,7 +287,7 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            version: 3,
+            version: 4,
             start_on_launch: false,
             tailscale_hostname: default_tailscale_hostname(),
             onboarding_complete: false,
@@ -202,6 +296,10 @@ impl Default for AppSettings {
             close_to_tray: true,
             start_minimized_to_tray: false,
             unrestricted_access: false,
+            agent_mode: AgentMode::Autonomous,
+            screen_capture_enabled: false,
+            capture_scope: CaptureScope::WindowsAndDisplays,
+            visual_verification: true,
         }
     }
 }
@@ -248,6 +346,10 @@ pub fn load_app_settings(dir: &Path) -> Result<AppSettings, String> {
         let mut settings: AppSettings = serde_json::from_value(value)
             .map_err(|e| format!("SETTINGS_INVALID: unsupported settings.json layout: {e}"))?;
         settings.normalize();
+        // Older versioned files deserialize through serde defaults; once in
+        // memory they use the current schema version and will be persisted as
+        // v4 on the next settings update.
+        settings.version = 4;
         settings
     };
     Ok(settings)
@@ -344,11 +446,11 @@ mod tests {
     }
 
     #[test]
-    fn app_settings_missing_file_yields_defaults_v3() {
+    fn app_settings_missing_file_yields_secure_v4_agent_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();
         assert_eq!(loaded, AppSettings::default());
-        assert_eq!(loaded.version, 3);
+        assert_eq!(loaded.version, 4);
         assert!(!loaded.start_on_launch);
         assert_eq!(loaded.tailscale_hostname, "local-workspace-mcp");
         assert!(!loaded.onboarding_complete);
@@ -357,6 +459,27 @@ mod tests {
         assert!(loaded.close_to_tray);
         assert!(!loaded.start_minimized_to_tray);
         assert!(!loaded.unrestricted_access);
+        assert_eq!(loaded.agent_mode, AgentMode::Autonomous);
+        assert!(!loaded.screen_capture_enabled);
+        assert_eq!(loaded.capture_scope, CaptureScope::WindowsAndDisplays);
+        assert!(loaded.visual_verification);
+    }
+
+    #[test]
+    fn v3_file_upgrades_to_v4_agent_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("settings.json"),
+            r#"{"version":3,"start_on_launch":true,"tailscale_hostname":"h","onboarding_complete":true,"theme":"dark","unrestricted_access":true}"#,
+        )
+        .unwrap();
+        let loaded = load_app_settings(dir.path()).unwrap();
+        assert_eq!(loaded.version, 4);
+        assert_eq!(loaded.agent_mode, AgentMode::Autonomous);
+        assert!(!loaded.screen_capture_enabled);
+        assert_eq!(loaded.capture_scope, CaptureScope::WindowsAndDisplays);
+        assert!(loaded.visual_verification);
+        assert!(loaded.unrestricted_access);
     }
 
     /// A pre-v3 file (no theme/tray/startup keys) parses with the new
@@ -412,7 +535,7 @@ mod tests {
     fn app_settings_roundtrip_preserves_all_fields() {
         let dir = tempfile::tempdir().unwrap();
         let settings = AppSettings {
-            version: 3,
+            version: 4,
             start_on_launch: true,
             tailscale_hostname: "my-machine.tailnet-name.ts.net".into(),
             onboarding_complete: true,
@@ -421,6 +544,10 @@ mod tests {
             close_to_tray: false,
             start_minimized_to_tray: true,
             unrestricted_access: false,
+            agent_mode: AgentMode::Conservative,
+            screen_capture_enabled: true,
+            capture_scope: CaptureScope::WindowsOnly,
+            visual_verification: false,
         };
         save_app_settings(dir.path(), &settings).unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();

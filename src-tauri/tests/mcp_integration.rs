@@ -1,11 +1,111 @@
 //! In-process client -> real axum/rmcp stack against a temp workspace.
 
-use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt};
-use std::sync::Arc;
+use base64::Engine as _;
+use rmcp::{
+    model::{CallToolRequestParams, GetPromptRequestParams},
+    transport::StreamableHttpClientTransport,
+    ServiceExt,
+};
+use std::{io::Cursor, sync::Arc};
+
+use local_workspace_mcp_manager::screen_capture::{
+    CaptureGeometry, CaptureTarget, CaptureTargetKind, CapturedImage, ScreenCaptureProvider,
+};
 
 type Core = Arc<lc_core::CoreServices>;
 
+#[derive(Debug, Default)]
+struct FakeCaptureProvider;
+
+fn fake_display_target() -> CaptureTarget {
+    CaptureTarget {
+        id: "display:1".into(),
+        kind: CaptureTargetKind::Display,
+        name: "Display 1".into(),
+        application: None,
+        geometry: CaptureGeometry {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        },
+        scale_factor: 1.0,
+        primary: true,
+    }
+}
+
+fn fake_window_target() -> CaptureTarget {
+    CaptureTarget {
+        id: "window:7".into(),
+        kind: CaptureTargetKind::Window,
+        name: "Editor".into(),
+        application: Some("TestApp".into()),
+        geometry: CaptureGeometry {
+            x: 40,
+            y: 50,
+            width: 800,
+            height: 600,
+        },
+        scale_factor: 1.0,
+        primary: false,
+    }
+}
+
+fn fake_png() -> Vec<u8> {
+    let image = image::RgbaImage::from_pixel(2, 1, image::Rgba([1, 2, 3, 255]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
+impl ScreenCaptureProvider for FakeCaptureProvider {
+    fn list_targets(&self) -> Result<Vec<CaptureTarget>, lc_core::error::CoreError> {
+        Ok(vec![fake_display_target(), fake_window_target()])
+    }
+
+    fn capture(
+        &self,
+        target_id: &str,
+        _max_edge: Option<u32>,
+    ) -> Result<CapturedImage, lc_core::error::CoreError> {
+        let target = match target_id {
+            "display:1" => fake_display_target(),
+            "window:7" => fake_window_target(),
+            _ => {
+                return Err(lc_core::error::CoreError::new(
+                    lc_core::error::ErrorCode::CaptureTargetNotFound,
+                    "missing capture target",
+                ))
+            }
+        };
+        Ok(CapturedImage {
+            png_bytes: fake_png(),
+            target,
+            original_width: 2,
+            original_height: 1,
+            returned_width: 2,
+            returned_height: 1,
+        })
+    }
+}
+
+/// Internal transport used only by this in-process MCP server test suite.
+/// Production clients never connect to this URL directly: Tailscale Funnel
+/// terminates public HTTPS and reverse-proxies the protected capability path
+/// to the same loopback `/mcp` service.
+fn local_test_mcp_uri(port: u16) -> String {
+    format!("http://127.0.0.1:{port}/mcp")
+}
+
 async fn spawn_server() -> (u16, Core, tempfile::TempDir, String) {
+    spawn_server_with_settings(local_workspace_mcp_manager::settings::AppSettings::default()).await
+}
+
+async fn spawn_server_with_settings(
+    settings: local_workspace_mcp_manager::settings::AppSettings,
+) -> (u16, Core, tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let db = lc_core::db::Database::open(&dir.path().join("t.db")).unwrap();
     std::fs::create_dir_all(dir.path().join("ws")).unwrap();
@@ -28,10 +128,17 @@ async fn spawn_server() -> (u16, Core, tempfile::TempDir, String) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let core_for_server = core.clone();
+    let agent_policy =
+        Arc::new(local_workspace_mcp_manager::settings::AgentPolicyState::from_settings(&settings));
+    let agent_policy_for_server = agent_policy.clone();
+    let capture_provider: Arc<dyn ScreenCaptureProvider> = Arc::new(FakeCaptureProvider);
+    let capture_provider_for_server = capture_provider.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
             Ok(local_workspace_mcp_manager::server::WorkspaceServer::new(
                 core_for_server.clone(),
+                agent_policy_for_server.clone(),
+                capture_provider_for_server.clone(),
             ))
         },
         std::sync::Arc::new(
@@ -82,8 +189,8 @@ fn assert_audit_row(
 async fn full_read_write_roundtrip_over_mcp() {
     let (port, core, dir, ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -185,8 +292,8 @@ fn latest_audit_row(core: &lc_core::CoreServices, op: &str) -> lc_core::models::
 async fn audit_rows_record_denials() {
     let (port, core, _dir, ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -253,8 +360,8 @@ async fn audit_rows_record_denials() {
 async fn pause_blocks_tool_calls() {
     let (port, core, _dir, ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -283,8 +390,8 @@ async fn pause_blocks_tool_calls() {
 async fn unknown_workspace_is_invalid_error_result() {
     let (port, _core, _dir, _ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -311,8 +418,8 @@ async fn unknown_workspace_is_invalid_error_result() {
 async fn path_traversal_denied_over_mcp() {
     let (port, core, _dir, ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -350,8 +457,8 @@ async fn sensitive_file_blocked_over_mcp() {
     let (port, core, dir, ws_id) = spawn_server().await;
     std::fs::write(dir.path().join("ws/.env"), "SECRET=1\n").unwrap();
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -400,8 +507,8 @@ async fn sensitive_file_blocked_over_mcp() {
 async fn stale_revision_detected_over_mcp() {
     let (port, core, dir, ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -484,8 +591,8 @@ fn detail_keys(detail: &serde_json::Value) -> Vec<String> {
 async fn run_command_without_execute_is_denied() {
     let (port, core, _dir, ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -522,8 +629,8 @@ async fn run_command_approved_runs_and_audits_safe_metadata() {
         lc_core::models::ExecutionMode::ApprovedCommands,
     );
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -591,8 +698,8 @@ async fn run_command_unapproved_program_is_command_not_allowed() {
         lc_core::models::ExecutionMode::ApprovedCommands,
     );
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -630,8 +737,8 @@ async fn run_powershell_requires_full_powershell_mode() {
         lc_core::models::ExecutionMode::ApprovedCommands,
     );
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -672,8 +779,8 @@ async fn run_powershell_full_mode_runs_and_audits_safe_metadata() {
         lc_core::models::ExecutionMode::FullPowerShell,
     );
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -722,7 +829,7 @@ async fn run_powershell_full_mode_runs_and_audits_safe_metadata() {
         ]
     );
     assert_eq!(detail["script_sha256"].as_str().unwrap().len(), 64);
-    assert_eq!(detail["script_bytes"], script.as_bytes().len() as u64);
+    assert_eq!(detail["script_bytes"], script.len() as u64);
     let detail_str = detail.to_string();
     assert!(
         !detail_str.contains("ps-ok") && !detail_str.contains("Write-Output"),
@@ -740,8 +847,8 @@ async fn pause_blocks_execution_tools() {
     );
     core.pause.set(true);
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -778,8 +885,8 @@ async fn run_command_cwd_escape_is_path_outside_workspace() {
         lc_core::models::ExecutionMode::ApprovedCommands,
     );
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -818,8 +925,8 @@ async fn run_command_timeout_over_limit_is_invalid_argument() {
         lc_core::models::ExecutionMode::ApprovedCommands,
     );
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -850,13 +957,13 @@ async fn run_command_timeout_over_limit_is_invalid_argument() {
     );
 }
 
-/// Step 6: tool discovery exposes exactly the 10-tool surface.
+/// Tool discovery exposes the file/execution surface plus live agent policy.
 #[tokio::test]
-async fn tool_discovery_exposes_exactly_ten_tools() {
+async fn tool_discovery_exposes_agent_policy_tool() {
     let (port, _core, _dir, _ws_id) = spawn_server().await;
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();
@@ -872,8 +979,11 @@ async fn tool_discovery_exposes_exactly_ten_tools() {
         names,
         vec![
             "apply_patch",
+            "capture_screen",
             "create_file",
             "find_files",
+            "get_agent_policy",
+            "list_capture_targets",
             "list_directory",
             "list_workspaces",
             "read_file",
@@ -883,6 +993,317 @@ async fn tool_discovery_exposes_exactly_ten_tools() {
             "search_text",
         ]
     );
+}
+
+#[tokio::test]
+async fn get_agent_policy_returns_secure_live_defaults() {
+    let (port, _core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(CallToolRequestParams::new("get_agent_policy"))
+        .await
+        .unwrap();
+    assert!(!res.is_error.unwrap_or(false));
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(text.contains("\"mode\":\"autonomous\""), "{text}");
+    assert!(text.contains("\"paused\":false"), "{text}");
+    assert!(text.contains("\"unrestricted_access\":false"), "{text}");
+    assert!(text.contains("\"screen_capture_enabled\":false"), "{text}");
+    assert!(
+        text.contains("\"capture_scope\":\"windows_and_displays\""),
+        "{text}"
+    );
+    assert!(text.contains("\"visual_verification\":true"), "{text}");
+}
+
+#[tokio::test]
+async fn capture_tools_are_denied_when_capture_is_disabled() {
+    let (port, core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    for (tool, args) in [
+        ("list_capture_targets", serde_json::json!({})),
+        (
+            "capture_screen",
+            serde_json::json!({ "target_id": "window:7" }),
+        ),
+    ] {
+        let res = client
+            .call_tool(
+                CallToolRequestParams::new(tool).with_arguments(args.as_object().unwrap().clone()),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&res).unwrap();
+        assert!(res.is_error.unwrap_or(false), "{tool}: {text}");
+        assert!(text.contains("SCREEN_CAPTURE_DISABLED"), "{tool}: {text}");
+        let row = latest_audit_row(&core, tool);
+        assert_eq!(row.decision, "deny");
+        assert_eq!(row.error_code.as_deref(), Some("SCREEN_CAPTURE_DISABLED"));
+        assert_eq!(row.workspace_id, None);
+    }
+}
+
+#[tokio::test]
+async fn capture_pause_wins_over_enabled_permission() {
+    let settings = local_workspace_mcp_manager::settings::AppSettings {
+        screen_capture_enabled: true,
+        ..Default::default()
+    };
+    let (port, core, _dir, _ws_id) = spawn_server_with_settings(settings).await;
+    core.pause.set(true);
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("capture_screen").with_arguments(
+                serde_json::json!({ "target_id": "window:7" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("ACCESS_PAUSED"), "{text}");
+    let row = latest_audit_row(&core, "capture_screen");
+    assert_eq!(row.decision, "deny");
+    assert_eq!(row.error_code.as_deref(), Some("ACCESS_PAUSED"));
+}
+
+#[tokio::test]
+async fn list_capture_targets_honors_windows_only_scope() {
+    let settings = local_workspace_mcp_manager::settings::AppSettings {
+        screen_capture_enabled: true,
+        capture_scope: local_workspace_mcp_manager::settings::CaptureScope::WindowsOnly,
+        ..Default::default()
+    };
+    let (port, core, _dir, _ws_id) = spawn_server_with_settings(settings).await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(CallToolRequestParams::new("list_capture_targets"))
+        .await
+        .unwrap();
+    assert!(!res.is_error.unwrap_or(false));
+    let body_text = res
+        .content
+        .first()
+        .and_then(|c| c.as_text().map(|t| t.text.to_string()))
+        .unwrap_or_default();
+    let body = extract_json(&body_text);
+    let targets = body.as_array().expect("capture target array");
+    assert_eq!(targets.len(), 1, "{body_text}");
+    assert_eq!(targets[0]["id"], "window:7");
+    assert_eq!(targets[0]["kind"], "window");
+
+    let row = latest_audit_row(&core, "list_capture_targets");
+    assert_eq!(row.decision, "allow");
+    assert_eq!(row.detail.as_ref().unwrap()["count"], 1);
+}
+
+#[tokio::test]
+async fn capture_screen_returns_png_image_metadata_and_safe_audit() {
+    let settings = local_workspace_mcp_manager::settings::AppSettings {
+        screen_capture_enabled: true,
+        ..Default::default()
+    };
+    let (port, core, _dir, _ws_id) = spawn_server_with_settings(settings).await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("capture_screen").with_arguments(
+                serde_json::json!({ "target_id": "window:7", "max_edge": 100 })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let serialized = serde_json::to_string(&res).unwrap();
+    assert!(!res.is_error.unwrap_or(false), "{serialized}");
+    let png = fake_png();
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+    let sha256 = lc_core::ops::sha256_hex(&png);
+    assert!(serialized.contains("image/png"), "{serialized}");
+    assert!(
+        serialized.contains(&encoded),
+        "image bytes missing: {serialized}"
+    );
+    assert!(serialized.contains(&sha256), "sha missing: {serialized}");
+    assert!(serialized.contains("\"original_width\":2"), "{serialized}");
+    assert!(serialized.contains("\"returned_height\":1"), "{serialized}");
+
+    let row = latest_audit_row(&core, "capture_screen");
+    assert_eq!(row.decision, "allow");
+    assert_eq!(row.workspace_id, None);
+    let detail = row.detail.as_ref().expect("capture audit detail");
+    assert_eq!(detail["target_id"], "window:7");
+    assert_eq!(detail["target_kind"], "window");
+    assert_eq!(detail["original_width"], 2);
+    assert_eq!(detail["original_height"], 1);
+    assert_eq!(detail["returned_width"], 2);
+    assert_eq!(detail["returned_height"], 1);
+    assert_eq!(detail["encoded_bytes"], png.len() as u64);
+    assert_eq!(detail["sha256"], sha256);
+    let detail_text = detail.to_string();
+    assert!(!detail_text.contains(&encoded), "audit leaked image bytes");
+    assert!(!detail_text.contains("Editor") && !detail_text.contains("TestApp"));
+}
+
+#[tokio::test]
+async fn server_instructions_define_the_agent_operating_loop() {
+    let (port, _core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let peer = client.peer_info().expect("server peer info");
+    let instructions = peer.instructions.as_deref().unwrap_or_default();
+    for required in [
+        "DISCOVER",
+        "PLAN",
+        "INSPECT",
+        "ACT",
+        "VERIFY",
+        "RECOVER",
+        "REPORT",
+        "FILE_CHANGED_SINCE_READ",
+        "get_agent_policy",
+        "capture_screen",
+        "visual evidence",
+        "disabled screen capture",
+        "Never bypass",
+    ] {
+        assert!(
+            instructions.contains(required),
+            "agent instructions missing {required:?}: {instructions}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn prompt_discovery_exposes_the_agent_skill_pack() {
+    let (port, _core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let mut names: Vec<String> = client
+        .list_all_prompts()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|p| p.name.to_string())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec![
+            "agent-task",
+            "debug-fix",
+            "explore-project",
+            "implement-change",
+            "review-verify",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn agent_task_prompt_embeds_goal_and_autonomous_completion_contract() {
+    let (port, _core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let result = client
+        .get_prompt(
+            GetPromptRequestParams::new("agent-task").with_arguments(
+                serde_json::json!({ "task": "fix the flaky parser test" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = result
+        .messages
+        .first()
+        .and_then(|m| m.content.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or_default();
+    assert!(text.contains("fix the flaky parser test"), "{text}");
+    assert!(text.contains("work autonomously"), "{text}");
+    assert!(text.contains("verify"), "{text}");
+    assert!(
+        text.contains("blocked by user-controlled permissions"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn tool_descriptions_teach_the_model_safe_composition() {
+    let (port, _core, _dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+    let tools = client.list_all_tools().await.unwrap();
+    let description = |name: &str| {
+        tools
+            .iter()
+            .find(|t| t.name.as_ref() == name)
+            .and_then(|t| t.description.as_deref())
+            .unwrap_or_default()
+    };
+
+    assert!(description("search_text").contains("Prefer this before reading many files"));
+    assert!(description("read_file").contains("before apply_patch"));
+    assert!(description("apply_patch").contains("FILE_CHANGED_SINCE_READ"));
+    assert!(description("run_command").contains("verify changes"));
+    assert!(description("run_powershell").contains("Only use when"));
 }
 
 /// Scenario H: two workspaces — a path valid in workspace 1 is rejected when
@@ -901,8 +1322,8 @@ async fn cross_workspace_confinement_over_mcp() {
     .unwrap();
 
     let client = ()
-        .serve(StreamableHttpClientTransport::from_uri(format!(
-            "http://127.0.0.1:{port}/mcp"
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
         )))
         .await
         .unwrap();

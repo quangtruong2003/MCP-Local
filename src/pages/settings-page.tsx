@@ -17,9 +17,16 @@ import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { CopyButton } from "@/components/shared/copy-button";
 import { api, parseErrorMessage } from "../api";
-import type { AppSettings, ConnectionStatus } from "@/lib/types";
+import type { AgentMode, AppSettings, CaptureScope, ConnectionStatus } from "@/lib/types";
 
 const APPROVED_COMMANDS =
   "git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet";
@@ -47,6 +54,10 @@ interface Props {
   reportError: (message: string) => void;
 }
 
+type AgentSettingsPatch = Partial<
+  Pick<AppSettings, "agent_mode" | "screen_capture_enabled" | "capture_scope" | "visual_verification">
+>;
+
 export default function SettingsPage({ settings, connection, onSaveSettings, reportError }: Props) {
   const [hostname, setHostname] = useState(settings?.tailscale_hostname ?? "");
   const [stateDir, setStateDir] = useState<string | null>(null);
@@ -70,6 +81,15 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
     if (!settings) return;
     try {
       await onSaveSettings({ ...settings, unrestricted_access: next });
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+    }
+  }
+
+  async function updateAgentSettings(patch: AgentSettingsPatch) {
+    if (!settings) return;
+    try {
+      await onSaveSettings({ ...settings, ...patch });
     } catch (err) {
       reportError(parseErrorMessage(err));
     }
@@ -143,6 +163,102 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
           <p className="text-[13px] text-muted-foreground">Light, dark or follow the system.</p>
         </div>
         <AppearanceForm />
+      </Card>
+
+      <Card className="gap-4 p-6">
+        <div>
+          <h2 className="text-sm font-semibold">Agent</h2>
+          <p className="text-[13px] text-muted-foreground">
+            Autonomy and visual verification behavior for connected agent workflows.
+          </p>
+        </div>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="setting-agent-mode">Agent mode</Label>
+            <Select
+              value={settings?.agent_mode ?? "autonomous"}
+              disabled={!settings}
+              onValueChange={(value) =>
+                void updateAgentSettings({ agent_mode: value as AgentMode })
+              }
+            >
+              <SelectTrigger id="setting-agent-mode" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="autonomous">Autonomous</SelectItem>
+                <SelectItem value="conservative">Conservative</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[13px] text-muted-foreground">
+              Autonomous proceeds from clear intent; Conservative asks before materially
+              consequential choices that intent does not resolve.
+            </p>
+          </div>
+
+          <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+            <div>
+              <Label htmlFor="setting-screen-capture">Screen capture</Label>
+              <p className="mt-1 text-[13px] text-muted-foreground">
+                Allow single-shot screenshots for model vision when they are relevant.
+              </p>
+            </div>
+            <Switch
+              id="setting-screen-capture"
+              checked={settings?.screen_capture_enabled ?? false}
+              disabled={!settings}
+              onCheckedChange={(checked) =>
+                void updateAgentSettings({ screen_capture_enabled: checked })
+              }
+              aria-label="Screen capture"
+            />
+          </div>
+
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="setting-capture-scope">Capture scope</Label>
+            <Select
+              value={settings?.capture_scope ?? "windows_and_displays"}
+              disabled={!settings || !settings.screen_capture_enabled}
+              onValueChange={(value) =>
+                void updateAgentSettings({ capture_scope: value as CaptureScope })
+              }
+            >
+              <SelectTrigger id="setting-capture-scope" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="windows_and_displays">Windows and displays</SelectItem>
+                <SelectItem value="windows_only">Windows only</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-[13px] text-muted-foreground">
+              Windows only is the narrower privacy option and excludes full-display targets.
+            </p>
+          </div>
+
+          <div className="flex items-start justify-between gap-4 rounded-md border p-3">
+            <div>
+              <Label htmlFor="setting-visual-verification">Visual verification</Label>
+              <p className="mt-1 text-[13px] text-muted-foreground">
+                Prefer visual evidence when it materially helps verify UI or rendering work.
+              </p>
+            </div>
+            <Switch
+              id="setting-visual-verification"
+              checked={settings?.visual_verification ?? true}
+              disabled={!settings}
+              onCheckedChange={(checked) =>
+                void updateAgentSettings({ visual_verification: checked })
+              }
+              aria-label="Visual verification"
+            />
+          </div>
+        </div>
+        <p role="note" className="flex items-start gap-1.5 text-[13px] text-warning">
+          <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+          Screen capture can expose content outside approved workspace folders. It is off by
+          default, unrestricted execution does not enable it, and Pause always blocks capture.
+        </p>
       </Card>
 
       <Card className="gap-4 p-6">

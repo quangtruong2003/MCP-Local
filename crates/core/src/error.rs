@@ -23,6 +23,10 @@ pub enum ErrorCode {
     ResultTooLarge,
     IoError,
     InvalidArgument,
+    ScreenCaptureDisabled,
+    ScreenCaptureUnsupported,
+    CaptureTargetNotFound,
+    ScreenCaptureFailed,
 }
 
 impl ErrorCode {
@@ -47,6 +51,10 @@ impl ErrorCode {
             Self::ResultTooLarge => "RESULT_TOO_LARGE",
             Self::IoError => "IO_ERROR",
             Self::InvalidArgument => "INVALID_ARGUMENT",
+            Self::ScreenCaptureDisabled => "SCREEN_CAPTURE_DISABLED",
+            Self::ScreenCaptureUnsupported => "SCREEN_CAPTURE_UNSUPPORTED",
+            Self::CaptureTargetNotFound => "CAPTURE_TARGET_NOT_FOUND",
+            Self::ScreenCaptureFailed => "SCREEN_CAPTURE_FAILED",
         }
     }
 }
@@ -132,6 +140,22 @@ mod tests {
         assert_eq!(ErrorCode::ResultTooLarge.as_str(), "RESULT_TOO_LARGE");
         assert_eq!(ErrorCode::IoError.as_str(), "IO_ERROR");
         assert_eq!(ErrorCode::InvalidArgument.as_str(), "INVALID_ARGUMENT");
+        assert_eq!(
+            ErrorCode::ScreenCaptureDisabled.as_str(),
+            "SCREEN_CAPTURE_DISABLED"
+        );
+        assert_eq!(
+            ErrorCode::ScreenCaptureUnsupported.as_str(),
+            "SCREEN_CAPTURE_UNSUPPORTED"
+        );
+        assert_eq!(
+            ErrorCode::CaptureTargetNotFound.as_str(),
+            "CAPTURE_TARGET_NOT_FOUND"
+        );
+        assert_eq!(
+            ErrorCode::ScreenCaptureFailed.as_str(),
+            "SCREEN_CAPTURE_FAILED"
+        );
     }
 
     #[test]
