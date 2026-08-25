@@ -2,7 +2,9 @@
   "compilerOptions": {
     "target": "ES2021", "lib": ["DOM", "ES2021"], "module": "ESNext",
     "moduleResolution": "bundler", "jsx": "react-jsx", "strict": true,
-    "noEmit": true, "skipLibCheck": true
+    "noEmit": true, "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": { "@/*": ["./src/*"] }
   },
   "include": ["src"]
 }
