@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { ThemePreference } from "@/lib/types";
 
@@ -20,6 +20,17 @@ export function ThemeProvider({ initialTheme, onThemeChange, children }: {
   children: ReactNode;
 }) {
   const [theme, setThemeState] = useState<ThemePreference>(initialTheme);
+  // Settings load asynchronously: App mounts the provider with "system" and
+  // later learns the persisted preference. Re-seed on that transition unless
+  // the user already picked a theme in this session (their pick round-trips
+  // through settings, so an equal value is a no-op).
+  const seededInitial = useRef(initialTheme);
+  useEffect(() => {
+    if (initialTheme !== seededInitial.current) {
+      seededInitial.current = initialTheme;
+      setThemeState(initialTheme);
+    }
+  }, [initialTheme]);
 
   // Apply/remove the class and track OS changes while in System mode.
   useEffect(() => {
