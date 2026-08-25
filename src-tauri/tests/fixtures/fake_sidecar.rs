@@ -16,7 +16,7 @@ fn main() {
     // The manager-style spawn passes real flags first (--target, ...), so
     // the scenario is always the final argument.
     let scenario = std::env::args()
-        .last()
+        .next_back()
         .unwrap_or_else(|| "online".to_string());
 
     let mut out = std::io::stdout().lock();
