@@ -12,7 +12,7 @@ import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/dashboard-page";
 import SecurityPage from "./pages/security-page";
 import SettingsPage from "./pages/SettingsPage";
-import WorkspacesPage from "./pages/WorkspacesPage";
+import WorkspacesPage from "./pages/workspaces-page";
 import { api, parseErrorMessage } from "./api";
 import type { ServerStatus } from "./api";
 import { VIEW_META } from "@/lib/types";

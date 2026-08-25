@@ -1,13 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderPlus, Loader2, TerminalSquare } from "lucide-react";
-import ConfirmDialog from "../components/ConfirmDialog";
-import EmptyState from "../components/EmptyState";
+import { FolderPlus, Loader2 } from "lucide-react";
+import { WorkspaceCard } from "@/components/features/workspaces/workspace-card";
+import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/shared/confirm-dialog";
+import { EmptyState } from "@/components/shared/empty-state";
 import { api, parseErrorMessage } from "../api";
 import type { ExecutionMode, Workspace } from "@/lib/types";
 
 /**
- * Workspaces permission management (plan Task 18):
+ * Workspaces permission management:
  * one card per workspace exposing exactly three top-level capabilities
  * (Read / Write / Execute), with the execution mode nested under Execute.
  * Backend remains authoritative; the UI merely keeps its own toggles coherent.
@@ -18,22 +20,6 @@ const FULL_POWERSHELL_BODY =
   "PowerShell will start in this workspace, but the working directory is not a security sandbox. Scripts may access files, processes, the network, and other resources allowed to your Windows account. Enable this only for workspaces you trust.";
 const REMOVE_TITLE = "Remove workspace?";
 const REMOVE_BODY = "ChatGPT will lose access to this folder. Files on disk will not be deleted.";
-
-/** Concise list shown under Approved Commands mode (mirrors backend policy defaults). */
-const APPROVED_COMMANDS = [
-  "git",
-  "cargo",
-  "rustc",
-  "npm",
-  "npx",
-  "node",
-  "pnpm",
-  "yarn",
-  "python",
-  "pip",
-  "go",
-  "dotnet",
-];
 
 type PendingConfirm =
   | { kind: "full-powershell"; workspace: Workspace }
@@ -91,7 +77,7 @@ export default function WorkspacesPage({ workspaces, onWorkspacesChanged, report
   }
 
   /**
-   * Coherent Read/Write toggle rules (plan Task 18 Step 2):
+   * Coherent Read/Write toggle rules:
    * - disabling Read also disables Write,
    * - enabling Write while Read is off also enables Read.
    */
@@ -169,17 +155,19 @@ export default function WorkspacesPage({ workspaces, onWorkspacesChanged, report
   }
 
   return (
-    <div className="workspaces-page">
-      <section className="ws-toolbar">
-        <div className="ws-toolbar-copy">
-          <h2>Approved folders</h2>
-          <p>New folders start with Read enabled, Write and Execute disabled.</p>
+    <div className="flex flex-col gap-4">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h2 className="text-sm font-semibold">Approved folders</h2>
+          <p className="text-[13px] text-muted-foreground">
+            New folders start with Read enabled, Write and Execute disabled.
+          </p>
         </div>
-        <button className="btn btn-primary" onClick={() => void addWorkspace()} disabled={adding}>
-          {adding ? <Loader2 aria-hidden="true" className="spinner" /> : <FolderPlus aria-hidden="true" />}
+        <Button onClick={() => void addWorkspace()} disabled={adding}>
+          {adding ? <Loader2 aria-hidden="true" className="animate-spin" /> : <FolderPlus aria-hidden="true" />}
           Add folder…
-        </button>
-      </section>
+        </Button>
+      </div>
 
       {workspaces.length === 0 ? (
         <EmptyState
@@ -188,114 +176,21 @@ export default function WorkspacesPage({ workspaces, onWorkspacesChanged, report
           message="Add a folder to let ChatGPT list, search and read files inside that boundary."
         />
       ) : (
-        <div className="workspace-list">
-          {workspaces.map((ws) => {
-            const busy = busyId === ws.id;
-            const isNew = lastAddedId.current === ws.id;
-            return (
-              <article
-                key={ws.id}
-                ref={isNew ? (node) => (lastAddedRef.current = node) : undefined}
-                tabIndex={-1}
-                className={`workspace-card ${busy ? "busy" : ""}`}
-                aria-busy={busy}
-              >
-                <div className="ws-card-head">
-                  <div>
-                    <strong className="ws-name">{ws.name}</strong>
-                    <code className="ws-path">{ws.root_path}</code>
-                  </div>
-                  {busy ? <Loader2 aria-hidden="true" className="spinner ws-spinner" /> : null}
-                </div>
-
-                <div className="permission-grid" role="group" aria-label={`Permissions for ${ws.name}`}>
-                  <label className="permission-toggle">
-                    <span className="permission-copy">
-                      <strong>Read</strong>
-                      <span>List, search and inspect files</span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={ws.can_read}
-                      disabled={busy}
-                      onChange={() => toggleCapability(ws, "read")}
-                    />
-                  </label>
-                  <label className="permission-toggle">
-                    <span className="permission-copy">
-                      <strong>Write</strong>
-                      <span>Create files and apply anchored patches</span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={ws.can_write}
-                      disabled={busy}
-                      onChange={() => toggleCapability(ws, "write")}
-                    />
-                  </label>
-                  <label className="permission-toggle">
-                    <span className="permission-copy">
-                      <strong>Execute</strong>
-                      <span>Run approved programs inside this folder</span>
-                    </span>
-                    <input
-                      type="checkbox"
-                      checked={ws.can_execute}
-                      disabled={busy}
-                      onChange={() => toggleExecute(ws)}
-                    />
-                  </label>
-                </div>
-
-                {ws.can_execute ? (
-                  <div className="exec-detail">
-                    <div className="mode-row" role="radiogroup" aria-label="Execution mode">
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={ws.execution_mode === "approved_commands"}
-                        className={`mode-option ${ws.execution_mode === "approved_commands" ? "selected" : ""}`}
-                        disabled={busy}
-                        onClick={() => changeMode(ws, "approved_commands")}
-                      >
-                        Approved commands
-                      </button>
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={ws.execution_mode === "full_powershell"}
-                        className={`mode-option ${ws.execution_mode === "full_powershell" ? "selected" : ""}`}
-                        disabled={busy}
-                        onClick={() => changeMode(ws, "full_powershell")}
-                      >
-                        <TerminalSquare aria-hidden="true" />
-                        Full PowerShell
-                      </button>
-                    </div>
-
-                    {ws.execution_mode === "approved_commands" ? (
-                      <div className="exec-note">
-                        <span>Allowed executables:</span>
-                        <ul className="approved-list" aria-label="Approved executables">
-                          {APPROVED_COMMANDS.map((cmd) => (
-                            <li key={cmd}>{cmd}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : (
-                      <p className="exec-warning">High risk: unrestricted PowerShell scripts run with your Windows account permissions.</p>
-                    )}
-                  </div>
-                ) : null}
-
-                <div className="ws-card-actions">
-                  <button className="btn btn-danger-ghost" onClick={() => setPendingConfirm({ kind: "remove", workspace: ws })} disabled={busy}>
-                    Remove
-                  </button>
-                </div>
-              </article>
-            );
-          })}
+        <div className="flex flex-col gap-3">
+          {workspaces.map((ws) => (
+            <WorkspaceCard
+              key={ws.id}
+              ws={ws}
+              busy={busyId === ws.id}
+              registerRef={
+                lastAddedId.current === ws.id ? (node) => (lastAddedRef.current = node) : undefined
+              }
+              onToggleCapability={toggleCapability}
+              onToggleExecute={toggleExecute}
+              onChangeMode={changeMode}
+              onRemove={(target) => setPendingConfirm({ kind: "remove", workspace: target })}
+            />
+          ))}
         </div>
       )}
 
