@@ -4,6 +4,12 @@ A Windows desktop app that lets **ChatGPT Web** (Developer Mode) securely read, 
 
 There is exactly one doorway to your filesystem: a fail-closed policy pipeline. Both the MCP tools and the app's own UI go through it.
 
+## Tech stack
+
+- **Shell**: Tauri 2 (Rust) with a system tray (open, start/stop tunnel, pause MCP access, quit), optional close-to-tray behavior, and launch-at-login registration
+- **UI**: React 18 + TypeScript (strict), styled with Tailwind CSS v4 and vendored shadcn/ui primitives (new-york/zinc, 2px radius "Quiet Console" tokens); toasts via sonner; bundled Inter Variable / JetBrains Mono Variable fonts
+- **Theming**: Light/Dark/System toggle in **Settings → Appearance**, persisted in `settings.json` (`theme` field); System mode tracks the OS preference live
+
 ## Prerequisites
 
 - Windows 10/11
