@@ -72,7 +72,14 @@ export default function SecurityPage({
 
   const rows: ReadonlyArray<{ label: string; value: string }> = [
     { label: "Public endpoint protection", value: "Capability URL · Active" },
-    { label: "Sensitive files", value: "Protected" },
+    {
+      label: "Workspace capability gates",
+      value: unrestrictedOn ? "Bypassed · Unrestricted access" : "Active",
+    },
+    {
+      label: "Sensitive files",
+      value: unrestrictedOn ? "Bypassed · Unrestricted access" : "Protected",
+    },
     { label: "Path confinement", value: "Active" },
     { label: "Concurrent edit protection", value: "Active" },
     { label: "Write-enabled workspaces", value: String(writeCount) },

@@ -15,10 +15,8 @@ use tauri::{
 };
 
 use crate::{
-    commands,
-    connection::manager::ConnectionManager as TailscaleManager,
-    connection::state::ConnectionState,
-    AppState,
+    commands, connection::manager::ConnectionManager as TailscaleManager,
+    connection::state::ConnectionState, AppState,
 };
 
 /// Handles of the live menu items plus the tray icon, so status changes can
@@ -41,10 +39,8 @@ pub struct TrayMenuItems {
 pub fn build(app: &tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let status = MenuItem::with_id(app, "status", "● Offline", false, None::<&str>)?;
     let open = MenuItem::with_id(app, "open", "Open", true, None::<&str>)?;
-    let start_tunnel =
-        MenuItem::with_id(app, "start_tunnel", "Start tunnel", true, None::<&str>)?;
-    let stop_tunnel =
-        MenuItem::with_id(app, "stop_tunnel", "Stop tunnel", false, None::<&str>)?;
+    let start_tunnel = MenuItem::with_id(app, "start_tunnel", "Start tunnel", true, None::<&str>)?;
+    let stop_tunnel = MenuItem::with_id(app, "stop_tunnel", "Stop tunnel", false, None::<&str>)?;
     let toggle_pause =
         MenuItem::with_id(app, "toggle_pause", "Pause MCP access", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -116,8 +112,9 @@ fn short_label(state: &ConnectionState) -> &'static str {
         ConnectionState::Stopped => "Offline",
         ConnectionState::StartingServer | ConnectionState::StartingTunnel => "Connecting…",
         ConnectionState::NeedsLogin { .. } => "Sign-in needed",
-        ConnectionState::NeedsFunnelPermission { .. }
-        | ConnectionState::NeedsHttpsSetup { .. } => "Setup needed",
+        ConnectionState::NeedsFunnelPermission { .. } | ConnectionState::NeedsHttpsSetup { .. } => {
+            "Setup needed"
+        }
         ConnectionState::Verifying { .. } => "Verifying…",
         ConnectionState::Online { .. } => "Online",
         ConnectionState::Degraded { .. } => "Degraded",

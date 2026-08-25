@@ -95,6 +95,21 @@ export default function OnboardingFlow({
     }
   }
 
+  // Retry must tear down the previous run first. ConnectionManager::start()
+  // is intentionally idempotent for every non-Stopped state, so calling it
+  // from NeedsLogin/NeedsFunnelPermission/NeedsHttpsSetup would otherwise be
+  // a no-op after the sidecar has exited or needs a clean restart.
+  async function retryConnection() {
+    setStarting(true);
+    try {
+      await api.retryConnection();
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+    } finally {
+      setStarting(false);
+    }
+  }
+
   const step = SETUP_STEPS[stepIndex];
   const isLastSetupStep = stepIndex === SETUP_STEPS.length - 1;
 
@@ -105,7 +120,7 @@ export default function OnboardingFlow({
         <LiveStage
           connection={connection}
           starting={starting}
-          onStart={startConnection}
+          onRetry={retryConnection}
           onFinish={onFinish}
           reportError={reportError}
         />
@@ -263,12 +278,12 @@ function isLiveStage(
 interface LiveStageProps {
   connection: ConnectionStatus | null;
   starting: boolean;
-  onStart: () => void;
+  onRetry: () => void;
   onFinish: () => void | Promise<void>;
   reportError: (message: string) => void;
 }
 
-function LiveStage({ connection, starting, onStart, onFinish, reportError }: LiveStageProps) {
+function LiveStage({ connection, starting, onRetry, onFinish, reportError }: LiveStageProps) {
   const [helpVisible, setHelpVisible] = useState(false);
 
   if (!connection || !isLiveStage(connection)) return null;
@@ -296,7 +311,7 @@ function LiveStage({ connection, starting, onStart, onFinish, reportError }: Liv
           >
             Sign in to Tailscale
           </Button>
-          <Button variant="outline" onClick={onStart} disabled={starting}>
+          <Button variant="outline" onClick={onRetry} disabled={starting}>
             {starting ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
             I signed in — retry
           </Button>
@@ -324,7 +339,7 @@ function LiveStage({ connection, starting, onStart, onFinish, reportError }: Liv
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap items-center gap-2">
-          <Button onClick={onStart} disabled={starting}>
+          <Button onClick={onRetry} disabled={starting}>
             {starting ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
             Retry
           </Button>

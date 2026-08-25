@@ -110,10 +110,7 @@ pub fn resolve_program(program: &str) -> Result<String, PolicyError> {
 /// `allow_any` (unrestricted access mode) skips the approved-list check but
 /// keeps rejecting path-form programs — that is a quoting/injection surface,
 /// not an access gate.
-pub fn resolve_program_with(
-    program: &str,
-    allow_any: bool,
-) -> Result<String, PolicyError> {
+pub fn resolve_program_with(program: &str, allow_any: bool) -> Result<String, PolicyError> {
     if program.is_empty() {
         return Err(PolicyError::command_not_allowed(
             "program must not be empty",
@@ -161,10 +158,7 @@ pub fn resolve_timeout(timeout_ms: Option<u64>) -> Result<u64, PolicyError> {
 
 /// `allow_any` (unrestricted access mode) lifts the 10-minute cap to a 24h
 /// absolute ceiling; the 60 s default still applies when omitted.
-pub fn resolve_timeout_with(
-    timeout_ms: Option<u64>,
-    allow_any: bool,
-) -> Result<u64, PolicyError> {
+pub fn resolve_timeout_with(timeout_ms: Option<u64>, allow_any: bool) -> Result<u64, PolicyError> {
     let max = if allow_any {
         UNRESTRICTED_MAX_TIMEOUT_MS
     } else {

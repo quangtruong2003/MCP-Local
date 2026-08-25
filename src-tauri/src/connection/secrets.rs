@@ -24,7 +24,7 @@ fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
 
     // CryptProtectData's signature takes `*mut CRYPT_INTEGER_BLOB`, so the
     // binding must be mutable even though DPAPI only reads it.
-    let mut in_blob = CRYPT_INTEGER_BLOB {
+    let in_blob = CRYPT_INTEGER_BLOB {
         cbData: plain.len() as u32,
         pbData: plain.as_ptr() as *mut u8,
     };
@@ -34,7 +34,7 @@ fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
     // no CRYPTPROTECT_LOCAL_MACHINE flag is passed.
     let ok = unsafe {
         CryptProtectData(
-            &mut in_blob,
+            &in_blob,
             None, // no description string
             None,
             None,

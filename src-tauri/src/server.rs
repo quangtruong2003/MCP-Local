@@ -73,7 +73,7 @@ fn summary_of(ws: &lc_core::models::Workspace) -> WorkspaceSummary {
         can_read: ws.can_read,
         can_write: ws.can_write,
         can_execute: ws.can_execute,
-        execution_mode: ws.execution_mode.clone(),
+        execution_mode: ws.execution_mode,
     }
 }
 
@@ -512,7 +512,9 @@ impl WorkspaceServer {
             None,
             Some(detail_ctx),
             |ws, root| {
-                if !unrestricted && ws.execution_mode != lc_core::models::ExecutionMode::FullPowerShell {
+                if !unrestricted
+                    && ws.execution_mode != lc_core::models::ExecutionMode::FullPowerShell
+                {
                     return Err(CoreError::new(
                         ErrorCode::PowershellDisabled,
                         format!("workspace '{}' does not allow full PowerShell", ws.name),

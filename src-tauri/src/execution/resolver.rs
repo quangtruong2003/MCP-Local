@@ -64,8 +64,8 @@ fn split_path_entries(value: &str) -> Vec<PathBuf> {
 fn registry_raw_path(subkey: &str) -> Option<String> {
     use windows::core::PCWSTR;
     use windows::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
-        HKEY_LOCAL_MACHINE, KEY_READ,
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE,
+        KEY_READ,
     };
 
     fn to_wide(s: &str) -> Vec<u16> {
@@ -77,7 +77,7 @@ fn registry_raw_path(subkey: &str) -> Option<String> {
     } else {
         HKEY_CURRENT_USER
     };
-    let sub = subkey.splitn(2, '\\').nth(1).unwrap_or(subkey);
+    let sub = subkey.split_once('\\').map(|x| x.1).unwrap_or(subkey);
     let sub_wide = to_wide(sub);
     let name_wide = to_wide("Path");
 
@@ -130,7 +130,8 @@ fn registry_raw_path(subkey: &str) -> Option<String> {
 /// PATH edits made after this process started are honored.
 #[cfg(windows)]
 fn registry_path_dirs() -> Vec<PathBuf> {
-    const MACHINE_ENV: &str = r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+    const MACHINE_ENV: &str =
+        r"HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
     const USER_ENV: &str = r"HKEY_CURRENT_USER\Environment";
     [MACHINE_ENV, USER_ENV]
         .iter()

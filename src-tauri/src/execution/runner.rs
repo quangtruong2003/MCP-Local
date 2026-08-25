@@ -183,7 +183,10 @@ fn host_env() -> Vec<(String, String)> {
     // children (cargo -> rustc, npm -> node) can find tools the app process
     // never saw at login time.
     if let Some(path) = merged_path_string() {
-        match env.iter_mut().find(|(name, _)| name.eq_ignore_ascii_case("PATH")) {
+        match env
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case("PATH"))
+        {
             Some(slot) => slot.1 = path,
             None => env.push(("PATH".to_string(), path)),
         }
@@ -201,10 +204,7 @@ pub fn run_command(
 ) -> Result<ExecutionResult, PolicyError> {
     let program = resolve_program_with(&req.program, req.unrestricted)?;
     let cwd = resolve_cwd(workspace_root, req.cwd.as_deref())?;
-    let timeout = Duration::from_millis(resolve_timeout_with(
-        req.timeout_ms,
-        req.unrestricted,
-    )?);
+    let timeout = Duration::from_millis(resolve_timeout_with(req.timeout_ms, req.unrestricted)?);
 
     let exe = resolve_executable(&program).ok_or_else(|| {
         PolicyError::invalid_argument(format!(
@@ -234,10 +234,7 @@ pub fn run_power_shell(
     req: RunPowerShellRequest,
 ) -> Result<ExecutionResult, PolicyError> {
     let cwd = resolve_cwd(workspace_root, req.cwd.as_deref())?;
-    let timeout = Duration::from_millis(resolve_timeout_with(
-        req.timeout_ms,
-        req.unrestricted,
-    )?);
+    let timeout = Duration::from_millis(resolve_timeout_with(req.timeout_ms, req.unrestricted)?);
     let stream_cap = if req.unrestricted {
         UNRESTRICTED_MAX_STREAM_BYTES
     } else {
@@ -522,7 +519,11 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
         .expect("npm.cmd must resolve via PATHEXT");
         assert_eq!(npm.exit_code, Some(0));
         assert!(
-            npm.stdout.trim().chars().next().is_some_and(|c| c.is_ascii_digit()),
+            npm.stdout
+                .trim()
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_digit()),
             "expected a semver in stdout, got {:?}",
             npm.stdout
         );
