@@ -34,7 +34,7 @@
 **Interfaces:**
 - Produces: cleaner baseline; nothing may reference the deleted symbols afterwards.
 
-- [ ] **Step 1: Prove the dead code is unreferenced**
+- [x] **Step 1: Prove the dead code is unreferenced**
 
 ```bash
 grep -rn "SettingsDialog\|ConnectionHero\|StatusBar\|PauseButton\|AuditTable\|WorkspaceList\|ConnectionSnapshot\|ConnectionSettingsSummary\|SaveConnectionSettingsInput" src/
@@ -42,22 +42,22 @@ grep -rn "from \"../components/ActivityPage\"\|from \"../components/SecurityPage
 ```
 Expected: hits only inside the files being deleted and `src/api.ts` itself. If any other hit appears, STOP and reconcile before deleting.
 
-- [ ] **Step 2: Delete the 8 component files**
+- [x] **Step 2: Delete the 8 component files**
 
 ```bash
 git rm src/components/ActivityPage.tsx src/components/SecurityPage.tsx src/components/SettingsDialog.tsx src/components/ConnectionHero.tsx src/components/StatusBar.tsx src/components/PauseButton.tsx src/components/AuditTable.tsx src/components/WorkspaceList.tsx
 ```
 
-- [ ] **Step 3: Remove deprecated block from `src/api.ts`**
+- [x] **Step 3: Remove deprecated block from `src/api.ts`**
 
 Delete the comment banner and these three interfaces entirely: `ConnectionSnapshot`, `ConnectionSettingsSummary`, `SaveConnectionSettingsInput` (everything between the `// --- Deprecated compat types …` comment and the `AuditEvent` interface).
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `npx tsc --noEmit && npm run build`
 Expected: both succeed with zero errors.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "refactor: remove dead Cloudflare-era components and deprecated api types"
@@ -74,13 +74,13 @@ git add -A && git commit -m "refactor: remove dead Cloudflare-era components and
 **Interfaces:**
 - Produces: `"@/*"` import alias usable everywhere; `globals.css` containing Tailwind entry + dark variant declaration (token values land in Task 4).
 
-- [ ] **Step 1: Install deps**
+- [x] **Step 1: Install deps**
 
 ```bash
 npm i -D tailwindcss @tailwindcss/vite @types/node
 ```
 
-- [ ] **Step 2: Configure Vite (full replacement of `vite.config.ts`)**
+- [x] **Step 2: Configure Vite (full replacement of `vite.config.ts`)**
 
 ```ts
 import { defineConfig } from "vite";
@@ -100,11 +100,11 @@ export default defineConfig({
 });
 ```
 
-- [ ] **Step 3: Add TS paths (`tsconfig.json`)**
+- [x] **Step 3: Add TS paths (`tsconfig.json`)**
 
 Add inside `compilerOptions`: `"baseUrl": "."` and `"paths": { "@/*": ["./src/*"] }`. Keep everything else untouched.
 
-- [ ] **Step 4: Create `src/styles/globals.css`**
+- [x] **Step 4: Create `src/styles/globals.css`**
 
 ```css
 @import "tailwindcss";
@@ -112,7 +112,7 @@ Add inside `compilerOptions`: `"baseUrl": "."` and `"paths": { "@/*": ["./src/*"
 @custom-variant dark (&:is(.dark *));
 ```
 
-- [ ] **Step 5: Order CSS imports in `src/main.tsx`**
+- [x] **Step 5: Order CSS imports in `src/main.tsx`**
 
 Replace lines 4–6 so Tailwind loads FIRST and legacy sheets AFTER (legacy element rules keep winning over preflight during the transition):
 
@@ -123,11 +123,11 @@ import "./styles/global.css";
 import "./styles/components.css";
 ```
 
-- [ ] **Step 6: Verify**
+- [x] **Step 6: Verify**
 
 Run: `npx tsc --noEmit && npm run build` — expect success. Launch `npm run dev`, open app: visuals must be unchanged (Tailwind emits only preflight at this point; any visible regression means an import-order mistake).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A && git commit -m "feat: add tailwind v4 pipeline and @ path alias"
@@ -144,25 +144,25 @@ git add -A && git commit -m "feat: add tailwind v4 pipeline and @ path alias"
 **Interfaces:**
 - Produces: `cn()` from `"@/lib/utils"`; ui primitives at `@/components/ui/<name>` used by every later task.
 
-- [ ] **Step 1: Init shadcn (answer prompts exactly)**
+- [x] **Step 1: Init shadcn (answer prompts exactly)**
 
 ```bash
 npx shadcn@latest init
 ```
 Answers: TypeScript ✓ · default style (new-york) · base color **zinc** · CSS variables **yes** · CSS file `src/styles/globals.css`. If prompted about React 19 peer deps / `--force` semantics with React 18, choose the conservative option (no force).
 
-- [ ] **Step 2: Add the primitive set**
+- [x] **Step 2: Add the primitive set**
 
 ```bash
 npx shadcn@latest add button badge card dialog alert-dialog switch radio-group input select label separator table sheet tooltip dropdown-menu
 ```
 (sonner intentionally excluded — Task 8 mounts the `sonner` package directly so theming comes from our own provider instead of next-themes.)
 
-- [ ] **Step 3: Verify vendored output**
+- [x] **Step 3: Verify vendored output**
 
 Check `src/components/ui/` contains exactly the added primitives and `src/lib/utils.ts` exports `cn`. Run: `npx tsc --noEmit && npm run build` — expect success.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A && git commit -m "feat: vendor shadcn/ui primitives on zinc base"
@@ -179,7 +179,7 @@ git add -A && git commit -m "feat: vendor shadcn/ui primitives on zinc base"
 **Interfaces:**
 - Produces: final token contract every component relies on — utilities `bg-background text-foreground border-border ring-ring bg-primary bg-success bg-warning font-mono rounded-sm/md/lg/xl`.
 
-- [ ] **Step 1: Install fonts**
+- [x] **Step 1: Install fonts**
 
 ```bash
 npm i @fontsource-variable/inter @fontsource-variable/jetbrains-mono
@@ -190,7 +190,7 @@ import "@fontsource-variable/inter";
 import "@fontsource-variable/jetbrains-mono";
 ```
 
-- [ ] **Step 2: Edit tokens in `src/styles/globals.css`**
+- [x] **Step 2: Edit tokens in `src/styles/globals.css`**
 
 Inside `:root` (light) set/override:
 ```css
@@ -227,11 +227,11 @@ In `@theme inline` append:
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 ```
 
-- [ ] **Step 3: Smoke-check tokens render**
+- [x] **Step 3: Smoke-check tokens render**
 
 Temporarily add `<div className="bg-primary text-primary-foreground p-2">T</div>` to `App.tsx` root, run `npm run dev`: button-blue tile in light mode, lighter indigo in OS-dark mode. Remove the probe div.
 
-- [ ] **Step 4: Verify + commit**
+- [x] **Step 4: Verify + commit**
 
 Run: `npx tsc --noEmit && npm run build` — success.
 ```bash
@@ -249,7 +249,7 @@ git add -A && git commit -m "feat: pin quiet-console tokens (2px radius, indigo 
 **Interfaces:**
 - Produces: `AppSettings.theme: "system" | "light" | "dark"` end-to-end (serde-defaulted, version 3). Later tasks consume via `settings.theme` and `updateAppSettings`.
 
-- [ ] **Step 1: Extend the Rust struct**
+- [x] **Step 1: Extend the Rust struct**
 
 In `pub struct AppSettings` add:
 ```rust
@@ -264,7 +264,7 @@ fn default_theme() -> String {
 ```
 In `impl Default for AppSettings`: change `version: 2` → `version: 3` and add `theme: default_theme(),`.
 
-- [ ] **Step 2: Normalize on load**
+- [x] **Step 2: Normalize on load**
 
 Locate the function that deserializes stored settings (grep `serde_json::from` / `get_app_settings` command path in `settings.rs`/`commands.rs`). Immediately after successful deserialization insert:
 ```rust
@@ -273,7 +273,7 @@ Locate the function that deserializes stored settings (grep `serde_json::from` /
     }
 ```
 
-- [ ] **Step 3: Mirror in TS (`src/types.ts`)**
+- [x] **Step 3: Mirror in TS (`src/types.ts`)**
 
 ```ts
 export type ThemePreference = "system" | "light" | "dark";
@@ -287,12 +287,12 @@ export interface AppSettings {
 }
 ```
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Run: `export PATH="$HOME/.cargo/bin:$PATH" && cargo check` then `npx tsc --noEmit`.
 Expected: both pass. (`cargo check` will flag every construction site of `AppSettings` missing `theme` — fix each with `default_theme()`.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(settings): add persisted theme preference (v3)"
@@ -318,7 +318,7 @@ function ThemeProvider(props: {
 function useTheme(): { theme: ThemePreference; resolvedTheme: "light" | "dark"; setTheme: (t: ThemePreference) => void }
 ```
 
-- [ ] **Step 1: Implement `src/hooks/use-theme.tsx`**
+- [x] **Step 1: Implement `src/hooks/use-theme.tsx`**
 
 ```tsx
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
@@ -372,7 +372,7 @@ export function useTheme(): ThemeContextValue {
 }
 ```
 
-- [ ] **Step 2: Mount in `App.tsx`**
+- [x] **Step 2: Mount in `App.tsx`**
 
 While `settings` can still be null during load, remember the last known theme so late mount keeps it:
 
@@ -389,11 +389,11 @@ const handleThemeChange = useCallback(async (t: ThemePreference) => {
 ```
 Wrap the returned tree: `<ThemeProvider initialTheme={savedTheme} onThemeChange={(t) => void handleThemeChange(t)}><AppShell …>…</AppShell></ThemeProvider>`.
 
-- [ ] **Step 3: Verify**
+- [x] **Step 3: Verify**
 
 `tsc` + build green. Dev-run: toggle is not reachable yet — just confirm app boots identically and `<html>` has no stray `dark` class in light OS mode, has one in dark OS mode.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add -A && git commit -m "feat(ui): theme provider with system tracking over .dark class"
@@ -418,7 +418,7 @@ function PausedBanner(): JSX.Element | null   // reads paused state passed via p
 ```
 (App passes `paused` to AppShell which forwards to banner; keep prop drilling ≤1 level.)
 
-- [ ] **Step 1: `sidebar.tsx` (nav items shared with mobile sheet)**
+- [x] **Step 1: `sidebar.tsx` (nav items shared with mobile sheet)**
 
 ```tsx
 import { FolderOpen, LayoutDashboard, ScrollText, Settings as SettingsIcon, ShieldCheck } from "lucide-react";
@@ -482,7 +482,7 @@ export { NavItems, Brand, TunnelFooter, ITEMS };
 export default NavItems;
 ```
 
-- [ ] **Step 2: `app-shell.tsx` (rail ≥md, hidden <md with hamburger Sheet)**
+- [x] **Step 2: `app-shell.tsx` (rail ≥md, hidden <md with hamburger Sheet)**
 
 ```tsx
 import { Menu } from "lucide-react";
@@ -552,7 +552,7 @@ export function AppShell({ page, onNavigate, ready, paused, children }: Props) {
 
 Note for the executor: the old shell received `title/subtitle` and rendered its own header; the new one derives them from `VIEW_META` internally. Update `App.tsx` call-site accordingly (drop `title/subtitle` props, add `paused={connection?.paused === true}`).
 
-- [ ] **Step 3: `page-header.tsx` and `paused-banner.tsx`**
+- [x] **Step 3: `page-header.tsx` and `paused-banner.tsx`**
 
 ```tsx
 // page-header.tsx
@@ -584,18 +584,18 @@ export function PausedBanner({ paused }: { paused: boolean }) {
 ```
 (`bg-warning/15` over `--background` yields AA-legible text because `--warning-foreground` is near-black; verify visually in both themes.)
 
-- [ ] **Step 4: Rewire `App.tsx`, delete old shell files**
+- [x] **Step 4: Rewire `App.tsx`, delete old shell files**
 
 Swap `import AppShell from "./components/AppShell"` → `{ AppShell } from "@/components/layout/app-shell"`. Update props per Step 2 note. Then:
 ```bash
 git rm src/components/AppShell.tsx src/components/Sidebar.tsx src/components/StatusBadge.tsx
 ```
 
-- [ ] **Step 5: Verify smoke**
+- [x] **Step 5: Verify smoke**
 
 Build green. Dev-run manual: nav switches all 5 views; active item highlighted; resize window — rail collapses to icons ≥768px, hamburger + sheet <768px; tunnel badge reflects connection; Esc closes sheet; keyboard Tab reaches every nav item with visible ring.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add -A && git commit -m "feat(layout): rebuild shell/sidebar/header on shadcn primitives"
@@ -614,7 +614,7 @@ git add -A && git commit -m "feat(layout): rebuild shell/sidebar/header on shadc
 - Consumes: `useTheme().resolvedTheme` for Toaster theme.
 - Produces: `useToast(): { info(m: string): void; success(m: string): void; error(m: string): void }`. `reportError(message)` in App becomes `error(message)` — signature seen by child pages does NOT change.
 
-- [ ] **Step 1: Install + create wrapper**
+- [x] **Step 1: Install + create wrapper**
 
 ```bash
 npm i sonner
@@ -632,7 +632,7 @@ export function useToast() {
 }
 ```
 
-- [ ] **Step 2: Mount themed Toaster in `main.tsx`**
+- [x] **Step 2: Mount themed Toaster in `main.tsx`**
 
 Mounting lives in App (needs theme): in `App.tsx` add
 ```tsx
@@ -642,15 +642,15 @@ import { Toaster } from "sonner";
 ```
 Obtain `resolvedTheme` via `useTheme()` in the inner subtree — if App renders the Provider itself, extract an `AppInner` component so `useTheme()` is legal inside.
 
-- [ ] **Step 3: Port call-sites**
+- [x] **Step 3: Port call-sites**
 
 `pushToast(tone, message)` occurrences become `toast[tone](message)` via `const toast = useToast();` — `reportError` body: `(message: string) => toast.error(message)`. Delete all legacy toast code listed above.
 
-- [ ] **Step 4: Verify**
+- [x] **Step 4: Verify**
 
 Build green; dev-run: trigger an error toast (stop backend? simplest: temporarily call `reportError("test")` in a useEffect, see styled toast bottom-right in both themes, auto-dismiss, close button works, screen-reader announces via role=status/alert built into sonner). Remove probe.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(ui): adopt sonner toasts with theme-aware styling"
@@ -682,7 +682,7 @@ function useAudit(reportError: (m: string) => void): {
 }
 ```
 
-- [ ] **Step 1: Implement the three hooks by MOVING existing logic verbatim**
+- [x] **Step 1: Implement the three hooks by MOVING existing logic verbatim**
 
 `use-connection.ts` owns the `connection` state plus the `connection-status` event subscription currently in App's first `useEffect` (the `listen<ConnectionStatus>("connection-status", …)` block; on event it also calls `refreshAudit` — accept it as a parameter to avoid cross-hook coupling):
 
@@ -731,7 +731,7 @@ export function useConnection(
 
 `use-workspaces.ts`: move `workspaces` state + expose `reloadWorkspaces` wrapping `api.listWorkspaces()` with the same try/catch/reportError shape as above. `use-audit.ts`: move `auditEvents` state + `refreshAudit` (`api.recentAudit()`) identically.
 
-- [ ] **Step 2: Rewire `App.tsx`**
+- [x] **Step 2: Rewire `App.tsx`**
 
 Replace the three moved state atoms/effects with hook calls; keep orchestration effects that COMBINE loaders exactly as today:
 
@@ -742,7 +742,7 @@ const { auditEvents, refreshAudit } = useAudit(reportError);
 ```
 The initial-load effect keeps its single `Promise.all([reloadWorkspaces(), refreshAudit(), api.serverStatus()])` shape and `initialLoadDone`; settings/onboarding effect stays in App (theme provider consumes it). No page props change.
 
-- [ ] **Step 3: Verify + commit**
+- [x] **Step 3: Verify + commit**
 
 Run: `npx tsc --noEmit && npm run build`. Dev smoke: boot loads lists once, connection events still trigger audit refresh, no duplicate subscriptions under StrictMode double-mount.
 ```bash
@@ -769,9 +769,9 @@ function formatTime(ts: string): string       // HH:MM:SS local
 function formatRelative(ts: string): string   // "2m ago"
 ```
 
-- [ ] **Step 1: Move `src/types.ts` → `src/lib/types.ts`** (content unchanged), then repoint every import (`grep -rln 'from "\.\./types"\|from "\./types"' src/`) to `@/lib/types`. `api.ts` keeps re-exporting domain types.
+- [x] **Step 1: Move `src/types.ts` → `src/lib/types.ts`** (content unchanged), then repoint every import (`grep -rln 'from "\.\./types"\|from "\./types"' src/`) to `@/lib/types`. `api.ts` keeps re-exporting domain types.
 
-- [ ] **Step 2: `lib/format.ts`**
+- [x] **Step 2: `lib/format.ts`**
 
 ```ts
 export function formatTime(ts: string): string {
@@ -791,7 +791,7 @@ export function formatRelative(ts: string): string {
 }
 ```
 
-- [ ] **Step 3: `status-badge.tsx`**
+- [x] **Step 3: `status-badge.tsx`**
 
 ```tsx
 import { Badge } from "@/components/ui/badge";
@@ -828,9 +828,9 @@ export function StatusBadge({ state, paused }: { state: ConnectionState | null; 
 ```
 (Color meaning comes from the dot; the chip itself stays outline — matches Quiet Console restraint.)
 
-- [ ] **Step 4: `copy-button.tsx`** — icon Button (variant ghost, size icon) with `Copy`/`Check` swap for 1.5s, `navigator.clipboard.writeText(value)`, `aria-label={label ?? "Copy"}`, wrapped in Tooltip showing `label`.
+- [x] **Step 4: `copy-button.tsx`** — icon Button (variant ghost, size icon) with `Copy`/`Check` swap for 1.5s, `navigator.clipboard.writeText(value)`, `aria-label={label ?? "Copy"}`, wrapped in Tooltip showing `label`.
 
-- [ ] **Step 5: `confirm-dialog.tsx`** over AlertDialog, preserving the legacy prop API exactly:
+- [x] **Step 5: `confirm-dialog.tsx`** over AlertDialog, preserving the legacy prop API exactly:
 
 ```tsx
 import { AlertTriangle, XOctagon } from "lucide-react";
@@ -869,11 +869,11 @@ export function ConfirmDialog({ open, title, message, confirmLabel = "Confirm", 
 ```
 (Focus lands on Cancel by default via Radix ordering — the safe action, matching old behavior.)
 
-- [ ] **Step 6: `stat-card.tsx` + `empty-state.tsx`** — Card with muted uppercase 12px label, `text-2xl font-semibold tabular-nums` value, optional hint line + icon top-right; EmptyState = centered flex column, muted icon in `rounded-md bg-muted size-12` square, title `font-medium`, message `text-sm text-muted-foreground`, optional action node.
+- [x] **Step 6: `stat-card.tsx` + `empty-state.tsx`** — Card with muted uppercase 12px label, `text-2xl font-semibold tabular-nums` value, optional hint line + icon top-right; EmptyState = centered flex column, muted icon in `rounded-md bg-muted size-12` square, title `font-medium`, message `text-sm text-muted-foreground`, optional action node.
 
-- [ ] **Step 7: Verify** — `npx tsc --noEmit && npm run build` green (old pages untouched still compile against moved types).
+- [x] **Step 7: Verify** — `npx tsc --noEmit && npm run build` green (old pages untouched still compile against moved types).
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add -A && git commit -m "feat(shared): status/stat/copy/confirm/empty primitives and format helpers"
@@ -892,13 +892,13 @@ git add -A && git commit -m "feat(shared): status/stat/copy/confirm/empty primit
 - Consumes: shared `StatusBadge/StatCard/CopyButton/EmptyState`, `formatTime/formatRelative`, hooks live in App and pass down (unchanged data flow).
 - Produces: `DashboardPage` default export with SAME props as today: `{ connection, workspaces, auditEvents, server, onNavigate, reportError }`.
 
-- [ ] **Step 1: `connection-card.tsx`** — Card containing: StatusBadge + FQDN row (`font-mono truncate` + CopyButton + external-link Button calling `api.openExternalUrl(fqdn)`), primary Start/Stop Button (`size-lg`, spinner while busy — reuse existing `startConnection/stopConnection/retryConnection/rotateConnectionUrl` handlers from the old `ConnectionCard.tsx` VERBATIM, including error paths and busy gating; only the JSX changes). Needs-login / needs-permission / degraded states render their guidance text + action buttons exactly as the old card did — port each conditional branch, do not redesign behavior.
+- [x] **Step 1: `connection-card.tsx`** — Card containing: StatusBadge + FQDN row (`font-mono truncate` + CopyButton + external-link Button calling `api.openExternalUrl(fqdn)`), primary Start/Stop Button (`size-lg`, spinner while busy — reuse existing `startConnection/stopConnection/retryConnection/rotateConnectionUrl` handlers from the old `ConnectionCard.tsx` VERBATIM, including error paths and busy gating; only the JSX changes). Needs-login / needs-permission / degraded states render their guidance text + action buttons exactly as the old card did — port each conditional branch, do not redesign behavior.
 
-- [ ] **Step 2: `server-info-card.tsx`** — grid of 3 `StatCard`s: Local port (mono), Server state (running/paused), Recent activity count; below, latest 3 audit rows (`formatRelative(ts)` with `title={new Date(ts).toLocaleString()}`), "View all" ghost Button → `onNavigate("activity")`.
+- [x] **Step 2: `server-info-card.tsx`** — grid of 3 `StatCard`s: Local port (mono), Server state (running/paused), Recent activity count; below, latest 3 audit rows (`formatRelative(ts)` with `title={new Date(ts).toLocaleString()}`), "View all" ghost Button → `onNavigate("activity")`.
 
-- [ ] **Step 3: `dashboard-page.tsx`** — composition: `<ConnectionCard/>`, `<ServerInfoCard/>`, quick-links grid to Workspaces/Security using Cards with chevron Buttons. Keep prop plumbing to App identical; update `App.tsx` import path to the kebab-case file.
+- [x] **Step 3: `dashboard-page.tsx`** — composition: `<ConnectionCard/>`, `<ServerInfoCard/>`, quick-links grid to Workspaces/Security using Cards with chevron Buttons. Keep prop plumbing to App identical; update `App.tsx` import path to the kebab-case file.
 
-- [ ] **Step 4: Delete superseded files, verify, commit**
+- [x] **Step 4: Delete superseded files, verify, commit**
 
 ```bash
 git rm src/components/ConnectionCard.tsx src/components/StatCard.tsx
@@ -919,11 +919,11 @@ Manual smoke (both themes): offline → Start flow reaches login/verify/online b
 **Interfaces:**
 - Produces: `SecurityPage` default export, SAME props `{ connection, workspaces, onPauseChanged, onConnectionChanged, reportError }`.
 
-- [ ] **Step 1: Port handlers verbatim from current `src/pages/SecurityPage.tsx`** (`setPaused`, rotate URL, reset identity incl. its ConfirmDialog flows and diagnostics toggle) — logic untouched; presentation swaps: native checkbox pause → `Switch` + Label "Pause MCP access"; destructive confirms → shared `ConfirmDialog` (same tone mapping: warning/danger); diagnostics `<details>` → `Collapsible`-style Card with chevron Button toggling `recent_sidecar_logs` list in `font-mono text-xs`.
+- [x] **Step 1: Port handlers verbatim from current `src/pages/SecurityPage.tsx`** (`setPaused`, rotate URL, reset identity incl. its ConfirmDialog flows and diagnostics toggle) — logic untouched; presentation swaps: native checkbox pause → `Switch` + Label "Pause MCP access"; destructive confirms → shared `ConfirmDialog` (same tone mapping: warning/danger); diagnostics `<details>` → `Collapsible`-style Card with chevron Button toggling `recent_sidecar_logs` list in `font-mono text-xs`.
 
-- [ ] **Step 2: Compose three cards** in one column (`space-y-4`): Pause, URL rotation (fqdn mono + CopyButton + rotate Button with busy spinner), Identity reset (collapsed danger zone, red-outline Button).
+- [x] **Step 2: Compose three cards** in one column (`space-y-4`): Pause, URL rotation (fqdn mono + CopyButton + rotate Button with busy spinner), Identity reset (collapsed danger zone, red-outline Button).
 
-- [ ] **Step 3: Verify + commit**
+- [x] **Step 3: Verify + commit**
 
 ```bash
 npx tsc --noEmit && npm run build
@@ -943,9 +943,9 @@ Smoke: pause strip appears globally when toggled (Task 7 banner), rotation updat
 - Consumes: shared `ConfirmDialog`, `EmptyState`, ui `switch radio-group label button card badge`.
 - Produces: `WorkspacesPage` default export, SAME props `{ workspaces, onWorkspacesChanged, reportError }`.
 
-- [ ] **Step 1: Port ALL business rules verbatim** from current `WorkspacesPage.tsx` — Read↔Write coherence (`toggleCapability`), execute-off keeps mode, full-powershell re-enable requires confirm (`toggleExecute`/`changeMode`/`applyExecutionAccess`), `busyId` gating, focus-scroll-to-new-workspace effect. Zero logic edits allowed; this task is presentational only.
+- [x] **Step 1: Port ALL business rules verbatim** from current `WorkspacesPage.tsx` — Read↔Write coherence (`toggleCapability`), execute-off keeps mode, full-powershell re-enable requires confirm (`toggleExecute`/`changeMode`/`applyExecutionAccess`), `busyId` gating, focus-scroll-to-new-workspace effect. Zero logic edits allowed; this task is presentational only.
 
-- [ ] **Step 2: Presentation swaps**
+- [x] **Step 2: Presentation swaps**
   - Permission toggles: three `Card`-row sections each with `Switch` checked={ws.can_*} disabled={busy}, strong label + 13px muted description (copy preserved: "List, search and inspect files" etc.), `role=group aria-label` kept.
   - `execution-mode-picker.tsx`: `RadioGroup` (value=`ws.execution_mode`, onValueChange→changeMode) two items styled as adjacent segmented Buttons — Approved commands / TerminalSquare Full PowerShell; `aria-checked` semantics come from RadioGroup.
   - Approved executables list: `Badge variant="secondary" font-mono text-xs` per cmd (data stays `APPROVED_COMMANDS`).
@@ -953,7 +953,7 @@ Smoke: pause strip appears globally when toggled (Task 7 banner), rotation updat
   - Remove action: ghost-destructive Button (`variant="ghost" className="text-destructive hover:bg-destructive/10"`).
   - Toolbar: h2 + description left, primary "Add folder…" right (`disabled={adding}`, Loader2 spin) — matches PageHeader toolbar convention at content level.
 
-- [ ] **Step 3: Verify + commit**
+- [x] **Step 3: Verify + commit**
 
 ```bash
 npx tsc --noEmit && npm run build
@@ -973,9 +973,9 @@ Smoke: toggle matrix behaves exactly as before (Read off ⇒ Write off; Write on
 - Consumes: `useTheme()` (Task 6), `saveSettings` prop (existing), ui `switch input label radio-group card`.
 - Produces: `SettingsPage` default export, SAME props `{ settings, connection, onSaveSettings, reportError }`.
 
-- [ ] **Step 1: `general-form.tsx`** — port existing fields: `start_on_launch` → `Switch`; `tailscale_hostname` → `Input` with mono font + inline validation (non-empty, no spaces/`.`-leading — mirror any validation the old page had; if it had none, trim+require non-empty). Save semantics unchanged: optimistic-local disabled — keep the existing save/rollback pattern exactly (`onSaveSettings` throws propagate → reportError + rollback).
+- [x] **Step 1: `general-form.tsx`** — port existing fields: `start_on_launch` → `Switch`; `tailscale_hostname` → `Input` with mono font + inline validation (non-empty, no spaces/`.`-leading — mirror any validation the old page had; if it had none, trim+require non-empty). Save semantics unchanged: optimistic-local disabled — keep the existing save/rollback pattern exactly (`onSaveSettings` throws propagate → reportError + rollback).
 
-- [ ] **Step 2: `appearance-form.tsx`**
+- [x] **Step 2: `appearance-form.tsx`**
 
 ```tsx
 import { Monitor, Moon, Sun } from "lucide-react";
@@ -1008,9 +1008,9 @@ export function AppearanceForm() {
 ```
 Persistence happens inside ThemeProvider → App `handleThemeChange` → `updateAppSettings` (already built in Task 6); this form is purely the control surface.
 
-- [ ] **Step 3: Compose page** — two labeled Card sections (General / Appearance) in one column. Rename file kebab-case, update App import.
+- [x] **Step 3: Compose page** — two labeled Card sections (General / Appearance) in one column. Rename file kebab-case, update App import.
 
-- [ ] **Step 4: Verify + commit**
+- [x] **Step 4: Verify + commit**
 
 ```bash
 npx tsc --noEmit && npm run build
@@ -1031,13 +1031,13 @@ Smoke: pick Dark → whole app flips instantly AND survives restart (persisted v
 - Consumes: `formatTime/formatRelative`, ui `table sheet badge input tooltip`, shared `CopyButton/EmptyState`.
 - Produces: `ActivityPage` default export, SAME props `{ auditEvents, workspaces, onRefresh, reportError }`.
 
-- [ ] **Step 1: `audit-table.tsx`** — ui Table: columns Time (`formatRelative`, `title` absolute, `whitespace-nowrap`), Source, Op (`font-medium`), Decision (`Badge`: allow→outline w/ success dot, deny/error→destructive), Path (`font-mono text-xs truncate max-w-[16rem]` + Tooltip full + CopyButton). Row click → opens detail Sheet; Enter key opens focused row (make row a `button` semantically via `tabIndex=0 role=button onKeyDown`). Search `Input` filters client-side on op/path/source (port existing filter logic verbatim). Sticky `TableHeader` (`sticky top-0 bg-card`).
+- [x] **Step 1: `audit-table.tsx`** — ui Table: columns Time (`formatRelative`, `title` absolute, `whitespace-nowrap`), Source, Op (`font-medium`), Decision (`Badge`: allow→outline w/ success dot, deny/error→destructive), Path (`font-mono text-xs truncate max-w-[16rem]` + Tooltip full + CopyButton). Row click → opens detail Sheet; Enter key opens focused row (make row a `button` semantically via `tabIndex=0 role=button onKeyDown`). Search `Input` filters client-side on op/path/source (port existing filter logic verbatim). Sticky `TableHeader` (`sticky top-0 bg-card`).
 
-- [ ] **Step 2: `audit-detail-sheet.tsx`** — right-side Sheet listing all `AuditEvent` fields as definition rows; `detail` JSON pretty-printed in `pre font-mono text-xs bg-muted rounded-md p-3 overflow-x-auto`.
+- [x] **Step 2: `audit-detail-sheet.tsx`** — right-side Sheet listing all `AuditEvent` fields as definition rows; `detail` JSON pretty-printed in `pre font-mono text-xs bg-muted rounded-md p-3 overflow-x-auto`.
 
-- [ ] **Step 3: Narrow-window degradation** — `< md`: hide table, render same events as stacked Cards (time+op+decision badge+path) tapping into the same Sheet. Implement as a `max-md:block hidden` sibling list driven by identical filtered array — no duplicated filtering logic.
+- [x] **Step 3: Narrow-window degradation** — `< md`: hide table, render same events as stacked Cards (time+op+decision badge+path) tapping into the same Sheet. Implement as a `max-md:block hidden` sibling list driven by identical filtered array — no duplicated filtering logic.
 
-- [ ] **Step 4: Swap page, delete old, verify + commit**
+- [x] **Step 4: Swap page, delete old, verify + commit**
 
 ```bash
 git rm src/components/ActivityDetail.tsx
@@ -1058,11 +1058,11 @@ Smoke: refresh button works; search filters; row→sheet shows full payload; key
 - Consumes: ui `dialog button badge card`, shared `StatusBadge`, existing api methods.
 - Produces: `OnboardingFlow` equivalent export with IDENTICAL props `{ connection, workspaces, onWorkspacesChanged, onClose, onFinish, reportError }`.
 
-- [ ] **Step 1: Preserve the state machine verbatim.** Open old `OnboardingFlow.tsx`; copy its stage logic (stage derivation from `connection.state` variants incl. `needs_login` login_url open via `api.openExternalUrl`, workspace-add step calling folder picker + `api.addWorkspace`, finish gating ONLY at Online stage, skip/close never marks complete) into the new component without behavioral edits.
+- [x] **Step 1: Preserve the state machine verbatim.** Open old `OnboardingFlow.tsx`; copy its stage logic (stage derivation from `connection.state` variants incl. `needs_login` login_url open via `api.openExternalUrl`, workspace-add step calling folder picker + `api.addWorkspace`, finish gating ONLY at Online stage, skip/close never marks complete) into the new component without behavioral edits.
 
-- [ ] **Step 2: Re-shell the JSX** — `Dialog open onOpenChange={(o)=>!o&&onClose()}` non-dismissible-by-overlay if the original blocked dismissal (match old behavior exactly; if old allowed overlay-close, keep allowing); header with step count Badge ("Step k of n"), body per-stage content ported with ui primitives (points list → muted list with CheckCircle2; permissions summary → Badge group; diagnostics → same collapsible pattern as security), footer: Skip (ghost, left) / Continue (right, primary; disabled until stage requirements met) / Finish (only Online).
+- [x] **Step 2: Re-shell the JSX** — `Dialog open onOpenChange={(o)=>!o&&onClose()}` non-dismissible-by-overlay if the original blocked dismissal (match old behavior exactly; if old allowed overlay-close, keep allowing); header with step count Badge ("Step k of n"), body per-stage content ported with ui primitives (points list → muted list with CheckCircle2; permissions summary → Badge group; diagnostics → same collapsible pattern as security), footer: Skip (ghost, left) / Continue (right, primary; disabled until stage requirements met) / Finish (only Online).
 
-- [ ] **Step 3: Verify + commit**
+- [x] **Step 3: Verify + commit**
 
 ```bash
 npx tsc --noEmit && npm run build
@@ -1081,18 +1081,18 @@ Smoke (reset `onboarding_complete=false` in stored settings to trigger): full ha
 **Interfaces:**
 - Produces: single stylesheet `globals.css`; zero legacy classnames in JSX.
 
-- [ ] **Step 1: Repoint stragglers** — `grep -rn "components/EmptyState\|components/ConfirmDialog" src/` → switch those imports to `@/components/shared/*`.
+- [x] **Step 1: Repoint stragglers** — `grep -rn "components/EmptyState\|components/ConfirmDialog" src/` → switch those imports to `@/components/shared/*`.
 
-- [ ] **Step 2: Delete files + imports**, then prove no legacy classes remain:
+- [x] **Step 2: Delete files + imports**, then prove no legacy classes remain:
 
 ```bash
 grep -rn "className=\"[^\"]*\b\(btn\b\|toast\|dialog-backdrop\|dialog-card\|workspace-card\|nav-item\|sidebar\|permission-toggle\|mode-option\|onboarding-\)" src/ || echo CLEAN
 ```
 Expected: `CLEAN` (any hit = an unmigrated classname; fix before proceeding).
 
-- [ ] **Step 3: Full visual sweep** — dev-run every view in light AND dark looking for unstyled remnants (the moment preflight fully owns base styles). Fix by ADDING Tailwind classes, never by resurrecting legacy CSS.
+- [x] **Step 3: Full visual sweep** — dev-run every view in light AND dark looking for unstyled remnants (the moment preflight fully owns base styles). Fix by ADDING Tailwind classes, never by resurrecting legacy CSS.
 
-- [ ] **Step 4: Verify + commit**
+- [x] **Step 4: Verify + commit**
 
 ```bash
 npx tsc --noEmit && npm run build
@@ -1106,13 +1106,13 @@ git add -A && git commit -m "refactor!: remove legacy css layer — tailwind is 
 **Files:**
 - Modify: `src-tauri/tauri.conf.json` (window min size), `README.md` (stack section)
 
-- [ ] **Step 1: Window minimums** — read `tauri.conf.json` windows config; if `minWidth`/`minHeight` absent or smaller, set `"minWidth": 720, "minHeight": 480`.
+- [x] **Step 1: Window minimums** — read `tauri.conf.json` windows config; if `minWidth`/`minHeight` absent or smaller, set `"minWidth": 720, "minHeight": 480`.
 
-- [ ] **Step 2: A11y & polish checklist (fix findings inline)** — run through EVERY view, both themes, keyboard-only, and reduced-motion emulation (DevTools): visible focus rings everywhere; contrast spot-check muted text + badges (AA); icon-only buttons have aria-label + tooltip; dialogs trap and restore focus; no horizontal scrollbar at 720px width; animations respect reduced motion.
+- [x] **Step 2: A11y & polish checklist (fix findings inline)** — run through EVERY view, both themes, keyboard-only, and reduced-motion emulation (DevTools): visible focus rings everywhere; contrast spot-check muted text + badges (AA); icon-only buttons have aria-label + tooltip; dialogs trap and restore focus; no horizontal scrollbar at 720px width; animations respect reduced motion.
 
-- [ ] **Step 3: Docs** — README: update tech-stack bullets (Tailwind v4, shadcn/ui, sonner), note theme setting location, replace any screenshots mentioning old UI.
+- [x] **Step 3: Docs** — README: update tech-stack bullets (Tailwind v4, shadcn/ui, sonner), note theme setting location, replace any screenshots mentioning old UI.
 
-- [ ] **Step 4: Final gates + commit**
+- [x] **Step 4: Final gates + commit**
 
 ```bash
 npx tsc --noEmit && npm run build
