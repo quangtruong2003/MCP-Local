@@ -7,6 +7,7 @@ import OnboardingFlow from "./components/OnboardingFlow";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/DashboardPage";
 import SecurityPage from "./pages/SecurityPage";
+import SettingsPage from "./pages/SettingsPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
 import type { AuditEvent, ServerStatus } from "./api";
@@ -144,6 +145,13 @@ export default function App() {
     }
   }, [reportError]);
 
+  // Settings page (plan Task 21): persists then applies the returned value;
+  // throws propagate to SettingsPage, which reports and rolls back.
+  const saveSettings = useCallback(async (next: AppSettings) => {
+    const updated = await api.updateAppSettings(next);
+    setSettings(updated);
+  }, []);
+
   const meta = VIEW_META[page];
   const paused = connection?.paused === true;
 
@@ -205,6 +213,13 @@ export default function App() {
           workspaces={workspaces}
           onPauseChanged={refreshConnection}
           onConnectionChanged={setConnection}
+          reportError={reportError}
+        />
+      ) : page === "settings" ? (
+        <SettingsPage
+          settings={settings}
+          connection={connection}
+          onSaveSettings={saveSettings}
           reportError={reportError}
         />
       ) : (

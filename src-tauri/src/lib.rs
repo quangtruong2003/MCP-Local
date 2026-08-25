@@ -91,6 +91,8 @@ pub fn run() {
             commands::retry_connection,
             commands::rotate_connection_url,
             commands::reset_tailscale_identity,
+            commands::tailscale_state_dir,
+            commands::connection_diagnostics,
             commands::get_app_settings,
             commands::update_app_settings,
         ])

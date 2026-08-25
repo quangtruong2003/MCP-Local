@@ -67,6 +67,17 @@ export interface AppError {
   detail?: unknown;
 }
 
+/** Redacted diagnostics report from `connection_diagnostics`. */
+export interface DiagnosticsReport {
+  app_version: string;
+  connection_state: string;
+  local_port: number;
+  fqdn: string | null;
+  paused: boolean;
+  workspace_count: number;
+  recent_sidecar_logs: string[];
+}
+
 export const VIEW_META: Record<ViewId, { title: string; subtitle: string }> = {
   dashboard: {
     title: "Dashboard",

@@ -56,6 +56,13 @@ impl From<SidecarSpawnError> for ConnectionError {
 pub trait SidecarSession: Send {
     async fn next_event(&mut self) -> Option<SidecarEvent>;
     async fn stop(&mut self) -> Result<(), ConnectionError>;
+
+    /// Redacted recent sidecar output lines (most recent last). Default is
+    /// empty so test fakes need no implementation; lines are pre-redacted by
+    /// the sidecar reader threads.
+    fn recent_diagnostics(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 /// Spawns sidecar sessions.
@@ -85,6 +92,10 @@ impl SidecarSession for ProcessSession {
 
     async fn stop(&mut self) -> Result<(), ConnectionError> {
         self.process.stop().await.map_err(Into::into)
+    }
+
+    fn recent_diagnostics(&self) -> Vec<String> {
+        self.process.recent_diagnostics()
     }
 }
 
@@ -126,6 +137,10 @@ struct Shared {
     /// Serializes start/stop/retry/reset so only one operation runs at a time.
     op_lock: Mutex<()>,
     inner: Mutex<Inner>,
+    /// Latest redacted sidecar diagnostics snapshot for the diagnostics
+    /// command. Updated after spawn and after each run-loop event; lines are
+    /// pre-redacted by sidecar.rs and never contain secrets.
+    last_diagnostics: std::sync::Mutex<Vec<String>>,
 }
 
 struct Inner {
@@ -180,6 +195,11 @@ impl Shared {
             code: code.to_string(),
             message,
         }
+    }
+
+    /// Replaces the diagnostics snapshot (pre-redacted lines only).
+    fn set_diagnostics(&self, lines: Vec<String>) {
+        *self.last_diagnostics.lock().unwrap() = lines;
     }
 }
 
@@ -241,6 +261,7 @@ impl ConnectionManager {
                     runner: None,
                     cancel: None,
                 }),
+                last_diagnostics: std::sync::Mutex::new(Vec::new()),
             }),
         }
     }
@@ -295,6 +316,9 @@ impl ConnectionManager {
             Ok(s) => s,
             Err(e) => return Err(self.shared.fail_start(gen, &e.code, e.message).await),
         };
+        // Snapshot whatever the fresh sidecar has already buffered so a
+        // start-time failure still has diagnostics to show.
+        self.shared.set_diagnostics(session.recent_diagnostics());
 
         self.shared
             .set_state(gen, ConnectionState::StartingTunnel)
@@ -361,6 +385,16 @@ impl ConnectionManager {
     /// Current status snapshot.
     pub async fn status(&self) -> ConnectionStatus {
         self.shared.inner.lock().await.status.clone()
+    }
+
+    /// The Tailscale state directory path (for the Settings page).
+    pub async fn state_dir(&self) -> PathBuf {
+        self.shared.state_dir.clone()
+    }
+
+    /// Latest redacted sidecar diagnostics lines, for the diagnostics report.
+    pub async fn diagnostics_snapshot(&self) -> Vec<String> {
+        self.shared.last_diagnostics.lock().unwrap().clone()
     }
 
     /// Rotates the capability secret. While running: stop -> rotate -> start.
@@ -454,6 +488,9 @@ async fn run_loop(
             let _ = session.stop().await;
             break;
         }
+
+        // Keep the diagnostics snapshot fresh (lines are pre-redacted).
+        shared.set_diagnostics(session.recent_diagnostics());
 
         match event {
             SidecarEvent::Starting | SidecarEvent::Authenticated => {

@@ -35,6 +35,25 @@ pub enum ConnectionState {
     },
 }
 
+impl ConnectionState {
+    /// The snake_case serde tag for this variant (matches the serialized
+    /// `"state"` field), used by the diagnostics report.
+    pub fn state_tag(&self) -> &'static str {
+        match self {
+            Self::Stopped => "stopped",
+            Self::StartingServer => "starting_server",
+            Self::StartingTunnel => "starting_tunnel",
+            Self::NeedsLogin { .. } => "needs_login",
+            Self::NeedsFunnelPermission { .. } => "needs_funnel_permission",
+            Self::Verifying { .. } => "verifying",
+            Self::Online { .. } => "online",
+            Self::Degraded { .. } => "degraded",
+            Self::Stopping => "stopping",
+            Self::Error { .. } => "error",
+        }
+    }
+}
+
 /// Full status snapshot pushed to (and polled by) the frontend. Defaults to
 /// `Stopped` / port 0 / not paused.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

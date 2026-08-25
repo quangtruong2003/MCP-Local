@@ -5,11 +5,12 @@ import type {
   AppError,
   AppSettings,
   ConnectionStatus,
+  DiagnosticsReport,
   ExecutionMode,
   Workspace,
 } from "./types";
 
-export type { AppError, AppSettings, ConnectionStatus, ExecutionMode, Workspace };
+export type { AppError, AppSettings, ConnectionStatus, DiagnosticsReport, ExecutionMode, Workspace };
 
 // --- Deprecated compat types (Cloudflare-era components, removed by a later task) ---
 
@@ -112,6 +113,8 @@ export const api = {
   rotateConnectionUrl: () => invoke<ConnectionStatus>("rotate_connection_url"),
   resetTailscaleIdentity: (removeStateDir: boolean, restart: boolean) =>
     invoke<ConnectionStatus>("reset_tailscale_identity", { removeStateDir, restart }),
+  connectionDiagnostics: () => invoke<DiagnosticsReport>("connection_diagnostics"),
+  tailscaleStateDir: () => invoke<string>("tailscale_state_dir"),
 
   // Settings
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),

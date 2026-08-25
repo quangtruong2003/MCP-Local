@@ -1381,6 +1381,32 @@
   color: var(--text-secondary);
 }
 
+/* ---------- Settings page (plan Task 21) ---------- */
+
+.settings-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 720px;
+}
+
+.settings-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.settings-field > label {
+  font-size: var(--text-dense);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+/* The Approved Commands list wraps; override protection-row's nowrap. */
+.settings-exec-row strong {
+  white-space: normal;
+}
+
 .reset-confirm {
   display: flex;
   flex-direction: column;

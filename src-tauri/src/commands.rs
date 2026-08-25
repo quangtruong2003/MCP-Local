@@ -10,6 +10,7 @@ use tauri::{Manager, State};
 use crate::{
     connection::{
         manager::{ConnectionError, ConnectionManager as TailscaleManager},
+        state::ConnectionState,
         ConnectionStatus,
     },
     settings, AppState,
@@ -293,6 +294,59 @@ pub async fn reset_tailscale_identity(
         .reset_identity(remove_state_dir, restart)
         .await
         .map_err(conn_err_string)
+}
+
+/// The Tailscale state directory path, shown (elided) on the Settings page.
+#[tauri::command]
+pub async fn tailscale_state_dir(manager: State<'_, TailscaleManager>) -> Result<String, String> {
+    Ok(manager.state_dir().await.to_string_lossy().to_string())
+}
+
+/// Redacted diagnostics report for the Settings page. Security invariants:
+/// never contains the capability token, the full capability endpoint URL
+/// (only its host FQDN), any Tailscale login auth URL, or file contents;
+/// `recent_sidecar_logs` lines are pre-redacted by sidecar.rs.
+#[derive(Serialize)]
+pub struct DiagnosticsReport {
+    pub app_version: &'static str,
+    pub connection_state: String,
+    pub local_port: u16,
+    pub fqdn: Option<String>,
+    pub paused: bool,
+    pub workspace_count: usize,
+    pub recent_sidecar_logs: Vec<String>,
+}
+
+/// FQDN only from states where it is present; never an endpoint URL.
+fn safe_fqdn(state: &ConnectionState) -> Option<String> {
+    match state {
+        ConnectionState::Online { fqdn, .. } | ConnectionState::Verifying { fqdn } => {
+            Some(fqdn.clone())
+        }
+        ConnectionState::Degraded { fqdn, .. } => fqdn.clone(),
+        _ => None,
+    }
+}
+
+/// Assembles the redacted diagnostics report.
+#[tauri::command]
+pub async fn connection_diagnostics(
+    manager: State<'_, TailscaleManager>,
+    state: State<'_, AppState>,
+) -> Result<DiagnosticsReport, String> {
+    let status = manager.status().await;
+    let workspace_count = workspace_repo::list_workspaces(&state.core.db)
+        .map_err(err_string)?
+        .len();
+    Ok(DiagnosticsReport {
+        app_version: env!("CARGO_PKG_VERSION"),
+        connection_state: status.state.state_tag().to_string(),
+        local_port: status.local_port,
+        fqdn: safe_fqdn(&status.state),
+        paused: status.paused,
+        workspace_count,
+        recent_sidecar_logs: manager.diagnostics_snapshot().await,
+    })
 }
 
 #[tauri::command]
