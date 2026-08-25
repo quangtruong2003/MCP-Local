@@ -11,7 +11,7 @@ import { useWorkspaces } from "./hooks/use-workspaces";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/dashboard-page";
 import SecurityPage from "./pages/security-page";
-import SettingsPage from "./pages/SettingsPage";
+import SettingsPage from "./pages/settings-page";
 import WorkspacesPage from "./pages/workspaces-page";
 import { api, parseErrorMessage } from "./api";
 import type { ServerStatus } from "./api";
