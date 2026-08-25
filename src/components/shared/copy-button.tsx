@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { Check, Copy } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import {
   Tooltip,
   TooltipContent,
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 
 interface Props {
   value: string;
@@ -30,15 +31,17 @@ export function CopyButton({ value, label = "Copy" }: Props) {
   return (
     <TooltipProvider>
       <Tooltip>
+        {/* Native <button> + buttonVariants: Radix asChild needs a ref, which
+            React 18 only delivers to host elements. */}
         <TooltipTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
+          <button
+            type="button"
             aria-label={label}
             onClick={() => void copy()}
+            className={cn(buttonVariants({ variant: "ghost", size: "icon" }))}
           >
             {copied ? <Check aria-hidden="true" className="text-success" /> : <Copy aria-hidden="true" />}
-          </Button>
+          </button>
         </TooltipTrigger>
         <TooltipContent>{label}</TooltipContent>
       </Tooltip>

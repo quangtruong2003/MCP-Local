@@ -1,7 +1,8 @@
 import { FolderOpen, LayoutDashboard, ScrollText, Settings as SettingsIcon, ShieldCheck } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import type { ViewId } from "@/lib/types";
 
@@ -17,16 +18,33 @@ function NavItems({ page, onNavigate }: { page: ViewId; onNavigate: (p: ViewId) 
   return (
     <nav aria-label="Primary navigation" className="flex flex-col gap-1">
       {ITEMS.map((item) => (
-        <Button
-          key={item.id}
-          variant={page === item.id ? "secondary" : "ghost"}
-          onClick={() => onNavigate(item.id)}
-          aria-current={page === item.id ? "page" : undefined}
-          className="w-full justify-start gap-2.5 px-2.5 font-medium max-lg:justify-center max-lg:px-0"
-        >
-          <item.icon aria-hidden="true" className="size-[17px] shrink-0" />
-          <span className="max-lg:hidden">{item.label}</span>
-        </Button>
+        <Tooltip key={item.id}>
+          {/* Native <button> + buttonVariants (not the Button component):
+              Radix asChild needs a ref, which React 18 only delivers to host
+              elements. */}
+          <TooltipTrigger asChild>
+            <button
+              type="button"
+              onClick={() => onNavigate(item.id)}
+              aria-current={page === item.id ? "page" : undefined}
+              aria-label={item.label}
+              className={cn(
+                buttonVariants({
+                  variant: page === item.id ? "secondary" : "ghost",
+                }),
+                "w-full justify-start gap-2.5 px-2.5 font-medium max-lg:justify-center max-lg:px-0",
+              )}
+            >
+              <item.icon aria-hidden="true" className="size-[17px] shrink-0" />
+              <span className="max-lg:hidden">{item.label}</span>
+            </button>
+          </TooltipTrigger>
+          {/* Collapsed rail (md–lg): reveal the option name on hover. Hidden
+              when the label text is already visible (<md sheet, ≥lg rail). */}
+          <TooltipContent side="right" className="hidden md:block lg:hidden">
+            {item.label}
+          </TooltipContent>
+        </Tooltip>
       ))}
     </nav>
   );
@@ -34,8 +52,7 @@ function NavItems({ page, onNavigate }: { page: ViewId; onNavigate: (p: ViewId) 
 
 function Brand() {
   return (
-    <div className="flex items-center gap-2.5 px-2 pb-4">
-      <div className="grid size-9 place-items-center rounded-md bg-primary font-semibold text-primary-foreground">M</div>
+    <div className="flex items-center px-2 pb-4">
       <div className="max-lg:hidden">
         <div className="text-sm font-semibold leading-tight">MCP Workspace</div>
         <div className="text-xs text-muted-foreground">Local control center</div>

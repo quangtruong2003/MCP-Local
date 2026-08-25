@@ -1,10 +1,11 @@
 import { Menu } from "lucide-react";
 import { useState } from "react";
 import type { ReactNode } from "react";
-import { Button } from "@/components/ui/button";
+import { buttonVariants } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
+import { cn } from "@/lib/utils";
 import { VIEW_META, type ViewId } from "@/lib/types";
 import { Brand, NavItems, TunnelFooter } from "./sidebar";
 import { PageHeader } from "./page-header";
@@ -41,9 +42,15 @@ export function AppShell({ page, onNavigate, ready, paused, children }: Props) {
           <div className="flex items-center gap-2 border-b px-3 py-2 md:hidden">
             <Sheet open={mobileNavOpen} onOpenChange={setMobileNavOpen}>
               <SheetTrigger asChild>
-                <Button variant="ghost" size="icon" aria-label="Open navigation">
+                {/* Native <button>: Radix asChild needs a ref, which React 18
+                    only delivers to host elements. */}
+                <button
+                  type="button"
+                  aria-label="Open navigation"
+                  className={cn(buttonVariants({ variant: "ghost", size: "icon" }))}
+                >
                   <Menu aria-hidden="true" />
-                </Button>
+                </button>
               </SheetTrigger>
               <SheetContent side="left" className="w-64 p-3">
                 <SheetTitle className="sr-only">Navigation</SheetTitle>
