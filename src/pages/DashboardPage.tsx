@@ -5,7 +5,7 @@ import ConnectionCard from "../components/ConnectionCard";
 import EmptyState from "../components/EmptyState";
 import { api, parseErrorMessage } from "../api";
 import type { AuditEvent, ServerStatus } from "../api";
-import type { ConnectionStatus, ViewId, Workspace } from "../types";
+import type { ConnectionStatus, ViewId, Workspace } from "@/lib/types";
 
 const RECENT_ACTIVITY_ROWS = 5;
 

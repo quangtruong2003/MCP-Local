@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from "@/components/ui/sheet";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { VIEW_META, type ViewId } from "../../types";
+import { VIEW_META, type ViewId } from "@/lib/types";
 import { Brand, NavItems, TunnelFooter } from "./sidebar";
 import { PageHeader } from "./page-header";
 import { PausedBanner } from "./paused-banner";

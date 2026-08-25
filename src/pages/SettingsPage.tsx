@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { AlertTriangle, Copy } from "lucide-react";
 import { api, parseErrorMessage } from "../api";
-import type { AppSettings, ConnectionStatus } from "../types";
+import type { AppSettings, ConnectionStatus } from "@/lib/types";
 
 /**
  * Settings page (plan Task 21): general auto-start toggle, connection

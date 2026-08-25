@@ -8,9 +8,19 @@ import type {
   DiagnosticsReport,
   ExecutionMode,
   Workspace,
-} from "./types";
+} from "@/lib/types";
 
-export type { AppError, AppSettings, ConnectionStatus, DiagnosticsReport, ExecutionMode, Workspace };
+export type {
+  AppError,
+  AppSettings,
+  ConnectionStatus,
+  ConnectionState,
+  DiagnosticsReport,
+  ExecutionMode,
+  ThemePreference,
+  ViewId,
+  Workspace,
+} from "@/lib/types";
 
 export interface AuditEvent {
   id: number;

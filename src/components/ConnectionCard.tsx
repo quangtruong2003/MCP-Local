@@ -9,7 +9,7 @@ import {
   XOctagon,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import type { ConnectionState } from "../types";
+import type { ConnectionState } from "@/lib/types";
 
 export type ConnectionTone = "ready" | "offline" | "warning" | "error";
 

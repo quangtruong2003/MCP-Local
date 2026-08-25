@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import type { ThemePreference } from "../types";
+import type { ThemePreference } from "@/lib/types";
 
 interface ThemeContextValue {
   theme: ThemePreference;

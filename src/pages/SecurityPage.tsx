@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Copy, KeyRound, Loader2, Pause, Play, ShieldAlert } from "lucide-react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { api, parseErrorMessage } from "../api";
-import type { ConnectionStatus, Workspace } from "../types";
+import type { ConnectionStatus, Workspace } from "@/lib/types";
 
 /**
  * Security overview (plan Task 20): protection summary rows derived from the

@@ -1,16 +1,16 @@
 export type ViewId = "dashboard" | "workspaces" | "activity" | "security" | "settings";
 
-export type ToastTone = "info" | "success" | "error";
+export type ThemePreference = "system" | "light" | "dark";
 
-export interface Toast {
-  id: number;
-  tone: ToastTone;
-  message: string;
-}
-
-export interface ConnectionUiState {
-  ready: boolean;
-  label: string;
+/** Versioned app settings persisted by the backend (`version: 3`). */
+export interface AppSettings {
+  version: number;
+  start_on_launch: boolean;
+  tailscale_hostname: string;
+  onboarding_complete: boolean;
+  theme: ThemePreference;
+  launch_on_startup: boolean;
+  close_to_tray: boolean;
 }
 
 // --- Backend contracts (mirror crates/core/src/models.rs serde output) ---
@@ -51,19 +51,6 @@ export interface ConnectionStatus {
   state: ConnectionState;
   local_port: number;
   paused: boolean;
-}
-
-export type ThemePreference = "system" | "light" | "dark";
-
-/** Versioned app settings persisted by the backend (`version: 3`). */
-export interface AppSettings {
-  version: number;
-  start_on_launch: boolean;
-  tailscale_hostname: string;
-  onboarding_complete: boolean;
-  theme: ThemePreference;
-  launch_on_startup: boolean;
-  close_to_tray: boolean;
 }
 
 /** Structured shape backend errors are serialized into ({code,message,detail}). */

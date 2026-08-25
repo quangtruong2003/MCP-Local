@@ -15,8 +15,8 @@ import SettingsPage from "./pages/SettingsPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
 import type { ServerStatus } from "./api";
-import { VIEW_META } from "./types";
-import type { AppSettings, ThemePreference, ViewId } from "./types";
+import { VIEW_META } from "@/lib/types";
+import type { AppSettings, ThemePreference, ViewId } from "@/lib/types";
 
 export default function App() {
   const [page, setPage] = useState<ViewId>("dashboard");

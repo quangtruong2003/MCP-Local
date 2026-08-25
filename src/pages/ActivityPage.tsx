@@ -3,7 +3,7 @@ import { RefreshCw, ScrollText, Search } from "lucide-react";
 import ActivityDetail from "../components/ActivityDetail";
 import EmptyState from "../components/EmptyState";
 import type { AuditEvent } from "../api";
-import type { Workspace } from "../types";
+import type { Workspace } from "@/lib/types";
 
 /**
  * Activity history (plan Task 19): filterable list of the latest audit events

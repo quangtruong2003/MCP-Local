@@ -4,7 +4,7 @@ import { FolderPlus, Loader2, TerminalSquare } from "lucide-react";
 import ConfirmDialog from "../components/ConfirmDialog";
 import EmptyState from "../components/EmptyState";
 import { api, parseErrorMessage } from "../api";
-import type { ExecutionMode, Workspace } from "../types";
+import type { ExecutionMode, Workspace } from "@/lib/types";
 
 /**
  * Workspaces permission management (plan Task 18):

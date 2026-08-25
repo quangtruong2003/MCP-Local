@@ -10,7 +10,7 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { api, parseErrorMessage } from "../api";
-import type { ConnectionStatus, Workspace } from "../types";
+import type { ConnectionStatus, Workspace } from "@/lib/types";
 
 /**
  * Guided first-run onboarding (plan Task 17):

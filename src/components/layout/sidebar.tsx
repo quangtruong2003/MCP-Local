@@ -3,7 +3,7 @@ import type { LucideIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import type { ViewId } from "../../types";
+import type { ViewId } from "@/lib/types";
 
 const ITEMS: Array<{ id: ViewId; label: string; icon: LucideIcon }> = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
