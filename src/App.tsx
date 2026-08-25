@@ -130,7 +130,13 @@ export default function App() {
       initialTheme={savedTheme}
       onThemeChange={(t) => void handleThemeChange(t)}
     >
-      <AppShell page={page} onNavigate={setPage} ready={connectionReady} paused={paused}>
+      <AppShell
+        page={page}
+        onNavigate={setPage}
+        ready={connectionReady}
+        paused={paused}
+        unrestricted={settings?.unrestricted_access === true}
+      >
       {onboardingVisible ? (
         <OnboardingFlow
           connection={connection}
@@ -174,6 +180,8 @@ export default function App() {
         <SecurityPage
           connection={connection}
           workspaces={workspaces}
+          settings={settings}
+          onSaveSettings={saveSettings}
           onPauseChanged={refreshConnection}
           onConnectionChanged={setConnection}
           reportError={reportError}

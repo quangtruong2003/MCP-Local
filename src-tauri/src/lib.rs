@@ -77,6 +77,12 @@ pub fn run() {
             app.manage(UiFlags {
                 close_to_tray: AtomicBool::new(app_settings.close_to_tray),
             });
+            // Mirror the persisted unrestricted-access preference into the
+            // live pipeline flag (default off).
+            app.state::<AppState>()
+                .core
+                .unrestricted
+                .set(app_settings.unrestricted_access);
 
             // Self-heal the autostart registration to match the persisted
             // preference (covers registry edits and setting races).
@@ -156,6 +162,15 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } => {
+                // Graceful shutdown for BOTH connection paths: the Tailscale
+                // ConnectionManager (current runtime) stops its sidecar via
+                // the stop command before the process tears down, and the
+                // legacy tunnel handle is killed as before. The sidecar's Job
+                // Object remains the orphan-safety net if this is interrupted.
+                let manager = app_handle.state::<connection::manager::ConnectionManager>();
+                if let Err(e) = tauri::async_runtime::block_on(manager.stop()) {
+                    eprintln!("graceful connection stop on exit failed: {}", e.message);
+                }
                 tunnel::stop(app_handle);
             }
             _ => {}

@@ -17,6 +17,22 @@ impl PauseFlag {
     }
 }
 
+/// Generic atomic runtime flag with intent-revealing names. Used for
+/// opt-in behavior switches (e.g. unrestricted access) that, unlike
+/// [`PauseFlag`], RELAX gates instead of applying them.
+#[derive(Default)]
+pub struct Flag(AtomicBool);
+
+impl Flag {
+    pub fn get(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+
+    pub fn set(&self, value: bool) {
+        self.0.store(value, Ordering::SeqCst);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -34,5 +50,15 @@ mod tests {
         assert!(f.is_paused());
         f.set(false);
         assert!(!f.is_paused());
+    }
+
+    #[test]
+    fn flag_defaults_off_and_toggles() {
+        let f = Flag::default();
+        assert!(!f.get());
+        f.set(true);
+        assert!(f.get());
+        f.set(false);
+        assert!(!f.get());
     }
 }

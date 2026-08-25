@@ -36,7 +36,7 @@ pub fn find_files(
             Ok(r) => r,
             Err(_) => continue,
         };
-        if core.sensitive.is_blocked(rel) {
+        if !core.unrestricted.get() && core.sensitive.is_blocked(rel) {
             continue;
         }
         if set.is_match(rel) {
@@ -79,6 +79,7 @@ mod tests {
             db,
             pause: Default::default(),
             sensitive: crate::sensitive::SensitiveMatcher::new(),
+            unrestricted: crate::pause::Flag::default(),
         };
         (core, dir, ws.id)
     }

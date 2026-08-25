@@ -19,18 +19,23 @@ pub struct CoreServices {
     pub db: Database,
     pub pause: PauseFlag,
     pub sensitive: SensitiveMatcher,
+    /// Opt-in unrestricted access: when set, capability gates and the
+    /// sensitive-file deny list are relaxed for every workspace. The pause
+    /// kill switch and audit recording stay active regardless.
+    pub unrestricted: pause::Flag,
 }
 
 use db::Database;
 
 impl CoreServices {
-    /// Opens the database at `db_path` and initializes the kill switch and
-    /// sensitive-file matcher.
+    /// Opens the database at `db_path` and initializes the kill switch, the
+    /// sensitive-file matcher, and the (default-off) unrestricted flag.
     pub fn open(db_path: &Path) -> Result<Self, CoreError> {
         Ok(Self {
             db: Database::open(db_path)?,
             pause: PauseFlag::default(),
             sensitive: SensitiveMatcher::new(),
+            unrestricted: pause::Flag::default(),
         })
     }
 }
@@ -45,6 +50,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let core = CoreServices::open(&dir.path().join("t.db")).unwrap();
         assert!(!core.pause.is_paused());
+        assert!(!core.unrestricted.get());
         let err = workspace_repo::get_workspace(&core.db, "ghost").unwrap_err();
         assert_eq!(err.code, ErrorCode::WorkspaceNotFound);
     }

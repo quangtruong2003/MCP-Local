@@ -18,7 +18,7 @@ import { Switch } from "@/components/ui/switch";
 import { ConfirmDialog } from "@/components/shared/confirm-dialog";
 import { CopyButton } from "@/components/shared/copy-button";
 import { api, parseErrorMessage } from "../api";
-import type { ConnectionStatus, Workspace } from "@/lib/types";
+import type { AppSettings, ConnectionStatus, Workspace } from "@/lib/types";
 
 const ROTATE_TITLE = "Rotate connection URL?";
 const ROTATE_BODY =
@@ -27,10 +27,17 @@ const RESET_TITLE = "Reset Tailscale identity?";
 const RESET_BODY =
   "This app will need to sign in to Tailscale again and its *.ts.net hostname may change.";
 const RESET_KEYWORD = "RESET";
+const UNRESTRICTED_TITLE = "Enable unrestricted access?";
+const UNRESTRICTED_BODY =
+  "ChatGPT will be able to read, create and edit ANY file in your workspaces — including credentials (.env, *.pem, *.key), run ANY installed program, and run full PowerShell in every workspace, with no sensitive-file filtering. The folder boundary, the Pause kill switch and the audit log stay in force. Only enable this if you fully trust the conversations you use it in.";
+const UNRESTRICTED_KEYWORD = "UNRESTRICTED";
 
 interface Props {
   connection: ConnectionStatus | null;
   workspaces: Workspace[];
+  settings: AppSettings | null;
+  /** Persists settings via api.updateAppSettings; App applies the returned value. */
+  onSaveSettings: (settings: AppSettings) => Promise<void>;
   /** Re-pulls connection status after setPaused (App owns shell state). */
   onPauseChanged: () => Promise<void>;
   /** Applies a new ConnectionStatus returned by rotate/reset to App state. */
@@ -41,6 +48,8 @@ interface Props {
 export default function SecurityPage({
   connection,
   workspaces,
+  settings,
+  onSaveSettings,
   onPauseChanged,
   onConnectionChanged,
   reportError,
@@ -50,6 +59,9 @@ export default function SecurityPage({
   const [rotatedEndpoint, setRotatedEndpoint] = useState<string | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
   const [resetText, setResetText] = useState("");
+  const [unrestrictedOpen, setUnrestrictedOpen] = useState(false);
+  const [unrestrictedText, setUnrestrictedText] = useState("");
+  const unrestrictedOn = settings?.unrestricted_access === true;
 
   const paused = connection?.paused === true;
   const writeCount = workspaces.filter((ws) => ws.can_write).length;
@@ -107,6 +119,28 @@ export default function SecurityPage({
       reportError(parseErrorMessage(err));
     } finally {
       setPending(false);
+    }
+  }
+
+  async function setUnrestricted(next: boolean) {
+    if (!settings) return;
+    setPending(true);
+    try {
+      await onSaveSettings({ ...settings, unrestricted_access: next });
+    } catch (err) {
+      reportError(parseErrorMessage(err));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function requestUnrestrictedToggle(next: boolean) {
+    if (next) {
+      setUnrestrictedText("");
+      setUnrestrictedOpen(true);
+    } else {
+      // Disabling the dangerous mode needs no confirmation.
+      void setUnrestricted(false);
     }
   }
 
@@ -183,6 +217,27 @@ export default function SecurityPage({
       </Card>
 
       <Card className="gap-3 border-destructive/40 p-6">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <Label htmlFor="unrestricted-mcp" className="text-sm font-semibold">
+              Unrestricted access
+            </Label>
+            <p className="text-[13px] text-muted-foreground">
+              Bypass capability gates, the sensitive-file deny list, the approved-command list and
+              the Full-PowerShell gate in every workspace. The folder boundary, Pause and the audit
+              log stay in force.
+            </p>
+          </div>
+          <Switch
+            id="unrestricted-mcp"
+            checked={unrestrictedOn}
+            disabled={pending || !settings}
+            onCheckedChange={requestUnrestrictedToggle}
+          />
+        </div>
+      </Card>
+
+      <Card className="gap-3 border-destructive/40 p-6">
         <div>
           <h2 className="text-sm font-semibold">Advanced</h2>
           <p className="text-[13px] text-muted-foreground">
@@ -253,6 +308,52 @@ export default function SecurityPage({
             >
               {pending ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
               Reset
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+      {/* Typed-keyword confirm for unrestricted access (enable only). */}
+      <AlertDialog
+        open={unrestrictedOpen}
+        onOpenChange={(o) => {
+          if (!o && !pending) setUnrestrictedOpen(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <ShieldAlert aria-hidden="true" className="size-5 text-destructive" />
+              {UNRESTRICTED_TITLE}
+            </AlertDialogTitle>
+            <AlertDialogDescription>{UNRESTRICTED_BODY}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex flex-col gap-1.5">
+            <Label htmlFor="unrestricted-confirm-input">
+              Type {UNRESTRICTED_KEYWORD} to confirm
+            </Label>
+            <Input
+              id="unrestricted-confirm-input"
+              value={unrestrictedText}
+              autoFocus
+              disabled={pending}
+              onChange={(event) => setUnrestrictedText(event.target.value)}
+              placeholder={UNRESTRICTED_KEYWORD}
+              spellCheck={false}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={() => setUnrestrictedOpen(false)} disabled={pending}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setUnrestrictedOpen(false);
+                void setUnrestricted(true);
+              }}
+              disabled={pending || unrestrictedText !== UNRESTRICTED_KEYWORD}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              Enable unrestricted access
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -22,6 +22,7 @@ async fn spawn_server() -> (u16, Core, tempfile::TempDir, String) {
         db,
         pause: Default::default(),
         sensitive: lc_core::sensitive::SensitiveMatcher::new(),
+        unrestricted: Default::default(),
     });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

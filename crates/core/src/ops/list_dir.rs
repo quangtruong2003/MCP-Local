@@ -45,7 +45,7 @@ pub fn list_dir(
             Ok(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
             _ => return,
         };
-        if core.sensitive.is_blocked(&rel_to_root) {
+        if !core.unrestricted.get() && core.sensitive.is_blocked(&rel_to_root) {
             return;
         }
         let md = std::fs::symlink_metadata(path).ok();
@@ -110,6 +110,7 @@ mod tests {
             db,
             pause: Default::default(),
             sensitive: crate::sensitive::SensitiveMatcher::new(),
+            unrestricted: crate::pause::Flag::default(),
         };
         (core, dir, ws.id)
     }

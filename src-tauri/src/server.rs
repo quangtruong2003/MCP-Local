@@ -53,6 +53,30 @@ pub struct WorkspaceServer {
     core: Arc<CoreServices>,
 }
 
+/// Client-facing workspace summary. Deliberately omits `root_path`: the
+/// absolute filesystem location is manager-UI information, not something the
+/// MCP client needs.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct WorkspaceSummary {
+    pub id: String,
+    pub name: String,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub can_execute: bool,
+    pub execution_mode: lc_core::models::ExecutionMode,
+}
+
+fn summary_of(ws: &lc_core::models::Workspace) -> WorkspaceSummary {
+    WorkspaceSummary {
+        id: ws.id.clone(),
+        name: ws.name.clone(),
+        can_read: ws.can_read,
+        can_write: ws.can_write,
+        can_execute: ws.can_execute,
+        execution_mode: ws.execution_mode.clone(),
+    }
+}
+
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct EmptyArgs {}
 
@@ -195,11 +219,47 @@ impl WorkspaceServer {
     #[tool(
         description = "List the approved workspaces. Call this first to get valid workspace_id values for every other tool.",
         annotations(read_only_hint = true),
-        output_schema = schema_for_output::<Vec<lc_core::models::Workspace>>()
+        output_schema = schema_for_output::<Vec<WorkspaceSummary>>()
     )]
     fn list_workspaces(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        match lc_core::workspace_repo::list_workspaces(&self.core.db) {
-            Ok(ws) => ok_structured(&ws),
+        // The pause kill switch applies to metadata tools too; like every
+        // tool call this writes exactly one audit row (fail-closed).
+        let audited: Result<Vec<WorkspaceSummary>, CoreError> = (|| {
+            if self.core.pause.is_paused() {
+                return Err(CoreError::new(
+                    ErrorCode::AccessPaused,
+                    "access is paused by the user",
+                ));
+            }
+            let rows = lc_core::workspace_repo::list_workspaces(&self.core.db)?;
+            Ok(rows.iter().map(summary_of).collect())
+        })();
+        let unrestricted = self.core.unrestricted.get();
+        let detail = Some(serde_json::json!({
+            "count": audited.as_ref().map(|v| v.len()).unwrap_or(0),
+            "unrestricted": unrestricted,
+        }));
+        let decision = match &audited {
+            Ok(_) => "allow",
+            Err(e) if e.code == ErrorCode::AccessPaused => "deny",
+            Err(_) => "error",
+        };
+        if let Err(e) = lc_core::audit::record_simple(
+            &self.core.db,
+            "mcp",
+            Some("list_workspaces"),
+            None,
+            "list_workspaces",
+            decision,
+            audited.as_ref().err().map(|e| e.code.as_str()),
+            None,
+            detail,
+        ) {
+            // Fail-closed: an unrecordable call is a failed call.
+            return err_result(&e);
+        }
+        match audited {
+            Ok(summaries) => ok_structured(&summaries),
             Err(e) => err_result(&e),
         }
     }
@@ -396,6 +456,7 @@ impl WorkspaceServer {
                     args: a.args.clone(),
                     cwd: a.cwd.clone(),
                     timeout_ms: a.timeout_ms,
+                    unrestricted: self.core.unrestricted.get(),
                 };
                 let result =
                     crate::execution::runner::run_command(root, req).map_err(execution_error)?;
@@ -436,6 +497,13 @@ impl WorkspaceServer {
         let script_bytes = a.script.as_bytes();
         let script_sha256 = sha256_hex(script_bytes);
         let detail_ctx = serde_json::json!({ "script_bytes": script_bytes.len() });
+        // Unrestricted access skips the FullPowerShell workspace-mode gate.
+        let unrestricted = self.core.unrestricted.get();
+        let detail_ctx = if unrestricted {
+            serde_json::json!({ "script_bytes": script_bytes.len(), "unrestricted": true })
+        } else {
+            detail_ctx
+        };
         match lc_core::pipeline::run_tool_with_capability(
             &self.core,
             "run_powershell",
@@ -444,7 +512,7 @@ impl WorkspaceServer {
             None,
             Some(detail_ctx),
             |ws, root| {
-                if ws.execution_mode != lc_core::models::ExecutionMode::FullPowerShell {
+                if !unrestricted && ws.execution_mode != lc_core::models::ExecutionMode::FullPowerShell {
                     return Err(CoreError::new(
                         ErrorCode::PowershellDisabled,
                         format!("workspace '{}' does not allow full PowerShell", ws.name),

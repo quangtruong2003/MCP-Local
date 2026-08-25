@@ -157,6 +157,12 @@ pub struct AppSettings {
     /// Launch with the main window hidden (app lives in the tray).
     #[serde(default)]
     pub start_minimized_to_tray: bool,
+    /// Opt-in unrestricted MCP access: capability gates, the sensitive-file
+    /// deny list, the approved-command allowlist and the Full-PowerShell
+    /// workspace gate are relaxed for every workspace. Pause and audit stay
+    /// active. Default off; the UI gates enabling behind a typed confirm.
+    #[serde(default)]
+    pub unrestricted_access: bool,
 }
 
 fn default_tailscale_hostname() -> String {
@@ -195,6 +201,7 @@ impl Default for AppSettings {
             launch_on_startup: false,
             close_to_tray: true,
             start_minimized_to_tray: false,
+            unrestricted_access: false,
         }
     }
 }
@@ -349,6 +356,7 @@ mod tests {
         assert!(!loaded.launch_on_startup);
         assert!(loaded.close_to_tray);
         assert!(!loaded.start_minimized_to_tray);
+        assert!(!loaded.unrestricted_access);
     }
 
     /// A pre-v3 file (no theme/tray/startup keys) parses with the new
@@ -412,6 +420,7 @@ mod tests {
             launch_on_startup: true,
             close_to_tray: false,
             start_minimized_to_tray: true,
+            unrestricted_access: false,
         };
         save_app_settings(dir.path(), &settings).unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();

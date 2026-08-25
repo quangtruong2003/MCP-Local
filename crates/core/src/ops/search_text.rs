@@ -62,7 +62,7 @@ pub fn search_text(
             Ok(r) => r,
             Err(_) => continue,
         };
-        if core.sensitive.is_blocked(rel) {
+        if !core.unrestricted.get() && core.sensitive.is_blocked(rel) {
             continue;
         }
         if let Some(pf) = &prefix_filter {
@@ -132,6 +132,7 @@ mod tests {
             db,
             pause: Default::default(),
             sensitive: crate::sensitive::SensitiveMatcher::new(),
+            unrestricted: crate::pause::Flag::default(),
         };
         (core, dir, ws.id)
     }

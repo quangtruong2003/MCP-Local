@@ -150,6 +150,7 @@ mod tests {
             db,
             pause: Default::default(),
             sensitive: crate::sensitive::SensitiveMatcher::new(),
+            unrestricted: crate::pause::Flag::default(),
         };
         (core, dir, ws.id)
     }

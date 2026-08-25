@@ -374,6 +374,11 @@ pub fn update_app_settings(
     app.state::<crate::UiFlags>()
         .close_to_tray
         .store(settings.close_to_tray, Ordering::Relaxed);
+    // Unrestricted access is a runtime pipeline flag mirrored from settings.
+    app.state::<AppState>()
+        .core
+        .unrestricted
+        .set(settings.unrestricted_access);
     Ok(settings)
 }
 

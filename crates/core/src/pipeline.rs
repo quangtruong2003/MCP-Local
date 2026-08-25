@@ -101,11 +101,12 @@ impl RequiredCapability {
 /// Runs one tool call through the fail-closed pipeline and writes exactly one
 /// audit row:
 ///
-/// 1. Pause check (kill switch consulted first) -> `ACCESS_PAUSED` deny row,
-///    workspace_id NULL.
+/// 1. Pause check (kill switch consulted first, ALWAYS effective — even in
+///    unrestricted mode) -> `ACCESS_PAUSED` deny row, workspace_id NULL.
 /// 2. Workspace lookup -> `WORKSPACE_NOT_FOUND` error row, workspace_id NULL.
 /// 3. Capability check -> `WRITE_DISABLED` / `READ_DISABLED` deny rows with
-///    the workspace_id once known.
+///    the workspace_id once known. Skipped when unrestricted access is on
+///    (the audit row is then marked `"unrestricted": true`).
 /// 4. Closure `f` (confinement + op validation + execution):
 ///    Ok -> allow row; Err -> error row. All rows carry workspace_id.
 ///
@@ -118,6 +119,19 @@ pub fn run_tool_audited<T>(
     f: impl FnOnce(&Workspace, &Path) -> Result<Audited<T>, CoreError>,
 ) -> Result<T, CoreError> {
     run_tool_audited_with_context(core, tool, workspace_id, needs_write, None, None, f)
+}
+
+/// Marks caller/op audit detail with the unrestricted marker so every row
+/// produced while the flag is on is identifiable in the trail.
+fn mark_unrestricted(detail: Option<serde_json::Value>) -> Option<serde_json::Value> {
+    match detail {
+        Some(serde_json::Value::Object(mut map)) => {
+            map.insert("unrestricted".into(), serde_json::Value::Bool(true));
+            Some(serde_json::Value::Object(map))
+        }
+        Some(other) => Some(serde_json::json!({ "detail": other, "unrestricted": true })),
+        None => Some(serde_json::json!({ "unrestricted": true })),
+    }
 }
 
 /// Capability-explicit entry point for future execution tools: same
@@ -133,6 +147,13 @@ pub fn run_tool_with_capability<T>(
     detail: Option<serde_json::Value>,
     f: impl FnOnce(&Workspace, &Path) -> Result<Audited<T>, CoreError>,
 ) -> Result<T, CoreError> {
+    let unrestricted = core.unrestricted.get();
+    let detail = if unrestricted {
+        mark_unrestricted(detail)
+    } else {
+        detail
+    };
+
     let pre = (|| -> Result<(Workspace, PathBuf), CoreError> {
         if core.pause.is_paused() {
             return Err(CoreError::new(
@@ -141,7 +162,9 @@ pub fn run_tool_with_capability<T>(
             ));
         }
         let ws = get_workspace(&core.db, workspace_id)?;
-        capability.check(&ws)?;
+        if !unrestricted {
+            capability.check(&ws)?;
+        }
         let root = ws.root_path.clone();
         Ok((ws, root))
     })();
@@ -244,8 +267,44 @@ mod tests {
             db,
             pause: PauseFlag::default(),
             sensitive: SensitiveMatcher::new(),
+            unrestricted: crate::pause::Flag::default(),
         };
         (core, dir, ws.id)
+    }
+
+    #[test]
+    fn unrestricted_bypasses_capability_but_still_audits() {
+        let (core, _d, ws_id) = setup();
+        // Write is disabled for the workspace; unrestricted must let it pass.
+        core.unrestricted.set(true);
+        let v = run_tool_audited(&core, "apply_patch", &ws_id, true, |_ws, _root| {
+            Ok(Audited::new("wrote"))
+        })
+        .unwrap();
+        assert_eq!(v, "wrote");
+        let events = crate::audit::list_recent(&core.db, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].decision, "allow");
+        assert_eq!(
+            events[0].detail.as_ref().unwrap()["unrestricted"],
+            serde_json::Value::Bool(true)
+        );
+    }
+
+    #[test]
+    fn pause_still_wins_in_unrestricted_mode() {
+        let (core, _d, ws_id) = setup();
+        core.unrestricted.set(true);
+        core.pause.set(true);
+        let e = run_tool_audited(
+            &core,
+            "read_file",
+            &ws_id,
+            false,
+            |_ws, _r| -> Result<Audited<()>, CoreError> { panic!("paused must win") },
+        )
+        .unwrap_err();
+        assert_eq!(e.code, ErrorCode::AccessPaused);
     }
 
     #[test]

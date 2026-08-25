@@ -10,16 +10,18 @@ import { VIEW_META, type ViewId } from "@/lib/types";
 import { Brand, NavItems, TunnelFooter } from "./sidebar";
 import { PageHeader } from "./page-header";
 import { PausedBanner } from "./paused-banner";
+import { UnrestrictedBanner } from "./unrestricted-banner";
 
 interface Props {
   page: ViewId;
   onNavigate: (p: ViewId) => void;
   ready: boolean;
   paused: boolean;
+  unrestricted: boolean;
   children: ReactNode;
 }
 
-export function AppShell({ page, onNavigate, ready, paused, children }: Props) {
+export function AppShell({ page, onNavigate, ready, paused, unrestricted, children }: Props) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const meta = VIEW_META[page];
   const navigate = (p: ViewId) => {
@@ -64,6 +66,7 @@ export function AppShell({ page, onNavigate, ready, paused, children }: Props) {
           </div>
 
           <PageHeader title={meta.title} subtitle={meta.subtitle} />
+          <UnrestrictedBanner active={unrestricted} />
           <PausedBanner paused={paused} />
           <main className="flex-1 overflow-y-auto">
             <div className="mx-auto w-full max-w-5xl px-6 py-6 lg:px-8">{children}</div>

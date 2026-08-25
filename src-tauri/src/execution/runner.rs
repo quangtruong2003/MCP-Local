@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use crate::process_job::JobHandle;
 
 use super::policy::{
-    resolve_cwd, resolve_program, resolve_timeout, ExecutionResult, PolicyError, RunCommandRequest,
-    RunPowerShellRequest,
+    resolve_cwd, resolve_program_with, resolve_timeout, ExecutionResult, PolicyError,
+    RunCommandRequest, RunPowerShellRequest,
 };
 use super::resolver::{merged_path_string, resolve_executable};
 
@@ -194,7 +194,7 @@ pub fn run_command(
     workspace_root: &Path,
     req: RunCommandRequest,
 ) -> Result<ExecutionResult, PolicyError> {
-    let program = resolve_program(&req.program)?;
+    let program = resolve_program_with(&req.program, req.unrestricted)?;
     let cwd = resolve_cwd(workspace_root, req.cwd.as_deref())?;
     let timeout = Duration::from_millis(resolve_timeout(req.timeout_ms)?);
 
@@ -263,6 +263,7 @@ mod tests {
                 args: vec![],
                 cwd: None,
                 timeout_ms: Some(5_000),
+                unrestricted: false,
             },
         );
         // cmd.exe is not approved; pin that here too.
@@ -275,6 +276,7 @@ mod tests {
                 args: vec!["--version".to_string()],
                 cwd: None,
                 timeout_ms: Some(15_000),
+                unrestricted: false,
             },
         )
         .unwrap();
@@ -298,6 +300,7 @@ mod tests {
                 args: vec!["--no-pager".to_string(), "log".to_string()],
                 cwd: None,
                 timeout_ms: Some(15_000),
+                unrestricted: false,
             },
         )
         .unwrap();
@@ -324,6 +327,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec!["-e".to_string(), script.to_string()],
                 cwd: None,
                 timeout_ms: Some(60_000),
+                unrestricted: false,
             },
         )
         .unwrap();
@@ -348,6 +352,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec!["-e".to_string(), "setTimeout(()=>{}, 60000)".to_string()],
                 cwd: None,
                 timeout_ms: Some(1_000), // injected stand-in for the default
+                unrestricted: false,
             },
         )
         .unwrap();
@@ -367,6 +372,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec!["-e".to_string(), "setTimeout(()=>{}, 60000)".to_string()],
                 cwd: None,
                 timeout_ms: Some(1_500),
+                unrestricted: false,
             },
         )
         .unwrap();
@@ -409,6 +415,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 ],
                 cwd: None,
                 timeout_ms: Some(1_500),
+                unrestricted: false,
             },
         )
         .unwrap();
@@ -452,6 +459,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec![],
                 cwd: None,
                 timeout_ms: Some(5_000),
+                unrestricted: false,
             },
         );
         assert_eq!(err.unwrap_err().code, "COMMAND_NOT_ALLOWED");
@@ -471,6 +479,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec!["--version".to_string()],
                 cwd: None,
                 timeout_ms: Some(60_000),
+                unrestricted: false,
             },
         )
         .expect("cargo must resolve via registry-fresh PATH");
@@ -484,6 +493,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec!["--version".to_string()],
                 cwd: None,
                 timeout_ms: Some(60_000),
+                unrestricted: false,
             },
         )
         .expect("npm.cmd must resolve via PATHEXT");
@@ -506,6 +516,7 @@ for (let i = 0; i < 1500; i++) { process.stdout.write(chunk); process.stderr.wri
                 args: vec![],
                 cwd: None,
                 timeout_ms: Some(5_000),
+                unrestricted: false,
             },
         );
         // rustc IS installed here (cargo toolchain), so only assert on the

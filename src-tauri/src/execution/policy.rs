@@ -69,6 +69,9 @@ pub struct RunCommandRequest {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub timeout_ms: Option<u64>,
+    /// Unrestricted access mode: skips the approved-command allowlist (any
+    /// resolvable basename may run). Path-form programs stay rejected.
+    pub unrestricted: bool,
 }
 
 #[derive(Debug)]
@@ -96,6 +99,16 @@ pub struct ExecutionResult {
 /// Returns the resolved program name to spawn (with `.exe` stripped so
 /// Windows PATH lookup behaves as for the bare name).
 pub fn resolve_program(program: &str) -> Result<String, PolicyError> {
+    resolve_program_with(program, false)
+}
+
+/// `allow_any` (unrestricted access mode) skips the approved-list check but
+/// keeps rejecting path-form programs — that is a quoting/injection surface,
+/// not an access gate.
+pub fn resolve_program_with(
+    program: &str,
+    allow_any: bool,
+) -> Result<String, PolicyError> {
     if program.is_empty() {
         return Err(PolicyError::command_not_allowed(
             "program must not be empty",
@@ -112,7 +125,7 @@ pub fn resolve_program(program: &str) -> Result<String, PolicyError> {
     let lower = program.to_ascii_lowercase();
     let stem = lower.strip_suffix(".exe").unwrap_or(&lower);
 
-    if !DEFAULT_APPROVED_COMMANDS.contains(&stem) {
+    if !allow_any && !DEFAULT_APPROVED_COMMANDS.contains(&stem) {
         return Err(PolicyError::command_not_allowed(format!(
             "command '{stem}' is not on the approved list"
         )));

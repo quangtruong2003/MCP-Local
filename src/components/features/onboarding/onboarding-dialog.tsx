@@ -123,14 +123,15 @@ export default function OnboardingFlow({
             {step === "welcome" ? (
               <div className="flex flex-col gap-3 text-sm">
                 <p className="text-muted-foreground">
-                  This app gives ChatGPT safe access to folders you approve, over your own private
-                  Tailscale network. Setup takes about two minutes.
+                  This app gives ChatGPT safe access to folders you approve, published over
+                  Tailscale Funnel and protected by a secret capability URL. Setup takes about two
+                  minutes.
                 </p>
                 <ul className="flex flex-col gap-1.5">
                   {[
                     "Approve which folders the assistant may reach",
                     "Sign in to Tailscale once",
-                    "Get a private web address only your devices can reach",
+                    "Get a secret capability URL for ChatGPT — keep it private",
                   ].map((point) => (
                     <li key={point} className="flex items-start gap-2">
                       <CheckCircle2 aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-success" />
@@ -282,8 +283,8 @@ function LiveStage({ connection, starting, onStart, onFinish, reportError }: Liv
             Sign in to Tailscale
           </DialogTitle>
           <DialogDescription aria-live="polite">
-            One more step: sign in to your Tailscale account so this app can join your private
-            network. A browser window will open at login.tailscale.com.
+            One more step: sign in to your Tailscale account so this app can publish its endpoint.
+            A browser window will open at login.tailscale.com.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-wrap items-center gap-2">
@@ -364,12 +365,14 @@ function LiveStage({ connection, starting, onStart, onFinish, reportError }: Liv
           You are connected
         </DialogTitle>
         <DialogDescription aria-live="polite">
-          Copy this private web address into ChatGPT to finish setup.
+          Copy this secret capability URL into ChatGPT to finish setup. The URL is public on the
+          internet — anyone who has it can call this MCP connection, so share it only with your own
+          ChatGPT.
         </DialogDescription>
       </DialogHeader>
       <div className="flex flex-col gap-1.5">
         <label htmlFor="onboarding-endpoint" className="text-[13px] font-medium">
-          Public MCP endpoint
+          Public MCP endpoint (secret capability URL)
         </label>
         <div className="flex items-center gap-2">
           <code

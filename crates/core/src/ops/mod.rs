@@ -53,7 +53,8 @@ pub fn vet_path(
             )
         })?
         .to_path_buf();
-    if core.sensitive.is_blocked(&rel_path) {
+    // Unrestricted access relaxes the deny list (audit rows still mark it).
+    if !core.unrestricted.get() && core.sensitive.is_blocked(&rel_path) {
         return Err(CoreError::new(
             ErrorCode::SensitiveFileBlocked,
             format!("{rel} matches the sensitive-file deny list"),
