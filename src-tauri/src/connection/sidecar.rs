@@ -10,8 +10,10 @@ use tokio::sync::mpsc;
 use crate::process_job::JobHandle;
 
 /// Target filename of the Go funnel sidecar, mirroring the tunnel-client
-/// dev/bundled fallback convention in `tunnel.rs`.
+/// dev/bundled fallback convention in `tunnel.rs`. Tauri strips the target
+/// triple from externalBin when bundling, so also accept the bare name.
 const SIDECAR_FILE: &str = "tailscale-funnel-sidecar-x86_64-pc-windows-msvc.exe";
+const SIDECAR_FILE_BUNDLED: &str = "tailscale-funnel-sidecar.exe";
 
 /// Cap on retained stderr diagnostics lines.
 const DIAGNOSTICS_CAP: usize = 200;
@@ -122,6 +124,11 @@ fn sidecar_path() -> Result<PathBuf, SidecarSpawnError> {
         .and_then(|p| p.parent().map(Path::to_path_buf))
     {
         let candidate = exe_dir.join(SIDECAR_FILE);
+        if candidate.is_file() {
+            return Ok(candidate);
+        }
+        // Bundled installs: Tauri copies externalBin without the triple.
+        let candidate = exe_dir.join(SIDECAR_FILE_BUNDLED);
         if candidate.is_file() {
             return Ok(candidate);
         }
