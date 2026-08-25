@@ -25,7 +25,10 @@ fn replacing_only_runtime_key_preserves_admin_key() {
     let store = SecretStore::for_test_file(dir.path().join("secure-store.test"));
     store.save(Some("runtime-1"), Some("admin-1")).unwrap();
     store.save(Some("runtime-2"), None).unwrap();
-    assert_eq!(store.load_runtime_key().unwrap().as_deref(), Some("runtime-2"));
+    assert_eq!(
+        store.load_runtime_key().unwrap().as_deref(),
+        Some("runtime-2")
+    );
     assert_eq!(store.load_admin_key().unwrap().as_deref(), Some("admin-1"));
 }
 
@@ -35,6 +38,9 @@ fn blank_replacements_are_ignored() {
     let store = SecretStore::for_test_file(dir.path().join("secure-store.test"));
     store.save(Some("runtime-1"), Some("admin-1")).unwrap();
     store.save(Some("  "), Some("")).unwrap();
-    assert_eq!(store.load_runtime_key().unwrap().as_deref(), Some("runtime-1"));
+    assert_eq!(
+        store.load_runtime_key().unwrap().as_deref(),
+        Some("runtime-1")
+    );
     assert_eq!(store.load_admin_key().unwrap().as_deref(), Some("admin-1"));
 }

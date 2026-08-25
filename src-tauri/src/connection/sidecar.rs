@@ -22,17 +22,12 @@ const REDACTED: &str = "[REDACTED]";
 const LOGIN_URL_PREFIX: &str = "https://login.tailscale.com/a/";
 
 #[derive(Debug)]
-pub(crate) struct SidecarSpawnError {
+pub struct SidecarSpawnError {
     /// Stable machine-readable code, e.g. `SIDECAR_NOT_FOUND`.
-    #[allow(dead_code)] // read by Task 10's ConnectionError conversion
     pub code: String,
     /// Human-safe message; never contains the capability token.
-    #[allow(dead_code)] // read by Task 10's ConnectionError conversion
     pub message: String,
 }
-
-// TODO(Task 10): convert SidecarSpawnError into ConnectionError once that
-// type exists; codes SIDECAR_NOT_FOUND / SIDECAR_SPAWN_FAILED map 1:1.
 
 /// Configuration for spawning the funnel sidecar. Deliberately not `Debug`:
 /// it carries the capability token.
@@ -234,8 +229,21 @@ impl Drop for SidecarProcess {
 pub fn spawn_sidecar(
     cfg: SidecarConfig,
 ) -> Result<(SidecarProcess, mpsc::UnboundedReceiver<SidecarEvent>), SidecarSpawnError> {
-    let path = sidecar_path()?;
-    let mut cmd = std::process::Command::new(path);
+    spawn_sidecar_exe(cfg, sidecar_path()?, Vec::new())
+}
+
+/// Like [`spawn_sidecar`] but launches an explicit program with additional
+/// trailing arguments instead of resolving the bundled sidecar.
+/// Integration-test hook so tests can drive the real spawn/parse pipeline
+/// with a fake fixture binary.
+// Same private-interface caveat as [`spawn_sidecar`].
+#[allow(private_interfaces)]
+pub fn spawn_sidecar_exe(
+    cfg: SidecarConfig,
+    program: PathBuf,
+    extra_args: Vec<String>,
+) -> Result<(SidecarProcess, mpsc::UnboundedReceiver<SidecarEvent>), SidecarSpawnError> {
+    let mut cmd = std::process::Command::new(program);
     cmd.args([
         "--target",
         &format!("http://127.0.0.1:{}", cfg.local_port),
@@ -244,6 +252,7 @@ pub fn spawn_sidecar(
         "--hostname",
         &cfg.hostname,
     ]);
+    cmd.args(&extra_args);
     cmd.env("MCP_CAPABILITY_TOKEN", &cfg.capability_token);
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
