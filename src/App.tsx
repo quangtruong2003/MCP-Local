@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Toaster } from "sonner";
-import OnboardingFlow from "./components/OnboardingFlow";
-import EmptyState from "./components/EmptyState";
+import OnboardingFlow from "./components/features/onboarding/onboarding-dialog";
+import { EmptyState } from "./components/shared/empty-state";
 import { AppShell } from "./components/layout/app-shell";
 import { ThemeProvider, useTheme } from "./hooks/use-theme";
 import { useToast } from "./hooks/use-toast";
