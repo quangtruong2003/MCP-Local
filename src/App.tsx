@@ -10,7 +10,7 @@ import { useConnection } from "./hooks/use-connection";
 import { useWorkspaces } from "./hooks/use-workspaces";
 import ActivityPage from "./pages/ActivityPage";
 import DashboardPage from "./pages/dashboard-page";
-import SecurityPage from "./pages/SecurityPage";
+import SecurityPage from "./pages/security-page";
 import SettingsPage from "./pages/SettingsPage";
 import WorkspacesPage from "./pages/WorkspacesPage";
 import { api, parseErrorMessage } from "./api";
