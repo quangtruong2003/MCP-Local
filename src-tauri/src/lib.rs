@@ -1,4 +1,5 @@
 mod agent_skills;
+pub mod browser;
 mod commands;
 pub mod connection;
 mod execution;
