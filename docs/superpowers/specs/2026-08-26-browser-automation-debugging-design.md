@@ -254,6 +254,8 @@ Read-only. Returns:
 - active page id, URL, title, and viewport when available;
 - sidecar/browser version metadata safe for diagnostics.
 
+`browser_get_status` is the only `browser_*` tool that remains callable while Browser Automation is OFF; it returns configuration/disabled state only and never starts or reads a page. This lets the agent report the exact user-controlled blocker without granting browser access.
+
 #### `browser_open`
 
 Ensures the configured browser is running. Optional initial URL. Returns session/page status.
@@ -363,7 +365,7 @@ Applies a Playwright device preset or explicit emulation properties where suppor
 - orientation;
 - user agent.
 
-Device emulation must make its effective state queryable from `browser_get_status` or the tool result.
+Device emulation must make its effective state queryable from `browser_get_status` or the tool result. Because mobile/touch/user-agent properties are browser-context launch settings in Playwright, applying a device preset may intentionally restart the automation context using the same dedicated persistent profile. When that happens the tool returns a new `session_id`, does not replay prior interactions, and leaves the agent responsible for navigating/validating the new session.
 
 #### `browser_screenshot`
 
@@ -808,7 +810,7 @@ A new release build increments the application version first and produces a vers
 ## Security invariants
 
 1. Pause always wins.
-2. Browser Automation OFF blocks all `browser_*` actions regardless of unrestricted filesystem/execution mode.
+2. Browser Automation OFF blocks every browser operation that can start, inspect, or interact with a page regardless of unrestricted filesystem/execution mode. The sole exception is read-only `browser_get_status`, which may report that the capability is disabled without launching or reading browser state.
 3. Browser Automation ON grants the full browser feature set described here; there are no hidden per-action confirmations.
 4. Browser Automation does not grant unrestricted filesystem access.
 5. OS Screen Capture permission is independent from browser-rendered screenshots.
