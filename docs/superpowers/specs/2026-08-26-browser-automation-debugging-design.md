@@ -70,7 +70,7 @@ ChatGPT / MCP client
 | - workspace bridge checks     |
 +---------------+---------------+
                 |
-      loopback private protocol
+      private parent-child MCP stdio
                 |
                 v
 +-------------------------------+
@@ -91,7 +91,7 @@ ChatGPT / MCP client
 +-------------------------------+
 ```
 
-The browser sidecar is an internal implementation detail. It does not expose a public MCP endpoint and does not receive the Tailscale capability URL. It binds loopback/private IPC only, is launched by the desktop process, and is placed in a Windows Job Object so the process tree cannot outlive Local Workspaces.
+The browser sidecar is an internal implementation detail. It does not expose any listening MCP endpoint and does not receive the Tailscale capability URL. `BrowserManager` launches it as a child process and speaks MCP over the child's piped stdin/stdout using rmcp's child-process transport. The child is placed in a Windows Job Object so the sidecar and browser process tree cannot outlive Local Workspaces.
 
 ## Component boundaries
 
@@ -128,7 +128,7 @@ Create a dedicated browser automation sidecar, separate from the existing Tailsc
 - tracing and Chromium CDP operations;
 - visible DevTools behavior when supported.
 
-The first implementation uses the official Playwright MCP/runtime as the internal browser engine behind a Local Workspaces adapter/proxy. Local Workspaces must not blindly forward the upstream tool schemas: the Rust MCP layer exposes the stable Local Workspaces tool contract defined below, while the internal sidecar translates that contract to Playwright MCP/runtime operations.
+The first implementation uses a pinned official Playwright MCP/runtime as the internal browser engine behind a Local Workspaces adapter/proxy over private child-process stdio. Local Workspaces must not blindly forward the upstream tool schemas: the Rust MCP layer exposes the stable Local Workspaces tool contract defined below and calls only an allowlisted upstream subset. In particular, the upstream `browser_run_code_unsafe` tool is never exposed or invoked with model-supplied code because it executes in the Playwright server process rather than the page sandbox. User-facing `browser_evaluate` is limited to JavaScript evaluated in the web page context.
 
 ### Browser runtime packaging
 
@@ -200,7 +200,7 @@ A future safe settings tool may be designed separately. The browser feature itse
 Use a Local Workspaces-owned persistent profile such as:
 
 ```text
-<app-data>/browser/profiles/default/
+<app-data>/browser/profiles/<browser-engine>/
 ```
 
 This profile stores browser automation cookies, localStorage, IndexedDB, and other browser session state. It is separate from all personal browser profiles.
@@ -209,8 +209,9 @@ Requirements:
 
 - never point Playwright at Chrome/Edge/Firefox default user-data directories;
 - never copy personal browser cookies or credentials into the automation profile automatically;
-- one persistent profile instance may be open at a time;
-- normal application restart preserves this profile so login can persist;
+- each browser engine/channel gets its own dedicated profile directory so Chromium-family and Firefox profile formats are never mixed;
+- only one persistent automation profile instance may be open at a time;
+- normal application restart preserves the selected engine's profile so login can persist;
 - deleting/resetting the automation profile is a desktop UI operation, not an MCP action in the first release.
 
 ### Browser session
@@ -446,7 +447,7 @@ Trace output may contain DOM snapshots, screenshots, console, network metadata, 
 
 #### `browser_devtools`
 
-Visible Debug mode only. On Chromium/Chrome/Edge, opens or focuses the real developer tools UI when supported by the selected launch mode.
+Visible Debug mode only. On Chromium/Chrome/Edge, opens or focuses the real developer tools UI when supported by the selected launch mode. This is a Local Workspaces launch/configuration feature rather than an assumption that upstream Playwright MCP exposes a real-DevTools-window tool; current Playwright launches use Chromium arguments such as `--auto-open-devtools-for-tabs` when compatible.
 
 In Background mode it returns `BROWSER_FEATURE_UNSUPPORTED_IN_MODE` with guidance to use `browser_console`, `browser_network`, `browser_dom`, `browser_evaluate`, `browser_performance`, and `browser_trace` instead.
 
@@ -587,7 +588,8 @@ Still enforce these invariants:
 
 - Pause blocks all browser requests/actions;
 - `file://` navigation is denied in the initial release;
-- the browser sidecar cannot launch arbitrary OS programs;
+- the upstream MCP child is private stdio-only and Local Workspaces never exposes or calls its process-level unsafe-code tool with model-supplied code;
+- browser page JavaScript runs only through page-context evaluation and does not gain Node/process/filesystem primitives;
 - downloads remain in browser sandbox until explicitly exported;
 - upload paths are validated by Rust before the browser receives them;
 - no browser operation receives Local Workspaces/Tailscale capability secrets unless the user/web application itself supplies them through normal page interaction.
