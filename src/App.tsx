@@ -34,14 +34,13 @@ export default function App() {
     [toast],
   );
 
-  // Event-driven audit refresh (plan Task 19 Step 5): called after mutations
-  // and connection events; no polling.
+  // The audit hook loads history and subscribes to persisted audit events.
+  // Explicit refreshes remain for recovery and existing mutation flows;
+  // connection-status events no longer invalidate audit state.
   const { auditEvents, refreshAudit } = useAudit(reportError);
   const { workspaces, reloadWorkspaces } = useWorkspaces(reportError);
-  const { connection, refreshConnection, setConnection } = useConnection(
-    reportError,
-    () => void refreshAudit(),
-  );
+  const { connection, refreshConnection, setConnection } =
+    useConnection(reportError);
 
   // Settings load decides whether onboarding runs at all.
   useEffect(() => {
@@ -63,14 +62,13 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Initial data load: workspaces, audit trail and server state.
+  // Initial shell load; useAudit owns audit history initialization.
   useEffect(() => {
     let disposed = false;
     void (async () => {
       try {
-        const [, , status] = await Promise.all([
+        const [, status] = await Promise.all([
           reloadWorkspaces(),
-          refreshAudit(),
           api.serverStatus(),
         ]);
         if (!disposed) setServer(status);
@@ -83,7 +81,7 @@ export default function App() {
     return () => {
       disposed = true;
     };
-  }, [reportError, reloadWorkspaces, refreshAudit]);
+  }, [reportError, reloadWorkspaces]);
 
   // Ready only when the funnel connection is fully online.
   const connectionReady = connection?.state.state === "online";

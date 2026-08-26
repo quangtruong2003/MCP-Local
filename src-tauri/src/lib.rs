@@ -48,6 +48,14 @@ pub fn run() {
             let core = Arc::new(
                 lc_core::CoreServices::open(&dir.join("manager.db")).map_err(|e| e.to_string())?,
             );
+            let audit_app = app.handle().clone();
+            core.db
+                .set_audit_listener(Arc::new(move |event: &lc_core::models::AuditEvent| {
+                    use tauri::Emitter;
+                    if let Err(error) = audit_app.emit("audit-recorded", event) {
+                        eprintln!("audit event emit failed: {error}");
+                    }
+                }));
             // One-time migration from the MVP plaintext tunnel_api_key. Only
             // rewrite settings.json after the OS credential write succeeds.
             let loaded = settings::load(&dir).unwrap_or_else(|e| {
@@ -82,8 +90,8 @@ pub fn run() {
             ));
 
             let resource_runtime = app.path().resource_dir()?.join("browser-runtime");
-            let development_runtime = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("browser-runtime");
+            let development_runtime =
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("browser-runtime");
             let browser_runtime = if resource_runtime.join("runtime-manifest.json").is_file() {
                 resource_runtime
             } else {

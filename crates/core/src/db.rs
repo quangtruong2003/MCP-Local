@@ -1,8 +1,10 @@
 //! SQLite persistence: connection management, WAL setup, and schema migrations.
 
-use crate::error::CoreError;
+use crate::{error::CoreError, models::AuditEvent};
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+pub type AuditListener = Arc<dyn Fn(&AuditEvent) + Send + Sync>;
 
 /// Handle to the shared SQLite database.
 ///
@@ -10,6 +12,7 @@ use std::sync::Mutex;
 /// and Tauri command handlers share one `Database` instance across threads.
 pub struct Database {
     conn: Mutex<rusqlite::Connection>,
+    audit_listener: Mutex<Option<AuditListener>>,
 }
 
 const MIGRATIONS: &str = r#"
@@ -90,7 +93,19 @@ impl Database {
         migrate_add_columns(&conn)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            audit_listener: Mutex::new(None),
         })
+    }
+
+    pub fn set_audit_listener(&self, listener: AuditListener) {
+        *self.audit_listener.lock().unwrap() = Some(listener);
+    }
+
+    pub(crate) fn notify_audit_listener(&self, event: &AuditEvent) {
+        let listener = self.audit_listener.lock().unwrap().clone();
+        if let Some(listener) = listener {
+            listener(event);
+        }
     }
 
     /// Runs `f` with exclusive access to the underlying connection.

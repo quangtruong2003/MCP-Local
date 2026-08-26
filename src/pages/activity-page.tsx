@@ -6,10 +6,9 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { EmptyState } from "@/components/shared/empty-state";
 import { cn } from "@/lib/utils";
+import { MAX_EVENTS } from "../hooks/use-audit";
 import type { AuditEvent } from "../api";
 import type { Workspace } from "@/lib/types";
-
-const MAX_EVENTS = 100;
 
 type FilterTab = "all" | "allowed" | "blocked" | "errors";
 
@@ -20,7 +19,7 @@ const FILTER_TABS: ReadonlyArray<{ id: FilterTab; label: string }> = [
   { id: "errors", label: "Errors" },
 ];
 
-function matchesFilter(event: AuditEvent, tab: FilterTab): boolean {
+export function matchesFilter(event: AuditEvent, tab: FilterTab): boolean {
   switch (tab) {
     case "all":
       return true;
@@ -28,8 +27,10 @@ function matchesFilter(event: AuditEvent, tab: FilterTab): boolean {
       return event.decision === "allow";
     case "blocked":
       return event.decision === "deny";
+    // Only decision "error" is an error; deny rows may carry an error_code
+    // without being errors themselves.
     case "errors":
-      return event.error_code !== null && event.error_code !== undefined;
+      return event.decision === "error";
   }
 }
 
