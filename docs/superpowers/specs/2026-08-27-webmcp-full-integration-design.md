@@ -1,7 +1,7 @@
 # Full WebMCP Integration Design — V0 to V2
 
 **Date:** 2026-08-27
-**Status:** Approved direction in chat; design specification pending user review
+**Status:** Approved in chat; self-reviewed for implementation planning on 2026-08-27
 **Project:** Local Workspaces / MCP-GPTWeb
 **Scope:** Full browser-side WebMCP consumption by a remote MCP agent, from compatibility bridge (V0) through native event-driven parity and dynamic MCP projection (V2)
 
@@ -133,6 +133,8 @@ Current imperative WebMCP capabilities include:
 - execution callback may be asynchronous
 - execution receives an abort/cancellation signal
 - discovery using `document.modelContext.getTools()`
+- current Chrome discovery objects expose `inputSchema` as a JSON string rather than an already-parsed object; Local Workspaces must parse it with bounded JSON handling before canonical normalization
+- discovery objects may also carry browser/page references such as `window`; Local Workspaces may use those only inside the page-context bridge and must never serialize or expose raw `Window` references through MCP
 - same-origin discovery by default
 - cross-origin discovery with explicit `fromOrigins`
 - explicit provider-side cross-origin exposure with `exposedTo`
@@ -809,9 +811,10 @@ V1 must support user/agent cancellation end-to-end.
 Page-context implementation:
 
 - create an `AbortController` owned by a fixed WebMCP bridge runtime
-- pass the signal to `executeTool`
+- call the current API shape `document.modelContext.executeTool(tool, inputJson, { signal: controller.signal })`
 - retain the controller under an opaque local invocation id
 - abort on `browser_webmcp_invocation(action=cancel)`
+- map the resulting abort/cancellation outcome into canonical Local Workspaces invocation state without claiming rollback
 
 Native/CDP implementation when available:
 
@@ -923,6 +926,8 @@ Local Workspaces must:
 - cap nesting/size/property count to prevent resource abuse
 - preserve unknown standard keywords where safe
 - validate agent inputs locally before invocation where possible
+- never resolve untrusted external `$ref` values through HTTP, filesystem, or other ambient-resource retrievers; only in-memory/local schema references such as `$defs` are permitted
+- configure any JSON Schema validator with network/file resolution disabled by default
 - never assume the browser guarantees complete native schema validation
 
 Validation failures return a bounded structured error showing field/path information but not arbitrary webpage exception stacks.
@@ -1160,7 +1165,9 @@ The mapping is session-scoped and returned by `browser_webmcp_list_tools`.
 
 ### 9.8 MCP tool-list change notifications
 
-When rmcp and the connected client support dynamic tool-list notifications:
+The repository currently resolves `rmcp` to 3.1.4. That release already provides dynamic `ToolRouter` mutation (`add_route` / `remove_route`), peer notification binding, and `notifications/tools/list_changed`. V2 therefore treats server-side dynamic projection as an implementable requirement, not a speculative dependency. The remaining compatibility gate is whether the connected MCP client negotiated acceptance of tool-list-change notifications.
+
+When the connected client accepts dynamic tool-list notifications:
 
 ```text
 WebMCP.toolsAdded / toolsRemoved
@@ -1169,7 +1176,7 @@ WebMCP.toolsAdded / toolsRemoved
   -> MCP tools/list_changed notification
 ```
 
-If the client does not support dynamic notification:
+If the client does not accept dynamic notification:
 
 - keep gateway tools functional;
 - projected tool availability refreshes on the next MCP tool-list request/reconnect if supported;
