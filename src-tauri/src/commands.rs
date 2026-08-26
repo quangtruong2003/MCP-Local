@@ -210,12 +210,15 @@ pub fn remove_workspace(state: State<'_, AppState>, id: String) -> Result<(), St
 }
 
 #[tauri::command]
-pub fn set_paused(
+pub async fn set_paused(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     paused: bool,
 ) -> Result<(), String> {
     state.core.pause.set(paused);
+    if let Err(e) = state.browser.on_pause_changed(paused).await {
+        eprintln!("browser shutdown on Pause failed: {e}");
+    }
     audit_ui(
         &state.core.db,
         None,
@@ -365,7 +368,7 @@ pub fn get_app_settings(app: tauri::AppHandle) -> Result<settings::AppSettings, 
 /// that follows these settings is synced (launch-at-login registration,
 /// close-to-tray flag).
 #[tauri::command]
-pub fn update_app_settings(
+pub async fn update_app_settings(
     app: tauri::AppHandle,
     settings: settings::AppSettings,
 ) -> Result<settings::AppSettings, String> {
@@ -375,6 +378,11 @@ pub fn update_app_settings(
         .agent_settings
         .save_full(&settings)
         .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e.message))?;
+    state
+        .browser
+        .apply_settings(crate::browser::types::BrowserRuntimeSettings::from(&settings))
+        .await
+        .map_err(err_string)?;
 
     sync_launch_on_startup(&app, settings.launch_on_startup)?;
     use std::sync::atomic::Ordering;

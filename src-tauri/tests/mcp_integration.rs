@@ -8,8 +8,15 @@ use rmcp::{
 };
 use std::{io::Cursor, sync::Arc};
 
-use local_workspace_mcp_manager::screen_capture::{
-    CaptureGeometry, CaptureTarget, CaptureTargetKind, CapturedImage, ScreenCaptureProvider,
+use local_workspace_mcp_manager::{
+    browser::{
+        driver::{BrowserDriver, BrowserDriverStatus},
+        manager::BrowserManager,
+        types::BrowserLaunchSpec,
+    },
+    screen_capture::{
+        CaptureGeometry, CaptureTarget, CaptureTargetKind, CapturedImage, ScreenCaptureProvider,
+    },
 };
 
 type Core = Arc<lc_core::CoreServices>;
@@ -91,6 +98,45 @@ impl ScreenCaptureProvider for FakeCaptureProvider {
     }
 }
 
+#[derive(Debug, Default)]
+struct FakeBrowserDriver;
+
+#[async_trait::async_trait]
+impl BrowserDriver for FakeBrowserDriver {
+    async fn start(
+        &self,
+        spec: BrowserLaunchSpec,
+    ) -> Result<BrowserDriverStatus, lc_core::error::CoreError> {
+        Ok(BrowserDriverStatus {
+            running: true,
+            actual_engine: spec.engine,
+            sidecar_version: Some("test".into()),
+            browser_version: Some("test".into()),
+            child_pid: None,
+        })
+    }
+
+    async fn stop(&self) -> Result<(), lc_core::error::CoreError> {
+        Ok(())
+    }
+
+    async fn call(
+        &self,
+        _tool: &'static str,
+        _arguments: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<rmcp::model::CallToolResult, lc_core::error::CoreError> {
+        Ok(rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("ok"),
+        ]))
+    }
+
+    async fn chromium_performance_metrics(
+        &self,
+    ) -> Result<serde_json::Value, lc_core::error::CoreError> {
+        Ok(serde_json::json!({}))
+    }
+}
+
 /// Internal transport used only by this in-process MCP server test suite.
 /// Production clients never connect to this URL directly: Tailscale Funnel
 /// terminates public HTTPS and reverse-proxies the protected capability path
@@ -139,6 +185,16 @@ async fn spawn_server_with_settings(
         ),
     );
     let agent_settings_for_server = agent_settings.clone();
+    let browser = Arc::new(
+        BrowserManager::new(
+            core.clone(),
+            dir.path().to_path_buf(),
+            &settings,
+            Arc::new(FakeBrowserDriver),
+        )
+        .unwrap(),
+    );
+    let browser_for_server = browser.clone();
     let capture_provider: Arc<dyn ScreenCaptureProvider> = Arc::new(FakeCaptureProvider);
     let capture_provider_for_server = capture_provider.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
@@ -147,6 +203,7 @@ async fn spawn_server_with_settings(
                 core_for_server.clone(),
                 agent_policy_for_server.clone(),
                 agent_settings_for_server.clone(),
+                browser_for_server.clone(),
                 capture_provider_for_server.clone(),
             ))
         },

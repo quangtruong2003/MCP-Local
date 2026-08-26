@@ -19,6 +19,7 @@ pub struct AppState {
     pub port: u16,
     pub agent_policy: Arc<settings::AgentPolicyState>,
     pub agent_settings: Arc<settings::AgentSettingsController>,
+    pub browser: Arc<browser::manager::BrowserManager>,
 }
 
 /// Runtime UI behavior flags mirrored from [`settings::AppSettings`] so the
@@ -47,24 +48,6 @@ pub fn run() {
             let core = Arc::new(
                 lc_core::CoreServices::open(&dir.join("manager.db")).map_err(|e| e.to_string())?,
             );
-            let agent_policy = Arc::new(settings::AgentPolicyState::default());
-            let agent_settings = Arc::new(settings::AgentSettingsController::new(
-                dir.clone(),
-                agent_policy.clone(),
-            ));
-            let port = tauri::async_runtime::block_on(server::serve(
-                core.clone(),
-                agent_policy.clone(),
-                agent_settings.clone(),
-            ))?;
-            app.manage(AppState {
-                core,
-                port,
-                agent_policy: agent_policy.clone(),
-                agent_settings,
-            });
-            println!("MCP server: http://127.0.0.1:{port}/mcp");
-
             // One-time migration from the MVP plaintext tunnel_api_key. Only
             // rewrite settings.json after the OS credential write succeeds.
             let loaded = settings::load(&dir).unwrap_or_else(|e| {
@@ -85,22 +68,58 @@ pub fn run() {
                 }
             }
 
-            // Versioned v3 settings drive the Tailscale connection manager
-            // and the runtime UI flags (tray, autostart).
+            // Load the current application policy before exposing the MCP
+            // endpoint so the very first request sees the persisted Agent and
+            // Browser Automation settings rather than transient defaults.
             let app_settings = settings::load_app_settings(&dir).unwrap_or_else(|e| {
                 eprintln!("app settings load failed: {e}");
                 settings::AppSettings::default()
             });
+            let agent_policy = Arc::new(settings::AgentPolicyState::from_settings(&app_settings));
+            let agent_settings = Arc::new(settings::AgentSettingsController::new(
+                dir.clone(),
+                agent_policy.clone(),
+            ));
+
+            let resource_runtime = app.path().resource_dir()?.join("browser-runtime");
+            let development_runtime = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("browser-runtime");
+            let browser_runtime = if resource_runtime.join("runtime-manifest.json").is_file() {
+                resource_runtime
+            } else {
+                development_runtime
+            };
+            let browser = Arc::new(
+                browser::manager::BrowserManager::with_playwright(
+                    core.clone(),
+                    dir.clone(),
+                    browser_runtime,
+                    &app_settings,
+                )
+                .map_err(|e| e.to_string())?,
+            );
+
+            let port = tauri::async_runtime::block_on(server::serve(
+                core.clone(),
+                agent_policy.clone(),
+                agent_settings.clone(),
+                browser.clone(),
+            ))?;
+            app.manage(AppState {
+                core: core.clone(),
+                port,
+                agent_policy: agent_policy.clone(),
+                agent_settings,
+                browser,
+            });
+            println!("MCP server: http://127.0.0.1:{port}/mcp");
+
             app.manage(UiFlags {
                 close_to_tray: AtomicBool::new(app_settings.close_to_tray),
             });
-            agent_policy.apply(&app_settings);
             // Mirror the persisted unrestricted-access preference into the
             // live pipeline flag (default off).
-            app.state::<AppState>()
-                .core
-                .unrestricted
-                .set(app_settings.unrestricted_access);
+            core.unrestricted.set(app_settings.unrestricted_access);
 
             // Self-heal the autostart registration to match the persisted
             // preference (covers registry edits and setting races).
@@ -182,12 +201,16 @@ pub fn run() {
                 }
             }
             tauri::RunEvent::ExitRequested { .. } => {
-                // Gracefully stop the single supported Tailscale connection
-                // path. The sidecar's Job Object remains the orphan-safety net
-                // if process teardown interrupts this async stop.
+                // Gracefully stop both managed child-process trees. Their Job
+                // Objects remain the orphan-safety net if teardown interrupts
+                // either async stop.
                 let manager = app_handle.state::<connection::manager::ConnectionManager>();
                 if let Err(e) = tauri::async_runtime::block_on(manager.stop()) {
                     eprintln!("graceful connection stop on exit failed: {}", e.message);
+                }
+                let browser = app_handle.state::<AppState>().browser.clone();
+                if let Err(e) = tauri::async_runtime::block_on(browser.on_pause_changed(true)) {
+                    eprintln!("graceful browser stop on exit failed: {e}");
                 }
             }
             _ => {}

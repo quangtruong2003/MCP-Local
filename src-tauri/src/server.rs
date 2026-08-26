@@ -60,6 +60,7 @@ pub struct WorkspaceServer {
     core: Arc<CoreServices>,
     agent_policy: Arc<crate::settings::AgentPolicyState>,
     agent_settings: Arc<crate::settings::AgentSettingsController>,
+    browser: Arc<crate::browser::manager::BrowserManager>,
     capture_provider: Arc<dyn ScreenCaptureProvider>,
     pub(crate) prompt_router: PromptRouter<Self>,
 }
@@ -267,12 +268,14 @@ impl WorkspaceServer {
         core: Arc<CoreServices>,
         agent_policy: Arc<crate::settings::AgentPolicyState>,
         agent_settings: Arc<crate::settings::AgentSettingsController>,
+        browser: Arc<crate::browser::manager::BrowserManager>,
         capture_provider: Arc<dyn ScreenCaptureProvider>,
     ) -> Self {
         Self {
             core,
             agent_policy,
             agent_settings,
+            browser,
             capture_provider,
             prompt_router: crate::agent_skills::workspace_prompt_router(),
         }
@@ -958,6 +961,7 @@ pub async fn serve(
     core: Arc<CoreServices>,
     agent_policy: Arc<crate::settings::AgentPolicyState>,
     agent_settings: Arc<crate::settings::AgentSettingsController>,
+    browser: Arc<crate::browser::manager::BrowserManager>,
 ) -> std::io::Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -970,6 +974,7 @@ pub async fn serve(
                 core.clone(),
                 agent_policy.clone(),
                 agent_settings.clone(),
+                browser.clone(),
                 capture_provider.clone(),
             ))
         },

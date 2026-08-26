@@ -227,11 +227,14 @@ fn handle_menu(app: &tauri::AppHandle, event: MenuEvent) {
             });
         }
         "toggle_pause" => {
-            let state = app.state::<AppState>();
-            let next = !state.core.pause.is_paused();
-            if let Err(e) = commands::set_paused(app.clone(), state, next) {
-                eprintln!("tray pause toggle failed: {e}");
-            }
+            let next = !app.state::<AppState>().core.pause.is_paused();
+            let handle = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = handle.state::<AppState>();
+                if let Err(e) = commands::set_paused(handle.clone(), state, next).await {
+                    eprintln!("tray pause toggle failed: {e}");
+                }
+            });
             // set_paused emits access-paused and calls update_paused, which
             // rewrites the label — no direct menu edit here.
         }

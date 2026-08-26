@@ -23,6 +23,16 @@ pub struct BrowserRuntimeSettings {
     pub run_mode: BrowserRunMode,
 }
 
+impl From<&crate::settings::AppSettings> for BrowserRuntimeSettings {
+    fn from(settings: &crate::settings::AppSettings) -> Self {
+        Self {
+            enabled: settings.browser_automation_enabled,
+            engine: settings.browser_engine,
+            run_mode: settings.browser_run_mode,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BrowserEmulation {
     pub width: u32,
