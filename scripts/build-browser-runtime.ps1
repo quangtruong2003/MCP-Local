@@ -60,6 +60,17 @@ Copy-Item -Recurse -Force -LiteralPath (Join-Path $rootModules '@playwright\mcp'
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $rootModules 'playwright') -Destination (Join-Path $stageModules 'playwright')
 Copy-Item -Recurse -Force -LiteralPath (Join-Path $rootModules 'playwright-core') -Destination (Join-Path $stageModules 'playwright-core')
 
+$node = Join-Path $stage 'node\node.exe'
+$deviceScript = "const fs=require('fs'); const {devices}=require('./node_modules/playwright'); fs.writeFileSync('device-descriptors.json', JSON.stringify(devices));"
+Push-Location $stage
+try {
+  & $node -e $deviceScript
+  if ($LASTEXITCODE -ne 0) { throw "Playwright device descriptor export failed with exit code $LASTEXITCODE" }
+} finally {
+  Pop-Location
+}
+if (-not (Test-Path -LiteralPath (Join-Path $stage 'device-descriptors.json'))) { throw 'staged Playwright device descriptors are missing' }
+
 $licenses = Join-Path $stage 'licenses'
 New-Item -ItemType Directory -Force -Path $licenses | Out-Null
 $licenseSources = @(

@@ -26,4 +26,16 @@ pub trait BrowserDriver: Send + Sync {
         arguments: serde_json::Map<String, serde_json::Value>,
     ) -> Result<CallToolResult, CoreError>;
     async fn chromium_performance_metrics(&self) -> Result<serde_json::Value, CoreError>;
+    /// Whether DevTools auto-open was part of the actual launch for `spec`.
+    /// Drivers must report the launch-time state truthfully; the default is
+    /// false so an unknown driver never claims visible DevTools.
+    fn launch_devtools_auto_open(&self, _spec: &BrowserLaunchSpec) -> bool {
+        false
+    }
+    async fn device_descriptor(&self, _name: &str) -> Result<serde_json::Value, CoreError> {
+        Err(CoreError::new(
+            lc_core::error::ErrorCode::BrowserFeatureUnsupported,
+            "browser device presets are not available from this driver",
+        ))
+    }
 }

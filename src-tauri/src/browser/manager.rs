@@ -10,7 +10,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use lc_core::{error::{CoreError, ErrorCode}, CoreServices};
+use lc_core::{
+    error::{CoreError, ErrorCode},
+    CoreServices,
+};
 use rmcp::model::CallToolResult;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, RwLock};
@@ -155,10 +158,7 @@ impl BrowserManager {
     }
 
     pub(crate) fn new_page_id(&self) -> String {
-        format!(
-            "p-{}",
-            self.next_page.fetch_add(1, Ordering::Relaxed)
-        )
+        format!("p-{}", self.next_page.fetch_add(1, Ordering::Relaxed))
     }
 
     async fn start_new_session(
@@ -212,10 +212,8 @@ impl BrowserManager {
                 page_id: p.page_id.clone(),
                 url: p.url.clone(),
                 title: p.title.clone(),
-                viewport_width: active
-                    .and_then(|s| s.launch.emulation.as_ref().map(|e| e.width)),
-                viewport_height: active
-                    .and_then(|s| s.launch.emulation.as_ref().map(|e| e.height)),
+                viewport_width: active.and_then(|s| s.launch.emulation.as_ref().map(|e| e.width)),
+                viewport_height: active.and_then(|s| s.launch.emulation.as_ref().map(|e| e.height)),
             });
         BrowserSessionStatus {
             enabled: settings.enabled,
@@ -365,10 +363,7 @@ impl BrowserManager {
     pub(crate) async fn set_pages(&self, pages: Vec<PageBinding>) {
         let mut state = self.state.lock().await;
         if let Some(active) = state.active.as_mut() {
-            active.pages = pages
-                .into_iter()
-                .map(|p| (p.page_id.clone(), p))
-                .collect();
+            active.pages = pages.into_iter().map(|p| (p.page_id.clone(), p)).collect();
             active.active_page_id = active
                 .pages
                 .values()
@@ -379,15 +374,165 @@ impl BrowserManager {
 
     pub(crate) async fn page_bindings(&self) -> Vec<PageBinding> {
         let state = self.state.lock().await;
-        state
+        let mut pages: Vec<PageBinding> = state
             .active
             .as_ref()
             .map(|s| s.pages.values().cloned().collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        pages.sort_by_key(|page| page.index);
+        pages
+    }
+
+    pub(crate) async fn forget_page(&self, page_id: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(active) = state.active.as_mut() {
+            active.pages.remove(page_id);
+            if active.active_page_id.as_deref() == Some(page_id) {
+                active.active_page_id = None;
+            }
+        }
+    }
+
+    pub(crate) async fn reconcile_pages(
+        &self,
+        tabs: Vec<(usize, bool, String, String)>,
+    ) -> Vec<PageBinding> {
+        let previous = self.page_bindings().await;
+        let mut previous_keys: HashMap<(String, String), usize> = HashMap::new();
+        for page in &previous {
+            *previous_keys
+                .entry((page.url.clone(), page.title.clone()))
+                .or_default() += 1;
+        }
+        let mut incoming_keys: HashMap<(String, String), usize> = HashMap::new();
+        for (_, _, title, url) in &tabs {
+            *incoming_keys
+                .entry((url.clone(), title.clone()))
+                .or_default() += 1;
+        }
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut slots: Vec<Option<PageBinding>> = vec![None; tabs.len()];
+        // Pass 1: match on (url, title) only when that key is unique on both
+        // sides. Duplicate tabs are ambiguous, so they must never drive ID
+        // swapping; unique keys keep their ids across index shifts (e.g. an
+        // earlier tab was closed).
+        for (slot, (index, active, title, url)) in tabs.iter().enumerate() {
+            let key = (url.clone(), title.clone());
+            let unique = previous_keys.get(&key) == Some(&1) && incoming_keys.get(&key) == Some(&1);
+            if !unique {
+                continue;
+            }
+            if let Some(matched) = previous
+                .iter()
+                .find(|p| !used.contains(&p.page_id) && p.url == *url && p.title == *title)
+            {
+                used.insert(matched.page_id.clone());
+                slots[slot] = Some(PageBinding {
+                    page_id: matched.page_id.clone(),
+                    index: *index,
+                    title: title.clone(),
+                    url: url.clone(),
+                    active: *active,
+                });
+            }
+        }
+        // Pass 2: remaining tabs reconcile deterministically by upstream index.
+        for (slot, (index, active, title, url)) in tabs.iter().enumerate() {
+            if slots[slot].is_some() {
+                continue;
+            }
+            if let Some(matched) = previous
+                .iter()
+                .find(|p| !used.contains(&p.page_id) && p.index == *index)
+            {
+                used.insert(matched.page_id.clone());
+                slots[slot] = Some(PageBinding {
+                    page_id: matched.page_id.clone(),
+                    index: *index,
+                    title: title.clone(),
+                    url: url.clone(),
+                    active: *active,
+                });
+            }
+        }
+        // Pass 3: brand-new tabs get fresh opaque ids.
+        for (slot, (index, active, title, url)) in tabs.iter().enumerate() {
+            if slots[slot].is_none() {
+                slots[slot] = Some(PageBinding {
+                    page_id: self.new_page_id(),
+                    index: *index,
+                    title: title.clone(),
+                    url: url.clone(),
+                    active: *active,
+                });
+            }
+        }
+        let pages: Vec<PageBinding> = slots.into_iter().flatten().collect();
+        self.set_pages(pages.clone()).await;
+        pages
+    }
+
+    pub(crate) async fn page_index(&self, page_id: &str) -> Result<usize, CoreError> {
+        self.page_bindings()
+            .await
+            .into_iter()
+            .find(|p| p.page_id == page_id)
+            .map(|p| p.index)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserTargetNotFound,
+                    "browser page id is not valid for the current session",
+                )
+            })
     }
 
     pub(crate) async fn active_launch(&self) -> Option<BrowserLaunchSpec> {
-        self.state.lock().await.active.as_ref().map(|s| s.launch.clone())
+        self.state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|s| s.launch.clone())
+    }
+
+    /// Launch-time DevTools auto-open state for the active session, as reported
+    /// by the driver that actually performed the launch.
+    pub(crate) async fn devtools_auto_open(&self) -> Option<bool> {
+        let state = self.state.lock().await;
+        state
+            .active
+            .as_ref()
+            .map(|s| self.driver.launch_devtools_auto_open(&s.launch))
+    }
+
+    pub(crate) async fn active_artifact_dir(&self) -> Result<PathBuf, CoreError> {
+        self.guard_page_operation().await?;
+        self.state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|s| s.launch.artifact_dir.clone())
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserNotRunning,
+                    "browser is not running; call browser_open first",
+                )
+            })
+    }
+
+    pub(crate) async fn active_engine(&self) -> Option<BrowserEngine> {
+        self.state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .map(|s| s.driver.actual_engine)
+    }
+
+    pub(crate) async fn device_descriptor(&self, name: &str) -> Result<Value, CoreError> {
+        self.guard_page_operation().await?;
+        self.driver.device_descriptor(name).await
     }
 
     pub(crate) async fn set_tracing(&self, tracing: bool) {
@@ -457,8 +602,8 @@ mod tests {
             browser_automation_enabled: false,
             ..Default::default()
         };
-        let manager = BrowserManager::new(core.clone(), dir.path().into(), &settings, driver)
-            .unwrap();
+        let manager =
+            BrowserManager::new(core.clone(), dir.path().into(), &settings, driver).unwrap();
         assert!(!manager.status().await.enabled);
         assert_eq!(
             manager.open(None).await.unwrap_err().code,
@@ -477,13 +622,8 @@ mod tests {
         let core = core(dir.path());
         let driver = Arc::new(FakeDriver::default());
         let settings = AppSettings::default();
-        let manager = BrowserManager::new(
-            core,
-            dir.path().into(),
-            &settings,
-            driver.clone(),
-        )
-        .unwrap();
+        let manager =
+            BrowserManager::new(core, dir.path().into(), &settings, driver.clone()).unwrap();
 
         let first = manager.open(None).await.unwrap();
         let first_id = first.session_id.unwrap();
@@ -529,5 +669,55 @@ mod tests {
         manager.on_pause_changed(true).await.unwrap();
         assert_eq!(driver.stops.load(Ordering::SeqCst), 1);
         assert!(!manager.status().await.running);
+    }
+
+    #[tokio::test]
+    async fn duplicate_tab_reconciliation_is_deterministic_and_never_swaps_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core(dir.path());
+        let driver = Arc::new(FakeDriver::default());
+        let manager =
+            BrowserManager::new(core, dir.path().into(), &AppSettings::default(), driver).unwrap();
+        manager.open(None).await.unwrap();
+
+        let first = manager
+            .reconcile_pages(vec![(0, true, "Dup".into(), "https://a.test/".into())])
+            .await;
+        assert_eq!(first.len(), 1);
+
+        // Two identical tabs: matching by non-unique url/title is ambiguous,
+        // so ids must follow the deterministic index rule instead.
+        let both = manager
+            .reconcile_pages(vec![
+                (0, false, "Dup".into(), "https://a.test/".into()),
+                (1, true, "Dup".into(), "https://a.test/".into()),
+            ])
+            .await;
+        assert_eq!(both.len(), 2);
+        assert_eq!(both[0].page_id, first[0].page_id, "index 0 keeps its id");
+        assert_ne!(both[0].page_id, both[1].page_id);
+
+        // Repeating the identical tab list never swaps the ids.
+        let again = manager
+            .reconcile_pages(vec![
+                (0, false, "Dup".into(), "https://a.test/".into()),
+                (1, true, "Dup".into(), "https://a.test/".into()),
+            ])
+            .await;
+        assert_eq!(again[0].page_id, both[0].page_id);
+        assert_eq!(again[1].page_id, both[1].page_id);
+
+        // A unique url/title keeps its id across an index shift (earlier tab
+        // closed upstream).
+        let shifted = manager
+            .reconcile_pages(vec![
+                (0, false, "Dup".into(), "https://a.test/".into()),
+                (1, true, "Other".into(), "https://b.test/".into()),
+            ])
+            .await;
+        let other = manager
+            .reconcile_pages(vec![(0, true, "Other".into(), "https://b.test/".into())])
+            .await;
+        assert_eq!(other[0].page_id, shifted[1].page_id);
     }
 }

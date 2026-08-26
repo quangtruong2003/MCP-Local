@@ -76,6 +76,52 @@ const CHROMIUM_PERFORMANCE_CODE: &str = r#"async (page) => {
   return result;
 }"#;
 
+/// Fixed app-owned page-context expressions. These run through upstream
+/// `browser_evaluate` (page context) and never through process-level code
+/// execution. They are named constants so tests can prove that model/MCP input
+/// is never interpolated into them.
+pub(crate) const WAIT_VISIBLE_FUNCTION: &str = "(element) => { const s=getComputedStyle(element); const r=element.getBoundingClientRect(); return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0; }";
+pub(crate) const WAIT_URL_FUNCTION: &str = "() => location.href";
+pub(crate) const WAIT_READY_FUNCTION: &str = "() => document.readyState";
+
+/// DOM inspection expression. The outerHTML is serialized from a CLONED element
+/// after redacting sensitive attributes and password values, so the live DOM is
+/// never mutated and secret values never leak through the serialized markup.
+pub(crate) const DOM_INSPECT_FUNCTION: &str = r#"(element) => {
+  const sensitive = (name) => {
+    const n = String(name || '').toLowerCase();
+    return n.includes('token') || n.includes('secret') || n.includes('password') || n === 'value';
+  };
+  const r = element.getBoundingClientRect();
+  const s = getComputedStyle(element);
+  const attrs = {};
+  for (const a of element.attributes || []) {
+    attrs[a.name] = sensitive(a.name) ? '[redacted]' : String(a.value).slice(0, 2048);
+  }
+  const redact = (el) => {
+    for (const a of Array.from(el.attributes || [])) {
+      if (sensitive(a.name)) { try { el.setAttribute(a.name, '[redacted]'); } catch (e) {} }
+    }
+    const tag = String(el.tagName || '').toUpperCase();
+    const type = String((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
+    if (tag === 'INPUT' && type === 'password') {
+      try { el.setAttribute('value', '[redacted]'); } catch (e) {}
+    }
+  };
+  const clone = element.cloneNode(true);
+  redact(clone);
+  if (clone.querySelectorAll) { for (const d of clone.querySelectorAll('*')) { redact(d); } }
+  return {
+    tagName: element.tagName,
+    attrs: attrs,
+    rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+    style: { display: s.display, visibility: s.visibility, position: s.position, color: s.color, backgroundColor: s.backgroundColor, fontSize: s.fontSize },
+    outerHTML: String(clone.outerHTML || '').slice(0, 32768)
+  };
+}"#;
+
+pub(crate) const PERFORMANCE_FUNCTION: &str = "() => ({navigation: performance.getEntriesByType('navigation').map(e=>({name:e.name,duration:e.duration,domContentLoadedEventEnd:e.domContentLoadedEventEnd,loadEventEnd:e.loadEventEnd})), resources: performance.getEntriesByType('resource').slice(-100).map(e=>({name:e.name,initiatorType:e.initiatorType,duration:e.duration,transferSize:e.transferSize}))})";
+
 struct RunningPlaywright {
     client: RunningService<RoleClient, ()>,
     _job: JobHandle,
@@ -186,19 +232,36 @@ impl PlaywrightMcpDriver {
         })
     }
 
+    /// Full upstream dependency set: every tool any Local Workspaces handler may
+    /// forward, plus the fixed Chromium performance primitive. Validated at
+    /// startup so a mismatched/incomplete bundled runtime fails fast instead of
+    /// erroring mid-session. Must stay a superset of `GENERIC_TOOL_ALLOWLIST`.
     fn required_upstream_tools() -> &'static [&'static str] {
         &[
             "browser_navigate",
+            "browser_navigate_back",
+            "browser_navigate_forward",
+            "browser_reload",
             "browser_snapshot",
             "browser_click",
+            "browser_hover",
+            "browser_drag",
             "browser_type",
-            "browser_tabs",
-            "browser_evaluate",
+            "browser_select_option",
+            "browser_press_key",
+            "browser_handle_dialog",
+            "browser_file_upload",
+            "browser_resize",
             "browser_take_screenshot",
             "browser_console_messages",
             "browser_network_requests",
+            "browser_evaluate",
+            "browser_tabs",
+            "browser_wait_for",
+            "browser_close",
             "browser_start_tracing",
             "browser_stop_tracing",
+            "browser_run_code_unsafe",
         ]
     }
 
@@ -439,6 +502,23 @@ impl BrowserDriver for PlaywrightMcpDriver {
         Self::raw_call_locked(&running.client, tool, arguments).await
     }
 
+    fn launch_devtools_auto_open(&self, spec: &BrowserLaunchSpec) -> bool {
+        // Derived from the exact launch config handed to upstream, so the
+        // reported state is the launch-time truth rather than a hard-coded
+        // assumption.
+        let config = Self::launch_config(spec);
+        let options = &config["browser"]["launchOptions"];
+        let headed = options["headless"] == Value::Bool(false);
+        let auto_open = options["args"]
+            .as_array()
+            .map(|args| {
+                args.iter()
+                    .any(|flag| flag == "--auto-open-devtools-for-tabs")
+            })
+            .unwrap_or(false);
+        headed && auto_open
+    }
+
     async fn chromium_performance_metrics(&self) -> Result<Value, CoreError> {
         let guard = self.running.lock().await;
         let running = guard.as_ref().ok_or_else(|| {
@@ -459,6 +539,28 @@ impl BrowserDriver for PlaywrightMcpDriver {
             Self::raw_call_locked(&running.client, "browser_run_code_unsafe", args).await?;
         let text = Self::call_result_text(&result);
         Ok(serde_json::from_str(&text).unwrap_or_else(|_| json!({ "text": text })))
+    }
+
+    async fn device_descriptor(&self, name: &str) -> Result<Value, CoreError> {
+        let path = self.runtime_root.join("device-descriptors.json");
+        let bytes = std::fs::read(&path).map_err(|_| {
+            CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "bundled Playwright device descriptors are unavailable",
+            )
+        })?;
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            CoreError::new(
+                ErrorCode::BrowserArtifactFailed,
+                "bundled Playwright device descriptor data is invalid",
+            )
+        })?;
+        value.get(name).cloned().ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                format!("Playwright device preset '{name}' was not found"),
+            )
+        })
     }
 }
 
@@ -500,6 +602,62 @@ mod tests {
     }
 
     #[test]
+    fn startup_dependency_set_covers_every_forwarded_tool() {
+        let required: std::collections::BTreeSet<&str> =
+            PlaywrightMcpDriver::required_upstream_tools()
+                .iter()
+                .copied()
+                .collect();
+        for tool in GENERIC_TOOL_ALLOWLIST {
+            assert!(
+                required.contains(tool),
+                "required_upstream_tools is missing forwarded tool {tool}"
+            );
+        }
+        assert!(
+            required.contains("browser_run_code_unsafe"),
+            "Chromium performance primitive must be validated at startup"
+        );
+    }
+
+    #[test]
+    fn dom_inspection_sanitizes_outerhtml_from_a_clone() {
+        let f = DOM_INSPECT_FUNCTION;
+        // Sanitization must happen on a clone, not the live element.
+        assert!(
+            f.contains("cloneNode(true)"),
+            "must clone before serializing"
+        );
+        // Sensitive attributes/password values are redacted before serialization.
+        assert!(f.contains("[redacted]"), "must redact sensitive values");
+        assert!(
+            f.contains("setAttribute"),
+            "must overwrite sensitive attributes"
+        );
+        // The serialized markup must come from the clone, never the live element.
+        assert!(f.contains("clone.outerHTML"), "must serialize the clone");
+        assert!(
+            !f.contains("element.outerHTML"),
+            "must not serialize the live element's outerHTML directly"
+        );
+    }
+
+    #[test]
+    fn fixed_expressions_have_no_interpolation_points() {
+        for f in [
+            WAIT_VISIBLE_FUNCTION,
+            WAIT_URL_FUNCTION,
+            WAIT_READY_FUNCTION,
+            DOM_INSPECT_FUNCTION,
+            PERFORMANCE_FUNCTION,
+            CHROMIUM_PERFORMANCE_CODE,
+        ] {
+            assert!(!f.contains("{0}"), "fixed expression has a format slot");
+            assert!(!f.contains("${"), "fixed expression has a template slot");
+        }
+    }
+
+    #[test]
     fn bundled_background_config_is_headless_sandboxed_and_devtools_capable() {
         let value = PlaywrightMcpDriver::launch_config(&spec(
             BrowserEngine::BundledChromium,
@@ -534,5 +692,81 @@ mod tests {
         ));
         assert_eq!(firefox["browser"]["browserName"], "firefox");
         assert!(firefox["browser"]["launchOptions"]["channel"].is_null());
+    }
+
+    #[test]
+    fn devtools_auto_open_reports_launch_time_state_truthfully() {
+        let driver = PlaywrightMcpDriver::new(PathBuf::from("runtime"));
+        assert!(driver
+            .launch_devtools_auto_open(&spec(BrowserEngine::Chrome, BrowserRunMode::VisibleDebug)));
+        assert!(driver.launch_devtools_auto_open(&spec(
+            BrowserEngine::BundledChromium,
+            BrowserRunMode::VisibleDebug
+        )));
+        assert!(!driver
+            .launch_devtools_auto_open(&spec(BrowserEngine::Chrome, BrowserRunMode::Background)));
+        assert!(!driver.launch_devtools_auto_open(&spec(
+            BrowserEngine::Firefox,
+            BrowserRunMode::VisibleDebug
+        )));
+    }
+
+    #[test]
+    fn emulation_context_options_carry_full_device_spec() {
+        let mut launch = spec(BrowserEngine::BundledChromium, BrowserRunMode::Background);
+        launch.emulation = Some(super::super::types::BrowserEmulation {
+            width: 390,
+            height: 844,
+            device_scale_factor: 3.0,
+            is_mobile: true,
+            has_touch: true,
+            user_agent: Some("TestPhone/1.0".into()),
+            landscape: false,
+        });
+        let config = PlaywrightMcpDriver::launch_config(&launch);
+        let context = &config["browser"]["contextOptions"];
+        assert_eq!(context["viewport"], json!({"width": 390, "height": 844}));
+        assert_eq!(context["deviceScaleFactor"], 3.0);
+        assert_eq!(context["isMobile"], true);
+        assert_eq!(context["hasTouch"], true);
+        assert_eq!(context["userAgent"], "TestPhone/1.0");
+        assert_eq!(context["acceptDownloads"], true);
+    }
+
+    #[test]
+    fn stale_ref_and_timeout_errors_map_to_stable_codes() {
+        let stale = PlaywrightMcpDriver::map_protocol_error(
+            "browser_click",
+            "Ref e12 not found in the current page snapshot",
+        );
+        assert_eq!(stale.code, ErrorCode::BrowserStaleRef);
+
+        let timeout = PlaywrightMcpDriver::map_protocol_error(
+            "browser_navigate",
+            "Timeout 30000ms exceeded while waiting for navigation",
+        );
+        assert_eq!(timeout.code, ErrorCode::BrowserNavigationTimeout);
+
+        let action_timeout =
+            PlaywrightMcpDriver::map_protocol_error("browser_click", "element timed out");
+        assert_eq!(action_timeout.code, ErrorCode::BrowserActionTimeout);
+    }
+
+    #[test]
+    fn upstream_paths_and_stack_frames_never_leak_into_error_messages() {
+        let upstream = [
+            "Error: ENOENT: no such file or directory",
+            "C:\\Users\\x\\AppData\\node_modules\\@playwright\\mcp\\lib\\index.js:123",
+            "    at Object.<anonymous> (C:\\secret\\path.js:1:1)",
+        ]
+        .join("\n");
+        let error = PlaywrightMcpDriver::map_protocol_error("browser_click", &upstream);
+        for forbidden in ["node_modules", "C:", "\\", "at Object", ".js"] {
+            assert!(
+                !error.message.contains(forbidden),
+                "error message leaks {forbidden:?}: {}",
+                error.message
+            );
+        }
     }
 }

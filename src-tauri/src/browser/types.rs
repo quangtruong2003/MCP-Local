@@ -12,6 +12,12 @@ pub const MAX_BATCH_STEPS: usize = 20;
 pub const DEFAULT_EVENT_LIMIT: usize = 100;
 pub const MAX_EVENT_LIMIT: usize = 500;
 pub const MAX_SNAPSHOT_BYTES: usize = 256 * 1024;
+/// Screenshot resource bounds applied before decoding so a pathological image
+/// cannot exhaust memory. Encoded-byte budget gates the base64 payload; the
+/// pixel budget is checked against the PNG header before any full decode.
+pub const DEFAULT_SCREENSHOT_MAX_EDGE: u32 = 2_048;
+pub const MAX_SCREENSHOT_ENCODED_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_SCREENSHOT_PIXELS: u64 = 64 * 1024 * 1024;
 pub const MAX_COMPLETED_ARTIFACT_SESSIONS: usize = 10;
 pub const MAX_ARTIFACT_AGE_DAYS: u64 = 7;
 pub const MAX_ARTIFACT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
