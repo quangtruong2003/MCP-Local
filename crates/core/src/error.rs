@@ -27,6 +27,7 @@ pub enum ErrorCode {
     ScreenCaptureUnsupported,
     CaptureTargetNotFound,
     ScreenCaptureFailed,
+    SettingsElevationRequiresUser,
 }
 
 impl ErrorCode {
@@ -55,6 +56,7 @@ impl ErrorCode {
             Self::ScreenCaptureUnsupported => "SCREEN_CAPTURE_UNSUPPORTED",
             Self::CaptureTargetNotFound => "CAPTURE_TARGET_NOT_FOUND",
             Self::ScreenCaptureFailed => "SCREEN_CAPTURE_FAILED",
+            Self::SettingsElevationRequiresUser => "SETTINGS_ELEVATION_REQUIRES_USER",
         }
     }
 }
@@ -155,6 +157,10 @@ mod tests {
         assert_eq!(
             ErrorCode::ScreenCaptureFailed.as_str(),
             "SCREEN_CAPTURE_FAILED"
+        );
+        assert_eq!(
+            ErrorCode::SettingsElevationRequiresUser.as_str(),
+            "SETTINGS_ELEVATION_REQUIRES_USER"
         );
     }
 

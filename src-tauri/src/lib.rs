@@ -17,6 +17,7 @@ pub struct AppState {
     pub core: Arc<lc_core::CoreServices>,
     pub port: u16,
     pub agent_policy: Arc<settings::AgentPolicyState>,
+    pub agent_settings: Arc<settings::AgentSettingsController>,
 }
 
 /// Runtime UI behavior flags mirrored from [`settings::AppSettings`] so the
@@ -46,12 +47,20 @@ pub fn run() {
                 lc_core::CoreServices::open(&dir.join("manager.db")).map_err(|e| e.to_string())?,
             );
             let agent_policy = Arc::new(settings::AgentPolicyState::default());
-            let port =
-                tauri::async_runtime::block_on(server::serve(core.clone(), agent_policy.clone()))?;
+            let agent_settings = Arc::new(settings::AgentSettingsController::new(
+                dir.clone(),
+                agent_policy.clone(),
+            ));
+            let port = tauri::async_runtime::block_on(server::serve(
+                core.clone(),
+                agent_policy.clone(),
+                agent_settings.clone(),
+            ))?;
             app.manage(AppState {
                 core,
                 port,
                 agent_policy: agent_policy.clone(),
+                agent_settings,
             });
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 

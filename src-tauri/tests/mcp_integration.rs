@@ -128,9 +128,17 @@ async fn spawn_server_with_settings(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let core_for_server = core.clone();
+    local_workspace_mcp_manager::settings::save_app_settings(dir.path(), &settings).unwrap();
     let agent_policy =
         Arc::new(local_workspace_mcp_manager::settings::AgentPolicyState::from_settings(&settings));
     let agent_policy_for_server = agent_policy.clone();
+    let agent_settings = Arc::new(
+        local_workspace_mcp_manager::settings::AgentSettingsController::new(
+            dir.path().to_path_buf(),
+            agent_policy.clone(),
+        ),
+    );
+    let agent_settings_for_server = agent_settings.clone();
     let capture_provider: Arc<dyn ScreenCaptureProvider> = Arc::new(FakeCaptureProvider);
     let capture_provider_for_server = capture_provider.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
@@ -138,6 +146,7 @@ async fn spawn_server_with_settings(
             Ok(local_workspace_mcp_manager::server::WorkspaceServer::new(
                 core_for_server.clone(),
                 agent_policy_for_server.clone(),
+                agent_settings_for_server.clone(),
                 capture_provider_for_server.clone(),
             ))
         },
@@ -991,6 +1000,7 @@ async fn tool_discovery_exposes_agent_policy_tool() {
             "run_command",
             "run_powershell",
             "search_text",
+            "update_agent_settings",
         ]
     );
 }
@@ -1020,6 +1030,247 @@ async fn get_agent_policy_returns_secure_live_defaults() {
         "{text}"
     );
     assert!(text.contains("\"visual_verification\":true"), "{text}");
+}
+
+#[tokio::test]
+async fn update_agent_settings_changes_guidance_and_persists() {
+    let (port, core, dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("update_agent_settings").with_arguments(
+                serde_json::json!({
+                    "agent_mode": "conservative",
+                    "visual_verification": false
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(!res.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("\"mode\":\"conservative\""), "{text}");
+    assert!(text.contains("\"visual_verification\":false"), "{text}");
+
+    let saved = local_workspace_mcp_manager::settings::load_app_settings(dir.path()).unwrap();
+    assert_eq!(
+        saved.agent_mode,
+        local_workspace_mcp_manager::settings::AgentMode::Conservative
+    );
+    assert!(!saved.visual_verification);
+    assert!(!saved.screen_capture_enabled);
+    assert_eq!(
+        saved.capture_scope,
+        local_workspace_mcp_manager::settings::CaptureScope::WindowsAndDisplays
+    );
+
+    let live = client
+        .call_tool(CallToolRequestParams::new("get_agent_policy"))
+        .await
+        .unwrap();
+    let live_text = serde_json::to_string(&live).unwrap();
+    assert!(
+        live_text.contains("\"mode\":\"conservative\""),
+        "{live_text}"
+    );
+    assert!(
+        live_text.contains("\"visual_verification\":false"),
+        "{live_text}"
+    );
+
+    let row = latest_audit_row(&core, "update_agent_settings");
+    assert_eq!(row.decision, "allow");
+    assert_eq!(row.workspace_id, None);
+    let detail = row.detail.as_ref().expect("settings audit detail");
+    assert!(detail.to_string().contains("agent_mode"));
+    assert!(detail.to_string().contains("visual_verification"));
+}
+
+#[tokio::test]
+async fn update_agent_settings_can_reduce_capture_privilege() {
+    let settings = local_workspace_mcp_manager::settings::AppSettings {
+        screen_capture_enabled: true,
+        capture_scope: local_workspace_mcp_manager::settings::CaptureScope::WindowsAndDisplays,
+        ..Default::default()
+    };
+    let (port, _core, dir, _ws_id) = spawn_server_with_settings(settings).await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("update_agent_settings").with_arguments(
+                serde_json::json!({
+                    "screen_capture_enabled": false,
+                    "capture_scope": "windows_only"
+                })
+                .as_object()
+                .unwrap()
+                .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !res.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&res).unwrap()
+    );
+    let saved = local_workspace_mcp_manager::settings::load_app_settings(dir.path()).unwrap();
+    assert!(!saved.screen_capture_enabled);
+    assert_eq!(
+        saved.capture_scope,
+        local_workspace_mcp_manager::settings::CaptureScope::WindowsOnly
+    );
+}
+
+#[tokio::test]
+async fn update_agent_settings_cannot_enable_capture() {
+    let (port, core, dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("update_agent_settings").with_arguments(
+                serde_json::json!({ "screen_capture_enabled": true })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("SETTINGS_ELEVATION_REQUIRES_USER"), "{text}");
+    assert!(
+        !local_workspace_mcp_manager::settings::load_app_settings(dir.path())
+            .unwrap()
+            .screen_capture_enabled
+    );
+    let row = latest_audit_row(&core, "update_agent_settings");
+    assert_eq!(row.decision, "deny");
+    assert_eq!(
+        row.error_code.as_deref(),
+        Some("SETTINGS_ELEVATION_REQUIRES_USER")
+    );
+}
+
+#[tokio::test]
+async fn update_agent_settings_cannot_broaden_capture_scope() {
+    let settings = local_workspace_mcp_manager::settings::AppSettings {
+        screen_capture_enabled: true,
+        capture_scope: local_workspace_mcp_manager::settings::CaptureScope::WindowsOnly,
+        ..Default::default()
+    };
+    let (port, core, dir, _ws_id) = spawn_server_with_settings(settings).await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("update_agent_settings").with_arguments(
+                serde_json::json!({ "capture_scope": "windows_and_displays" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("SETTINGS_ELEVATION_REQUIRES_USER"), "{text}");
+    let saved = local_workspace_mcp_manager::settings::load_app_settings(dir.path()).unwrap();
+    assert_eq!(
+        saved.capture_scope,
+        local_workspace_mcp_manager::settings::CaptureScope::WindowsOnly
+    );
+    let row = latest_audit_row(&core, "update_agent_settings");
+    assert_eq!(row.decision, "deny");
+}
+
+#[tokio::test]
+async fn update_agent_settings_pause_wins() {
+    let (port, core, dir, _ws_id) = spawn_server().await;
+    core.pause.set(true);
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("update_agent_settings").with_arguments(
+                serde_json::json!({ "agent_mode": "conservative" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("ACCESS_PAUSED"), "{text}");
+    assert_eq!(
+        local_workspace_mcp_manager::settings::load_app_settings(dir.path())
+            .unwrap()
+            .agent_mode,
+        local_workspace_mcp_manager::settings::AgentMode::Autonomous
+    );
+    let row = latest_audit_row(&core, "update_agent_settings");
+    assert_eq!(row.decision, "deny");
+    assert_eq!(row.error_code.as_deref(), Some("ACCESS_PAUSED"));
+}
+
+#[tokio::test]
+async fn update_agent_settings_rejects_empty_patch() {
+    let (port, core, dir, _ws_id) = spawn_server().await;
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(local_test_mcp_uri(
+            port,
+        )))
+        .await
+        .unwrap();
+    let res = client
+        .call_tool(
+            CallToolRequestParams::new("update_agent_settings")
+                .with_arguments(serde_json::json!({}).as_object().unwrap().clone()),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&res).unwrap();
+    assert!(res.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    assert_eq!(
+        local_workspace_mcp_manager::settings::load_app_settings(dir.path()).unwrap(),
+        local_workspace_mcp_manager::settings::AppSettings::default()
+    );
+    let row = latest_audit_row(&core, "update_agent_settings");
+    assert_eq!(row.decision, "error");
+    assert_eq!(row.error_code.as_deref(), Some("INVALID_ARGUMENT"));
 }
 
 #[tokio::test]
@@ -1203,6 +1454,9 @@ async fn server_instructions_define_the_agent_operating_loop() {
         "REPORT",
         "FILE_CHANGED_SINCE_READ",
         "get_agent_policy",
+        "update_agent_settings",
+        "desktop Settings",
+        "cannot enable screen capture",
         "capture_screen",
         "visual evidence",
         "disabled screen capture",

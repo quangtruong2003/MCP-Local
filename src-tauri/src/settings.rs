@@ -4,8 +4,12 @@
 //! `{ tunnel_id, tunnel_api_key }` shape so the caller can migrate that key
 //! into the Windows DPAPI-protected store before the file is saved again.
 
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
 
+use lc_core::error::{CoreError, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 fn default_tunnel_name() -> String {
@@ -201,6 +205,171 @@ impl AgentPolicyState {
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner) =
             AgentPolicySnapshot::from(settings);
+    }
+}
+
+/// The only application settings patch accepted from MCP. This deliberately
+/// excludes unrestricted access, workspace capabilities, connection identity,
+/// startup behavior, and every secret-bearing setting.
+#[derive(Debug, Clone, Default, Deserialize, schemars::JsonSchema)]
+pub struct AgentSettingsPatch {
+    #[serde(default)]
+    pub agent_mode: Option<AgentMode>,
+    #[serde(default)]
+    pub screen_capture_enabled: Option<bool>,
+    #[serde(default)]
+    pub capture_scope: Option<CaptureScope>,
+    #[serde(default)]
+    pub visual_verification: Option<bool>,
+}
+
+impl AgentSettingsPatch {
+    pub fn is_empty(&self) -> bool {
+        self.agent_mode.is_none()
+            && self.screen_capture_enabled.is_none()
+            && self.capture_scope.is_none()
+            && self.visual_verification.is_none()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AgentSettingsChange {
+    pub previous: AppSettings,
+    pub current: AppSettings,
+    pub changed_fields: Vec<&'static str>,
+}
+
+/// Serializes MCP-originated Agent setting updates and keeps disk state and the
+/// live policy snapshot in sync. It reloads the complete settings file for
+/// every patch so unrelated desktop preferences are preserved.
+#[derive(Debug)]
+pub struct AgentSettingsController {
+    dir: PathBuf,
+    policy: Arc<AgentPolicyState>,
+    update_lock: Mutex<()>,
+}
+
+impl AgentSettingsController {
+    pub fn new(dir: PathBuf, policy: Arc<AgentPolicyState>) -> Self {
+        Self {
+            dir,
+            policy,
+            update_lock: Mutex::new(()),
+        }
+    }
+
+    /// Desktop/UI full-settings persistence shares the same lock as MCP Agent
+    /// patches so concurrent updates cannot overwrite each other's fields.
+    pub fn save_full(&self, settings: &AppSettings) -> Result<(), CoreError> {
+        let _guard = self
+            .update_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        save_app_settings(&self.dir, settings).map_err(|e| {
+            CoreError::new(
+                ErrorCode::IoError,
+                format!("failed to save app settings: {e}"),
+            )
+        })?;
+        self.policy.apply(settings);
+        Ok(())
+    }
+
+    pub fn update(&self, patch: AgentSettingsPatch) -> Result<AgentSettingsChange, CoreError> {
+        let _guard = self
+            .update_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if patch.is_empty() {
+            return Err(CoreError::new(
+                ErrorCode::InvalidArgument,
+                "update_agent_settings requires at least one field",
+            ));
+        }
+
+        let previous = load_app_settings(&self.dir).map_err(|e| {
+            CoreError::new(
+                ErrorCode::IoError,
+                format!("failed to load app settings: {e}"),
+            )
+        })?;
+        let mut current = previous.clone();
+        let mut changed_fields = Vec::new();
+
+        if let Some(mode) = patch.agent_mode {
+            if mode != current.agent_mode {
+                current.agent_mode = mode;
+                changed_fields.push("agent_mode");
+            }
+        }
+
+        if let Some(enabled) = patch.screen_capture_enabled {
+            if enabled && !current.screen_capture_enabled {
+                return Err(CoreError::new(
+                    ErrorCode::SettingsElevationRequiresUser,
+                    "enabling screen capture requires the user to use desktop Settings",
+                ));
+            }
+            if enabled != current.screen_capture_enabled {
+                current.screen_capture_enabled = enabled;
+                changed_fields.push("screen_capture_enabled");
+            }
+        }
+
+        if let Some(scope) = patch.capture_scope {
+            if current.capture_scope == CaptureScope::WindowsOnly
+                && scope == CaptureScope::WindowsAndDisplays
+            {
+                return Err(CoreError::new(
+                    ErrorCode::SettingsElevationRequiresUser,
+                    "broadening capture scope requires the user to use desktop Settings",
+                ));
+            }
+            if scope != current.capture_scope {
+                current.capture_scope = scope;
+                changed_fields.push("capture_scope");
+            }
+        }
+
+        if let Some(visual) = patch.visual_verification {
+            if visual != current.visual_verification {
+                current.visual_verification = visual;
+                changed_fields.push("visual_verification");
+            }
+        }
+
+        if !changed_fields.is_empty() {
+            save_app_settings(&self.dir, &current).map_err(|e| {
+                CoreError::new(
+                    ErrorCode::IoError,
+                    format!("failed to save app settings: {e}"),
+                )
+            })?;
+            self.policy.apply(&current);
+        }
+
+        Ok(AgentSettingsChange {
+            previous,
+            current,
+            changed_fields,
+        })
+    }
+
+    /// Best-effort transactional rollback used when fail-closed MCP auditing
+    /// fails after a settings mutation was persisted.
+    pub fn restore(&self, settings: &AppSettings) -> Result<(), CoreError> {
+        let _guard = self
+            .update_lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        save_app_settings(&self.dir, settings).map_err(|e| {
+            CoreError::new(
+                ErrorCode::IoError,
+                format!("failed to restore app settings: {e}"),
+            )
+        })?;
+        self.policy.apply(settings);
+        Ok(())
     }
 }
 

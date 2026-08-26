@@ -370,20 +370,20 @@ pub fn update_app_settings(
     settings: settings::AppSettings,
 ) -> Result<settings::AppSettings, String> {
     validate_hostname(&settings.tailscale_hostname)?;
-    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    settings::save_app_settings(&dir, &settings)
-        .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e))?;
+    let state = app.state::<AppState>();
+    state
+        .agent_settings
+        .save_full(&settings)
+        .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e.message))?;
 
     sync_launch_on_startup(&app, settings.launch_on_startup)?;
     use std::sync::atomic::Ordering;
     app.state::<crate::UiFlags>()
         .close_to_tray
         .store(settings.close_to_tray, Ordering::Relaxed);
-    // Runtime policy mirrors persisted preferences only after the save
-    // succeeds, so MCP never observes a setting the UI failed to persist.
-    let state = app.state::<AppState>();
+    // The shared settings controller already synchronized Agent policy after
+    // persistence. Unrestricted execution remains a separate desktop-only flag.
     state.core.unrestricted.set(settings.unrestricted_access);
-    state.agent_policy.apply(&settings);
     Ok(settings)
 }
 

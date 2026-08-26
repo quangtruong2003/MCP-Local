@@ -59,6 +59,7 @@ fn ok_json<T: serde::Serialize>(v: &T) -> CallToolResult {
 pub struct WorkspaceServer {
     core: Arc<CoreServices>,
     agent_policy: Arc<crate::settings::AgentPolicyState>,
+    agent_settings: Arc<crate::settings::AgentSettingsController>,
     capture_provider: Arc<dyn ScreenCaptureProvider>,
     pub(crate) prompt_router: PromptRouter<Self>,
 }
@@ -99,6 +100,15 @@ pub struct AgentPolicyOutput {
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct EmptyArgs {}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub struct UpdateAgentSettingsOutput {
+    pub mode: crate::settings::AgentMode,
+    pub screen_capture_enabled: bool,
+    pub capture_scope: crate::settings::CaptureScope,
+    pub visual_verification: bool,
+    pub changed_fields: Vec<String>,
+}
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 pub struct CaptureScreenArgs {
@@ -256,11 +266,13 @@ impl WorkspaceServer {
     pub fn new(
         core: Arc<CoreServices>,
         agent_policy: Arc<crate::settings::AgentPolicyState>,
+        agent_settings: Arc<crate::settings::AgentSettingsController>,
         capture_provider: Arc<dyn ScreenCaptureProvider>,
     ) -> Self {
         Self {
             core,
             agent_policy,
+            agent_settings,
             capture_provider,
             prompt_router: crate::agent_skills::workspace_prompt_router(),
         }
@@ -318,6 +330,100 @@ impl WorkspaceServer {
         }
         match audited {
             Ok(policy) => ok_structured(&policy),
+            Err(e) => err_result(&e),
+        }
+    }
+
+    #[tool(
+        description = "Update only non-escalating Local Workspaces Agent preferences. Agent mode and visual-verification preference may change freely; screen capture may be disabled and capture scope may be narrowed to windows_only. This tool cannot enable screen capture, broaden capture scope, enable unrestricted access, grant workspace permissions, change connection identity, or modify secrets. Those privilege increases require the user to use desktop Settings.",
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<UpdateAgentSettingsOutput>()
+    )]
+    fn update_agent_settings(
+        &self,
+        Parameters(a): Parameters<crate::settings::AgentSettingsPatch>,
+    ) -> CallToolResult {
+        let mut requested_fields = Vec::new();
+        if a.agent_mode.is_some() {
+            requested_fields.push("agent_mode");
+        }
+        if a.screen_capture_enabled.is_some() {
+            requested_fields.push("screen_capture_enabled");
+        }
+        if a.capture_scope.is_some() {
+            requested_fields.push("capture_scope");
+        }
+        if a.visual_verification.is_some() {
+            requested_fields.push("visual_verification");
+        }
+
+        let changed: Result<crate::settings::AgentSettingsChange, CoreError> =
+            if self.core.pause.is_paused() {
+                Err(CoreError::new(
+                    ErrorCode::AccessPaused,
+                    "access is paused by the user",
+                ))
+            } else {
+                self.agent_settings.update(a)
+            };
+
+        let decision = match &changed {
+            Ok(_) => "allow",
+            Err(e)
+                if matches!(
+                    e.code,
+                    ErrorCode::AccessPaused | ErrorCode::SettingsElevationRequiresUser
+                ) =>
+            {
+                "deny"
+            }
+            Err(_) => "error",
+        };
+
+        let detail = match &changed {
+            Ok(change) => Some(serde_json::json!({
+                "changed_fields": change.changed_fields,
+                "mode": change.current.agent_mode,
+                "screen_capture_enabled": change.current.screen_capture_enabled,
+                "capture_scope": change.current.capture_scope,
+                "visual_verification": change.current.visual_verification,
+            })),
+            Err(_) => Some(serde_json::json!({
+                "requested_fields": requested_fields,
+            })),
+        };
+
+        if let Err(audit_error) = lc_core::audit::record_simple(
+            &self.core.db,
+            "mcp",
+            Some("update_agent_settings"),
+            None,
+            "update_agent_settings",
+            decision,
+            changed.as_ref().err().map(|e| e.code.as_str()),
+            None,
+            detail,
+        ) {
+            if let Ok(change) = &changed {
+                if !change.changed_fields.is_empty() {
+                    let _ = self.agent_settings.restore(&change.previous);
+                }
+            }
+            return err_result(&audit_error);
+        }
+
+        match changed {
+            Ok(change) => ok_structured(&UpdateAgentSettingsOutput {
+                mode: change.current.agent_mode,
+                screen_capture_enabled: change.current.screen_capture_enabled,
+                capture_scope: change.current.capture_scope,
+                visual_verification: change.current.visual_verification,
+                changed_fields: change
+                    .changed_fields
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+            }),
             Err(e) => err_result(&e),
         }
     }
@@ -851,6 +957,7 @@ impl ServerHandler for WorkspaceServer {
 pub async fn serve(
     core: Arc<CoreServices>,
     agent_policy: Arc<crate::settings::AgentPolicyState>,
+    agent_settings: Arc<crate::settings::AgentSettingsController>,
 ) -> std::io::Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
@@ -862,6 +969,7 @@ pub async fn serve(
             Ok(WorkspaceServer::new(
                 core.clone(),
                 agent_policy.clone(),
+                agent_settings.clone(),
                 capture_provider.clone(),
             ))
         },
