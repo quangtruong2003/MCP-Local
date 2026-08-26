@@ -28,6 +28,22 @@ pub enum ErrorCode {
     CaptureTargetNotFound,
     ScreenCaptureFailed,
     SettingsElevationRequiresUser,
+    BrowserAutomationDisabled,
+    BrowserNotRunning,
+    BrowserStartFailed,
+    BrowserProcessLost,
+    BrowserTargetNotFound,
+    BrowserStaleRef,
+    BrowserNavigationTimeout,
+    BrowserActionTimeout,
+    BrowserFeatureUnsupported,
+    BrowserFeatureUnsupportedInMode,
+    BrowserInvalidViewport,
+    BrowserUploadDenied,
+    BrowserDownloadNotFound,
+    BrowserDownloadDenied,
+    BrowserArtifactFailed,
+    BrowserProtocolError,
 }
 
 impl ErrorCode {
@@ -57,6 +73,22 @@ impl ErrorCode {
             Self::CaptureTargetNotFound => "CAPTURE_TARGET_NOT_FOUND",
             Self::ScreenCaptureFailed => "SCREEN_CAPTURE_FAILED",
             Self::SettingsElevationRequiresUser => "SETTINGS_ELEVATION_REQUIRES_USER",
+            Self::BrowserAutomationDisabled => "BROWSER_AUTOMATION_DISABLED",
+            Self::BrowserNotRunning => "BROWSER_NOT_RUNNING",
+            Self::BrowserStartFailed => "BROWSER_START_FAILED",
+            Self::BrowserProcessLost => "BROWSER_PROCESS_LOST",
+            Self::BrowserTargetNotFound => "BROWSER_TARGET_NOT_FOUND",
+            Self::BrowserStaleRef => "BROWSER_STALE_REF",
+            Self::BrowserNavigationTimeout => "BROWSER_NAVIGATION_TIMEOUT",
+            Self::BrowserActionTimeout => "BROWSER_ACTION_TIMEOUT",
+            Self::BrowserFeatureUnsupported => "BROWSER_FEATURE_UNSUPPORTED",
+            Self::BrowserFeatureUnsupportedInMode => "BROWSER_FEATURE_UNSUPPORTED_IN_MODE",
+            Self::BrowserInvalidViewport => "BROWSER_INVALID_VIEWPORT",
+            Self::BrowserUploadDenied => "BROWSER_UPLOAD_DENIED",
+            Self::BrowserDownloadNotFound => "BROWSER_DOWNLOAD_NOT_FOUND",
+            Self::BrowserDownloadDenied => "BROWSER_DOWNLOAD_DENIED",
+            Self::BrowserArtifactFailed => "BROWSER_ARTIFACT_FAILED",
+            Self::BrowserProtocolError => "BROWSER_PROTOCOL_ERROR",
         }
     }
 }
@@ -161,6 +193,64 @@ mod tests {
         assert_eq!(
             ErrorCode::SettingsElevationRequiresUser.as_str(),
             "SETTINGS_ELEVATION_REQUIRES_USER"
+        );
+        assert_eq!(
+            ErrorCode::BrowserAutomationDisabled.as_str(),
+            "BROWSER_AUTOMATION_DISABLED"
+        );
+        assert_eq!(ErrorCode::BrowserNotRunning.as_str(), "BROWSER_NOT_RUNNING");
+        assert_eq!(
+            ErrorCode::BrowserStartFailed.as_str(),
+            "BROWSER_START_FAILED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserProcessLost.as_str(),
+            "BROWSER_PROCESS_LOST"
+        );
+        assert_eq!(
+            ErrorCode::BrowserTargetNotFound.as_str(),
+            "BROWSER_TARGET_NOT_FOUND"
+        );
+        assert_eq!(ErrorCode::BrowserStaleRef.as_str(), "BROWSER_STALE_REF");
+        assert_eq!(
+            ErrorCode::BrowserNavigationTimeout.as_str(),
+            "BROWSER_NAVIGATION_TIMEOUT"
+        );
+        assert_eq!(
+            ErrorCode::BrowserActionTimeout.as_str(),
+            "BROWSER_ACTION_TIMEOUT"
+        );
+        assert_eq!(
+            ErrorCode::BrowserFeatureUnsupported.as_str(),
+            "BROWSER_FEATURE_UNSUPPORTED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserFeatureUnsupportedInMode.as_str(),
+            "BROWSER_FEATURE_UNSUPPORTED_IN_MODE"
+        );
+        assert_eq!(
+            ErrorCode::BrowserInvalidViewport.as_str(),
+            "BROWSER_INVALID_VIEWPORT"
+        );
+        assert_eq!(
+            ErrorCode::BrowserUploadDenied.as_str(),
+            "BROWSER_UPLOAD_DENIED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserDownloadNotFound.as_str(),
+            "BROWSER_DOWNLOAD_NOT_FOUND"
+        );
+        assert_eq!(
+            ErrorCode::BrowserDownloadDenied.as_str(),
+            "BROWSER_DOWNLOAD_DENIED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserArtifactFailed.as_str(),
+            "BROWSER_ARTIFACT_FAILED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserProtocolError.as_str(),
+            "BROWSER_PROTOCOL_ERROR"
         );
     }
 
