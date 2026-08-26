@@ -33,6 +33,7 @@ rmcp = { version = "3.1", features = [
     "transport-streamable-http-server",
     "client",
     "transport-streamable-http-client-reqwest",
+    "transport-child-process",
     "macros",
 ] }
 schemars = "1"

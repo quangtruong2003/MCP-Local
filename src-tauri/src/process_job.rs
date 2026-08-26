@@ -13,6 +13,9 @@ use windows::Win32::System::JobObjects::{
     SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
     JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
 };
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SET_QUOTA, PROCESS_TERMINATE,
+};
 
 /// Owns a job object handle whose close kills every assigned process.
 ///
@@ -58,6 +61,27 @@ impl JobHandle {
             .map_err(|e| format!("AssignProcessToJobObject failed: {e}"))
     }
 
+    /// Adds an already-spawned process to the job by PID. This is used by
+    /// transports that own their child handle internally (for example rmcp's
+    /// TokioChildProcess).
+    pub(crate) fn assign_pid(&self, pid: u32) -> Result<(), String> {
+        // SAFETY: OpenProcess is called with the minimal rights needed to
+        // assign/terminate/query the child. The returned handle is closed on
+        // every path below.
+        let process = unsafe {
+            OpenProcess(
+                PROCESS_SET_QUOTA | PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+                false,
+                pid,
+            )
+        }
+        .map_err(|e| format!("OpenProcess({pid}) failed: {e}"))?;
+        let result = unsafe { AssignProcessToJobObject(self.handle, process) }
+            .map_err(|e| format!("AssignProcessToJobObject({pid}) failed: {e}"));
+        let _ = unsafe { CloseHandle(process) };
+        result
+    }
+
     fn close(&mut self) {
         if !self.handle.is_invalid() {
             // SAFETY: `handle` was obtained from CreateJobObjectW and closed
@@ -84,7 +108,6 @@ unsafe impl Send for JobHandle {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     /// Best-effort liveness probe for a PID: a dead PID fails to open with
     /// query-limited access.
@@ -139,5 +162,30 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         panic!("sleeper pid {pid} still alive 5s after job drop");
+    }
+
+    #[test]
+    fn dropping_job_kills_pid_assigned_process() {
+        let job = JobHandle::create().expect("create job");
+        let mut child = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 60"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn sleeper");
+        let pid = child.id();
+        job.assign_pid(pid).expect("assign sleeper by pid");
+        drop(job);
+        let _ = child.wait();
+        drop(child);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if !process_exists(pid) {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        panic!("sleeper pid {pid} still alive 5s after PID job assignment");
     }
 }
