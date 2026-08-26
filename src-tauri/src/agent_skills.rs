@@ -26,6 +26,16 @@ Use this operating loop:
 6. RECOVER — If FILE_CHANGED_SINCE_READ occurs, re-read the file, recompute the patch against the new revision, and retry only if the user's intended change is still valid. Diagnose command/test failures, make bounded fixes, and re-run the relevant check.
 7. REPORT — State what was actually changed, what verification ran, and any remaining blocker. Distinguish completed work from unverified assumptions.
 
+Browser evidence workflow (when the task involves a web UI):
+1. Call browser_get_status before relying on browser evidence; it stays readable when Browser Automation is disabled so you can report the exact blocker. Pause still wins.
+2. Start or navigate the browser (browser_open/browser_navigate) only when the task actually needs a page; do not open a browser merely because the tools exist.
+3. Call browser_snapshot before any ref-based interaction (click, fill, select, hover); refs come from the latest snapshot. On BROWSER_STALE_REF the page changed underneath you — re-snapshot and re-resolve the ref before retrying.
+4. Verify UI work with real evidence — DOM/URL state from browser_snapshot, browser_console messages, browser_network request metadata, and browser_screenshot visuals — not assumptions.
+5. Prefer background debug data (console, network, performance, trace tools) over visible DevTools; the DevTools UI is only available when the user configured Visible Debug.
+6. For layout work, check the responsive matrix with browser_set_viewport/browser_emulate_device instead of trusting a single viewport.
+7. Never bypass disabled Browser Automation or Pause with run_command, run_powershell, scripts, or OS utilities, and never drive a separate browser instance behind the managed session. On BROWSER_AUTOMATION_DISABLED, report the user-controlled blocker instead.
+8. Never send model-authored code to process-level Playwright code-execution tooling; use browser_evaluate for page-context JavaScript and browser_run_steps for bounded, validated step sequences.
+
 Safety and autonomy rules:
 - Pause and workspace Read/Write/Execute settings are user-controlled authority. Never bypass, weaken, evade, or work around ACCESS_PAUSED, capability errors, path confinement, sensitive-file policy, or execution policy. Never use run_command, run_powershell, scripts, or OS utilities to work around disabled screen capture. Explain the blocking setting when user action is required.
 - Do not use absolute paths learned elsewhere to escape a workspace. Do not search for secrets or sensitive files unless the policy explicitly permits the requested operation.
@@ -127,6 +137,20 @@ impl WorkspaceServer {
             Role::User,
             format!(
                 "Diagnose and fix this problem: {}\n\nWork as a debugging agent: gather evidence before proposing a cause, reproduce or isolate the failure when feasible, trace the relevant code path, and distinguish root cause from symptoms. Make the smallest safe fix using revision-safe edits. Add or use a regression check that would fail without the fix when practical. Re-run the failing check and relevant nearby tests before reporting completion. If blocked by workspace permissions, report the exact blocker instead of attempting a workaround.",
+                a.problem
+            ),
+        )]
+    }
+
+    #[prompt(
+        name = "debug-web",
+        description = "Reproduce a reported web issue in the managed browser, capture semantic/browser-debug evidence, fix workspace code, rerun the browser flow, and report the evidence that changed."
+    )]
+    pub async fn debug_web(&self, Parameters(a): Parameters<DebugFixArgs>) -> Vec<PromptMessage> {
+        vec![PromptMessage::new_text(
+            Role::User,
+            format!(
+                "Diagnose and fix this web issue: {}\n\nWork as a browser-driven debugging agent using the Local Workspaces browser tools.\n1. REPRODUCE — Call browser_get_status first. If Browser Automation is available, open or navigate to the affected page and reproduce the reported behavior; capture a browser_snapshot plus browser_console, browser_network, and browser_screenshot evidence around the failure.\n2. LOCALIZE — Trace the failing behavior through the semantic snapshot (DOM/URL state), console errors, and network metadata; distinguish root cause from symptoms. Re-snapshot after any BROWSER_STALE_REF instead of reusing stale refs.\n3. FIX — Make code changes only through workspace tools: read the relevant files, then apply_patch with the revision from your latest read (create_file only for genuinely new files). Preserve unrelated changes.\n4. RERUN — Rerun the browser flow by reloading or replaying the same steps, then re-capture the same snapshot/console/network/screenshot evidence.\n5. REPORT — State the root cause, the files changed, and exactly which evidence changed between the failing and fixed runs. If browser_get_status reports BROWSER_AUTOMATION_DISABLED, or the session is blocked because the agent is paused, report that user-controlled blocker instead of working around it.",
                 a.problem
             ),
         )]

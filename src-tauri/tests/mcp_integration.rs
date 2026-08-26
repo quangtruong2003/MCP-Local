@@ -1045,6 +1045,35 @@ async fn tool_discovery_exposes_agent_policy_tool() {
         names,
         vec![
             "apply_patch",
+            "browser_click",
+            "browser_close",
+            "browser_console",
+            "browser_devtools",
+            "browser_dialog",
+            "browser_dom",
+            "browser_downloads",
+            "browser_drag",
+            "browser_emulate_device",
+            "browser_evaluate",
+            "browser_fill",
+            "browser_get_status",
+            "browser_hover",
+            "browser_navigate",
+            "browser_network",
+            "browser_open",
+            "browser_performance",
+            "browser_press",
+            "browser_run_steps",
+            "browser_save_download_to_workspace",
+            "browser_screenshot",
+            "browser_search",
+            "browser_select",
+            "browser_set_viewport",
+            "browser_snapshot",
+            "browser_tabs",
+            "browser_trace",
+            "browser_upload",
+            "browser_wait",
             "capture_screen",
             "create_file",
             "find_files",
@@ -1518,6 +1547,22 @@ async fn server_instructions_define_the_agent_operating_loop() {
         "visual evidence",
         "disabled screen capture",
         "Never bypass",
+        // Task 12: browser evidence/recovery guidance semantics.
+        "browser_get_status",
+        "browser_snapshot",
+        "browser_console",
+        "browser_network",
+        "browser_screenshot",
+        "BROWSER_STALE_REF",
+        "BROWSER_AUTOMATION_DISABLED",
+        // Never shell around a disabled/paused browser.
+        "disabled Browser Automation",
+        "run_command",
+        "run_powershell",
+        // Background debug data by default; Visible Debug is user-configured.
+        "Visible Debug",
+        // Never send model code to process-level Playwright code execution.
+        "process-level Playwright",
     ] {
         assert!(
             instructions.contains(required),
@@ -1549,11 +1594,52 @@ async fn prompt_discovery_exposes_the_agent_skill_pack() {
         vec![
             "agent-task",
             "debug-fix",
+            "debug-web",
             "explore-project",
             "implement-change",
             "review-verify",
         ]
     );
+
+    // Task 12: the debug-web prompt teaches the browser evidence loop.
+    let result = client
+        .get_prompt(
+            GetPromptRequestParams::new("debug-web").with_arguments(
+                serde_json::json!({ "problem": "checkout button does nothing" })
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            ),
+        )
+        .await
+        .unwrap();
+    let text = result
+        .messages
+        .first()
+        .and_then(|m| m.content.as_text())
+        .map(|t| t.text.as_str())
+        .unwrap_or_default();
+    assert!(text.contains("checkout button does nothing"), "{text}");
+    for required in [
+        // Reproduce and capture semantic/browser-debug evidence.
+        "browser_get_status",
+        "browser_snapshot",
+        "browser_console",
+        "browser_network",
+        "browser_screenshot",
+        // Fix through workspace tools, then rerun the browser flow.
+        "apply_patch",
+        // Report the evidence that changed.
+        "evidence changed",
+        // Report user-controlled blockers instead of working around them.
+        "BROWSER_AUTOMATION_DISABLED",
+        "paused",
+    ] {
+        assert!(
+            text.contains(required),
+            "debug-web prompt missing {required:?}: {text}"
+        );
+    }
 }
 
 #[tokio::test]
