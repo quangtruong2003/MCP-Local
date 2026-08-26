@@ -16,9 +16,16 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex, Notify};
+
+/// Pause before re-verifying after a public-health verification exhausted
+/// its own bounded budget while the sidecar is still alive. The verifier
+/// already spent its full window probing; this cadence only keeps a
+/// persistently failing endpoint from being re-probed back-to-back.
+const REVERIFY_DELAY: Duration = Duration::from_secs(2);
 
 use super::health::{verify_public_health, HealthError};
 use super::secrets::CapabilitySecretStore;
@@ -463,9 +470,88 @@ fn endpoint(fqdn: &str, capability: &str) -> String {
     format!("https://{fqdn}/{capability}/mcp")
 }
 
+/// What woke the run loop: a sidecar event, a scheduled re-verification of a
+/// failed public-health check, or a terminal condition (channel closed or
+/// cancellation).
+enum RunWake {
+    Event(SidecarEvent),
+    Reverify,
+    Exit,
+}
+
+/// Runs one public-health verification for `fqdn` and applies the outcome:
+/// `Online` on success; `HEALTH_VERIFY_FAILED` plus a scheduled
+/// re-verification on failure. Returns `false` when the run was superseded
+/// mid-verification and the loop must exit.
+///
+/// A failed verification is deliberately not terminal while the sidecar is
+/// alive: cold-start funnel/ingress propagation can complete right after the
+/// verifier's bounded budget expires, and re-verifying recovers to `Online`
+/// without a manual Retry. The error state stays visible until recovery, so
+/// genuinely broken setups keep reporting honestly.
+async fn verify_and_apply(
+    shared: &Shared,
+    gen: u64,
+    fqdn: &str,
+    capability: &str,
+    verify_fqdn: &mut Option<String>,
+    reverify_at: &mut Option<tokio::time::Instant>,
+) -> bool {
+    shared
+        .set_state(
+            gen,
+            ConnectionState::Verifying {
+                fqdn: fqdn.to_string(),
+            },
+        )
+        .await;
+    let verified = shared.verifier.verify(fqdn, capability).await;
+    if shared.current_generation().await != gen {
+        // Verification raced a stop: drop the success/failure, the newer run
+        // must never see us go Online.
+        return false;
+    }
+    match verified {
+        Ok(()) => {
+            *verify_fqdn = None;
+            *reverify_at = None;
+            let url = endpoint(fqdn, capability);
+            shared
+                .set_state(
+                    gen,
+                    ConnectionState::Online {
+                        fqdn: fqdn.to_string(),
+                        endpoint: url,
+                    },
+                )
+                .await;
+        }
+        Err(e) => {
+            // HealthError messages name the FQDN/status only, never the
+            // capability path.
+            *verify_fqdn = Some(fqdn.to_string());
+            *reverify_at = Some(tokio::time::Instant::now() + REVERIFY_DELAY);
+            shared
+                .set_state(
+                    gen,
+                    ConnectionState::Error {
+                        code: "HEALTH_VERIFY_FAILED".into(),
+                        message: e.to_string(),
+                    },
+                )
+                .await;
+        }
+    }
+    true
+}
+
 /// Event loop for one run generation. Exits when the sidecar channel closes,
 /// the sidecar reports a fatal error, or cancellation fires; stale
 /// generations never write state.
+///
+/// While the sidecar is alive, an exhausted public-health verification
+/// schedules a re-verification every [`REVERIFY_DELAY`] instead of leaving
+/// the run stuck in `HEALTH_VERIFY_FAILED` until a manual Retry.
 async fn run_loop(
     shared: Arc<Shared>,
     mut session: Box<dyn SidecarSession>,
@@ -473,17 +559,34 @@ async fn run_loop(
     cancel: Arc<Notify>,
     capability: String,
 ) {
+    // Pending re-verification target and its due time, set by a failed
+    // verification and cleared by a successful one, a sidecar error, or stop.
+    let mut verify_fqdn: Option<String> = None;
+    let mut reverify_at: Option<tokio::time::Instant> = None;
+
     loop {
-        let event = tokio::select! {
+        // The re-verification branch stays pending forever unless one is
+        // scheduled, so it never fires spuriously.
+        let reverify_sleep = async {
+            match reverify_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending::<()>().await,
+            }
+        };
+        let wake = tokio::select! {
             ev = session.next_event() => match ev {
-                Some(ev) => ev,
-                None => break,
+                Some(ev) => RunWake::Event(ev),
+                None => RunWake::Exit,
             },
             _ = cancel.notified() => {
                 let _ = session.stop().await;
-                break;
+                RunWake::Exit
             }
+            _ = reverify_sleep => RunWake::Reverify,
         };
+        if matches!(wake, RunWake::Exit) {
+            break;
+        }
 
         if shared.current_generation().await != gen {
             // Superseded: another stop/start owns the state machine now.
@@ -494,55 +597,45 @@ async fn run_loop(
         // Keep the diagnostics snapshot fresh (lines are pre-redacted).
         shared.set_diagnostics(session.recent_diagnostics());
 
-        match event {
-            SidecarEvent::Starting | SidecarEvent::Authenticated => {
+        // A fresh funnel_listening event and a scheduled re-verification run
+        // the same verify-and-apply path.
+        let target = match &wake {
+            RunWake::Event(SidecarEvent::FunnelListening { fqdn }) => Some(fqdn.clone()),
+            RunWake::Reverify => verify_fqdn.clone(),
+            _ => None,
+        };
+        if let Some(fqdn) = target {
+            if !verify_and_apply(
+                &shared,
+                gen,
+                &fqdn,
+                &capability,
+                &mut verify_fqdn,
+                &mut reverify_at,
+            )
+            .await
+            {
+                let _ = session.stop().await;
+                break;
+            }
+            continue;
+        }
+
+        match wake {
+            RunWake::Event(SidecarEvent::Starting)
+            | RunWake::Event(SidecarEvent::Authenticated) => {
                 // Already reflected by StartingServer/StartingTunnel states.
             }
-            SidecarEvent::AuthRequired { url } => {
+            RunWake::Event(SidecarEvent::AuthRequired { url }) => {
                 shared
                     .set_state(gen, ConnectionState::NeedsLogin { login_url: url })
                     .await;
             }
-            SidecarEvent::FunnelListening { fqdn } => {
-                shared
-                    .set_state(gen, ConnectionState::Verifying { fqdn: fqdn.clone() })
-                    .await;
-                let verified = shared.verifier.verify(&fqdn, &capability).await;
-                if shared.current_generation().await != gen {
-                    // Verification raced a stop: drop the success/failure, the
-                    // newer run must never see us go Online.
-                    let _ = session.stop().await;
-                    break;
-                }
-                match verified {
-                    Ok(()) => {
-                        let url = endpoint(&fqdn, &capability);
-                        shared
-                            .set_state(
-                                gen,
-                                ConnectionState::Online {
-                                    fqdn,
-                                    endpoint: url,
-                                },
-                            )
-                            .await;
-                    }
-                    Err(e) => {
-                        // HealthError messages name the FQDN/status only,
-                        // never the capability path.
-                        shared
-                            .set_state(
-                                gen,
-                                ConnectionState::Error {
-                                    code: "HEALTH_VERIFY_FAILED".into(),
-                                    message: e.to_string(),
-                                },
-                            )
-                            .await;
-                    }
-                }
-            }
-            SidecarEvent::Error { code, message } => {
+            RunWake::Event(SidecarEvent::Error { code, message }) => {
+                // The sidecar reports errors only when the tunnel cannot
+                // serve; a pending re-verification of the old fqdn is moot.
+                verify_fqdn = None;
+                reverify_at = None;
                 if code == "FUNNEL_NOT_ALLOWED" {
                     // Actionable permission problem, not a fatal error: keep
                     // listening so a later FunnelListening still lands.
@@ -564,7 +657,10 @@ async fn run_loop(
                     break;
                 }
             }
-            SidecarEvent::Stopped => break,
+            RunWake::Event(SidecarEvent::Stopped) => break,
+            // Handled by the verify path above.
+            RunWake::Event(SidecarEvent::FunnelListening { .. }) | RunWake::Reverify => {}
+            RunWake::Exit => break,
         }
     }
 
@@ -697,6 +793,40 @@ mod tests {
             } else {
                 Err(HealthError::UnexpectedStatus { status: 404 })
             }
+        }
+    }
+
+    /// Verifier replaying a scripted verdict queue, one per call — no sleeps,
+    /// so re-verification tests are fully deterministic. After the queue is
+    /// exhausted every call fails, so an accidental extra verification can
+    /// never land Online unnoticed.
+    struct ScriptedVerifier {
+        verdicts: std::sync::Mutex<VecDeque<Result<(), HealthError>>>,
+        calls: AtomicUsize,
+    }
+
+    impl ScriptedVerifier {
+        fn new(verdicts: impl IntoIterator<Item = Result<(), HealthError>>) -> Arc<Self> {
+            Arc::new(Self {
+                verdicts: std::sync::Mutex::new(verdicts.into_iter().collect()),
+                calls: AtomicUsize::new(0),
+            })
+        }
+
+        fn calls(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl HealthVerifier for ScriptedVerifier {
+        async fn verify(&self, _fqdn: &str, _capability: &str) -> Result<(), HealthError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.verdicts
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(HealthError::Request("verifier script exhausted".into())))
         }
     }
 
@@ -966,6 +1096,98 @@ mod tests {
 
         assert!(h.app_data.join("connection-secret.bin").is_file());
         assert!(h.state_dir.is_dir());
+    }
+
+    /// Regression (fix-loop round 1): when the bounded public-health
+    /// verification exhausts its budget on a cold start, the manager must not
+    /// sit in HEALTH_VERIFY_FAILED forever — the same live sidecar may become
+    /// publicly reachable seconds later. With ONE funnel_listening event and
+    /// a scripted connect-failure-then-success verifier, the run must recover
+    /// to Online on its own: same sidecar generation, exactly one spawn, no
+    /// event replay, no manual Retry.
+    #[tokio::test(start_paused = true)]
+    async fn exhausted_health_verification_recovers_same_sidecar_without_manual_retry() {
+        let (sess, tx, stop_called) = fake_session();
+        tx.send(SidecarEvent::Starting).unwrap();
+        tx.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
+        // tx intentionally kept alive: the sidecar stays "running" and emits
+        // no further events — recovery must come from re-verification alone.
+
+        let verifier = ScriptedVerifier::new([
+            Err(HealthError::Request(
+                "request to public health endpoint failed: connect".into(),
+            )),
+            Ok(()),
+        ]);
+        let h = harness([sess], verifier.clone());
+        h.mgr.start().await.unwrap();
+
+        // The first verification exhausts its budget and reports honestly.
+        wait_for(
+            &h.mgr,
+            Duration::from_secs(5),
+            |s| matches!(s, ConnectionState::Error { code, .. } if code == "HEALTH_VERIFY_FAILED"),
+        )
+        .await;
+
+        // Ingress becomes healthy right after: the same run recovers to
+        // Online without a manual Retry or a sidecar respawn.
+        let online = wait_for(&h.mgr, Duration::from_secs(5), |s| {
+            matches!(s, ConnectionState::Online { .. })
+        })
+        .await;
+        assert_eq!(
+            online,
+            ConnectionState::Online {
+                fqdn: HOSTNAME.into(),
+                endpoint: endpoint(HOSTNAME, &h.initial_capability),
+            }
+        );
+
+        assert_eq!(h.driver.spawn_count(), 1, "must not respawn the sidecar");
+        assert_eq!(
+            verifier.calls(),
+            2,
+            "exactly one re-verification, no event replay"
+        );
+        assert!(
+            !stop_called.load(Ordering::SeqCst),
+            "must not stop the live sidecar"
+        );
+    }
+
+    /// A stop while a re-verification is pending ends the run cleanly; the
+    /// stale generation never re-verifies or publishes state afterwards.
+    #[tokio::test(start_paused = true)]
+    async fn stop_while_reverification_is_pending_ends_the_run() {
+        let (sess, tx, stop_called) = fake_session();
+        tx.send(SidecarEvent::Starting).unwrap();
+        tx.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
+
+        let verifier = ScriptedVerifier::new([Err(HealthError::Request(
+            "request to public health endpoint failed: connect".into(),
+        ))]);
+        let h = harness([sess], verifier.clone());
+        h.mgr.start().await.unwrap();
+
+        wait_for(
+            &h.mgr,
+            Duration::from_secs(5),
+            |s| matches!(s, ConnectionState::Error { code, .. } if code == "HEALTH_VERIFY_FAILED"),
+        )
+        .await;
+
+        let stopped = h.mgr.stop().await.unwrap();
+        assert_eq!(stopped.state, ConnectionState::Stopped);
+        assert!(stop_called.load(Ordering::SeqCst));
+        assert_eq!(verifier.calls(), 1, "no re-verification after stop");
+        drop(tx);
     }
 
     #[tokio::test]

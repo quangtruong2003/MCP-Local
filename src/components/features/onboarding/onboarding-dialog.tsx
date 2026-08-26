@@ -26,7 +26,8 @@ import type { ConnectionStatus, Workspace } from "@/lib/types";
  * Guided first-run onboarding:
  * Welcome -> Add workspace -> Review Read ON / Write OFF -> Start connection,
  * then live connection states take over: NeedsLogin ->
- * NeedsFunnelPermission/HttpsSetup -> Online (Copy endpoint + Finish).
+ * NeedsFunnelPermission/HttpsSetup -> Verifying -> Online (Copy endpoint +
+ * Finish).
  */
 
 type SetupStep = "welcome" | "add-workspace" | "review-permissions" | "start-connection";
@@ -263,7 +264,15 @@ function isLiveStage(
 ): connection is ConnectionStatus & {
   state: Extract<
     ConnectionStatus["state"],
-    { state: "needs_login" | "needs_funnel_permission" | "needs_https_setup" | "online" }
+    {
+      state:
+        | "needs_login"
+        | "needs_funnel_permission"
+        | "needs_https_setup"
+        | "verifying"
+        | "online"
+        | "error";
+    }
   >;
 } {
   const state = connection?.state.state;
@@ -271,7 +280,9 @@ function isLiveStage(
     state === "needs_login" ||
     state === "needs_funnel_permission" ||
     state === "needs_https_setup" ||
-    state === "online"
+    state === "verifying" ||
+    state === "online" ||
+    state === "error"
   );
 }
 
@@ -367,6 +378,58 @@ function LiveStage({ connection, starting, onRetry, onFinish, reportError }: Liv
             {state.message}
           </div>
         ) : null}
+      </>
+    );
+  }
+
+  if (state.state === "verifying") {
+    // Mid-transition: the run is live and the public endpoint is being
+    // health-checked. Stay in the live stage with progress instead of
+    // flickering back to the wizard, mirroring the dashboard
+    // ConnectionCard's inert "Verifying…" presentation.
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Loader2 aria-hidden="true" className="size-5 animate-spin text-primary" />
+            Almost there
+          </DialogTitle>
+          <DialogDescription aria-live="polite">
+            Verifying the public MCP endpoint… this dialog updates automatically.
+          </DialogDescription>
+        </DialogHeader>
+        <p className="min-w-0 truncate font-mono text-xs text-muted-foreground" title={state.fqdn}>
+          {state.fqdn}
+        </p>
+      </>
+    );
+  }
+
+  if (state.state === "error") {
+    // Retry (stop then start) is the only action that can recover a run in
+    // the Error state: ConnectionManager::start() is intentionally a no-op
+    // for every non-Stopped state, so the wizard's "Start connection" button
+    // would do nothing here. Transient public-health failures may also clear
+    // on their own while the sidecar re-verifies.
+    return (
+      <>
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <AlertTriangle aria-hidden="true" className="size-5 text-destructive" />
+            Connection failed
+          </DialogTitle>
+          <DialogDescription aria-live="polite">{state.message}</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-wrap items-center gap-2">
+          <Button onClick={onRetry} disabled={starting}>
+            {starting ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
+            Retry
+          </Button>
+        </div>
+        <p className="text-[13px] text-muted-foreground">
+          Retry stops the connection and starts it again. Transient public-health failures may
+          also clear on their own while the app keeps checking.
+        </p>
       </>
     );
   }
