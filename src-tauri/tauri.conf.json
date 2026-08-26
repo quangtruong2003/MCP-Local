@@ -4,9 +4,9 @@
   "version": "0.1.1",
   "identifier": "com.local.workspace-mcp-manager",
   "build": {
-    "beforeDevCommand": "npm run build:sidecar && npm run dev",
+    "beforeDevCommand": "npm run build:sidecar && npm run build:browser-runtime && npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "npm run build:sidecar && npm run build",
+    "beforeBuildCommand": "npm run build:sidecar && npm run build:browser-runtime && npm run build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -33,7 +33,8 @@
       "binaries/tailscale-funnel-sidecar"
     ],
     "resources": [
-      "binaries/TAILSCALE-LICENSE.txt"
+      "binaries/TAILSCALE-LICENSE.txt",
+      "browser-runtime/**/*"
     ]
   }
 }

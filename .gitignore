@@ -13,3 +13,5 @@ src-tauri/binaries/*.exe
 .mimosa/
 demo-workspace/
 src-tauri/target/
+.cache/browser-runtime/
+src-tauri/browser-runtime/
