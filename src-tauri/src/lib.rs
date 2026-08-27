@@ -20,8 +20,13 @@ pub struct AppState {
     pub agent_policy: Arc<settings::AgentPolicyState>,
     pub agent_settings: Arc<settings::AgentSettingsController>,
     pub browser: Arc<browser::manager::BrowserManager>,
+    /// Typed WSL2/Lightpanda runtime provisioner. Construction is lazy and
+    /// never downloads/installs; only session startup or explicit setup /
+    /// repair commands drive provisioning.
+    pub browser_runtime_manager: Arc<browser::runtime::BrowserRuntimeManager>,
     /// Root of the bundled Playwright runtime (resource dir, falling back to
-    /// the development checkout). Used for read-only runtime diagnostics.
+    /// the development checkout). Used for read-only runtime diagnostics until
+    /// the Playwright runtime is removed.
     pub browser_runtime: std::path::PathBuf,
 }
 
@@ -110,6 +115,29 @@ pub fn run() {
                 .map_err(|e| e.to_string())?,
             );
 
+            // Typed Lightpanda/WSL runtime provisioner. Reads the pinned,
+            // immutable runtime manifest but does NOT provision here; that is
+            // deferred to session startup / explicit setup commands so opening
+            // Settings never triggers a download or install.
+            let resource_manifest = app
+                .path()
+                .resource_dir()?
+                .join("resources")
+                .join("lightpanda-runtime-manifest.json");
+            let development_manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("lightpanda-runtime-manifest.json");
+            let manifest_path = if resource_manifest.is_file() {
+                resource_manifest
+            } else {
+                development_manifest
+            };
+            let manifest_json =
+                std::fs::read_to_string(&manifest_path).map_err(|e| e.to_string())?;
+            let browser_runtime_manager =
+                browser::runtime::BrowserRuntimeManager::production(&manifest_json)
+                    .map_err(|e| e.to_string())?;
+
             let port = tauri::async_runtime::block_on(server::serve(
                 core.clone(),
                 agent_policy.clone(),
@@ -122,6 +150,7 @@ pub fn run() {
                 agent_policy: agent_policy.clone(),
                 agent_settings,
                 browser,
+                browser_runtime_manager,
                 browser_runtime,
             });
             println!("MCP server: http://127.0.0.1:{port}/mcp");

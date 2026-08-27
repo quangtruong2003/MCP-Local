@@ -25,7 +25,8 @@ pub const RUNTIME_USER: &str = "localworkspaces";
 /// Lightpanda executable path inside the managed distro.
 pub const LIGHTPANDA_BIN: &str = "/opt/local-workspaces/lightpanda/current/lightpanda";
 /// Fixed isolation config written to the managed distro.
-pub const WSL_CONF_CONTENT: &str = "[automount]\nenabled=false\n\n[interop]\nenabled=false\nappendWindowsPath=false\n";
+pub const WSL_CONF_CONTENT: &str =
+    "[automount]\nenabled=false\n\n[interop]\nenabled=false\nappendWindowsPath=false\n";
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(120);
 const IMPORT_TIMEOUT: Duration = Duration::from_secs(900);
@@ -64,6 +65,17 @@ pub trait WslCommandRunner: Send + Sync {
     /// Launches an elevated `wsl.exe --install --no-distribution` through the
     /// Windows UAC consent flow. Never bypasses UAC.
     fn launch_elevated_install(&self) -> Result<(), CoreError>;
+}
+
+#[async_trait]
+impl<T: WslCommandRunner + ?Sized> WslCommandRunner for std::sync::Arc<T> {
+    async fn run(&self, request: WslCommand) -> Result<WslCommandOutput, CoreError> {
+        (**self).run(request).await
+    }
+
+    fn launch_elevated_install(&self) -> Result<(), CoreError> {
+        (**self).launch_elevated_install()
+    }
 }
 
 /// One row of `wsl.exe --list --verbose`.
@@ -330,14 +342,12 @@ pub fn verify_ownership(
     marker: Option<&OwnershipMarker>,
     registered_install_dir: &Path,
 ) -> Result<(), CoreError> {
-    let conflict = |message: &str| {
-        CoreError::new(
-            ErrorCode::BrowserWslDistroConflict,
-            message.to_string(),
-        )
-    };
+    let conflict =
+        |message: &str| CoreError::new(ErrorCode::BrowserWslDistroConflict, message.to_string());
     let Some(marker) = marker else {
-        return Err(conflict("ownership marker missing; distro is not app-owned"));
+        return Err(conflict(
+            "ownership marker missing; distro is not app-owned",
+        ));
     };
     if marker.owner != RUNTIME_OWNER {
         return Err(conflict("ownership marker owner mismatch"));
@@ -429,7 +439,13 @@ impl<R: WslCommandRunner> WslHostAdapter<R> {
         stdin: Option<Vec<u8>>,
         timeout: Duration,
     ) -> Result<WslCommandOutput, CoreError> {
-        self.runner.run(WslCommand { args, stdin, timeout }).await
+        self.runner
+            .run(WslCommand {
+                args,
+                stdin,
+                timeout,
+            })
+            .await
     }
 
     /// Inspects the WSL host: installation state, version, distro list.
@@ -446,12 +462,14 @@ impl<R: WslCommandRunner> WslHostAdapter<R> {
             .await;
 
         let absent = |res: &Result<WslCommandOutput, CoreError>| match res {
-            Ok(output) => output.exit_code != 0 && {
-                let mut combined = output.decoded_stdout();
-                combined.push(' ');
-                combined.push_str(&output.decoded_stderr());
-                detect_wsl_absent(output.exit_code, &combined)
-            },
+            Ok(output) => {
+                output.exit_code != 0 && {
+                    let mut combined = output.decoded_stdout();
+                    combined.push(' ');
+                    combined.push_str(&output.decoded_stderr());
+                    detect_wsl_absent(output.exit_code, &combined)
+                }
+            }
             Err(_) => true,
         };
 
@@ -546,7 +564,10 @@ impl<R: WslCommandRunner> WslHostAdapter<R> {
 
     /// Reads the ownership marker from inside the distro. `Ok(None)` when the
     /// marker file is absent or unparseable (never treated as owned).
-    pub async fn read_marker(&self, distro_name: &str) -> Result<Option<OwnershipMarker>, CoreError> {
+    pub async fn read_marker(
+        &self,
+        distro_name: &str,
+    ) -> Result<Option<OwnershipMarker>, CoreError> {
         validate_distro_name(distro_name)?;
         let output = self
             .run_fixed(
@@ -591,7 +612,9 @@ impl<R: WslCommandRunner> WslHostAdapter<R> {
         context: &str,
     ) -> Result<(), CoreError> {
         validate_distro_name(distro_name)?;
-        debug_assert!(path.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')));
+        debug_assert!(path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')));
         let fragment = format!("cat > {path} && chmod 0644 {path}");
         let output = self
             .run_fixed(
@@ -824,7 +847,7 @@ impl WslCommandRunner for RealWslCommandRunner {
         use windows::Win32::Foundation::{CloseHandle, HANDLE};
         use windows::Win32::System::Threading::{WaitForSingleObject, INFINITE};
         use windows::Win32::UI::Shell::{
-            ShellExecuteExW, SHELLEXECUTEINFOW, SEE_MASK_NOCLOSEPROCESS,
+            ShellExecuteExW, SEE_MASK_NOCLOSEPROCESS, SHELLEXECUTEINFOW,
         };
 
         let verb = HSTRING::from("runas");
@@ -907,7 +930,11 @@ mod tests {
         }
 
         fn script(&self, args: &[&str], output: WslCommandOutput) {
-            let key = args.iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" ");
+            let key = args
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
             self.responses.lock().unwrap().insert(key, output);
         }
     }
@@ -930,9 +957,9 @@ mod tests {
             self.calls.lock().unwrap().push(request.args.clone());
             let key = request.args.join(" ");
             let map = self.responses.lock().unwrap();
-            map.get(&key)
-                .cloned()
-                .ok_or_else(|| CoreError::new(ErrorCode::BrowserWslUnavailable, "no scripted response"))
+            map.get(&key).cloned().ok_or_else(|| {
+                CoreError::new(ErrorCode::BrowserWslUnavailable, "no scripted response")
+            })
         }
 
         fn launch_elevated_install(&self) -> Result<(), CoreError> {
@@ -1023,7 +1050,10 @@ mod tests {
             1,
             "Windows Subsystem for Linux is not installed. Use 'wsl.exe --install' to install.",
         ));
-        assert!(detect_wsl_absent(1, "There are no distributions installed."));
+        assert!(detect_wsl_absent(
+            1,
+            "There are no distributions installed."
+        ));
         assert!(!detect_wsl_absent(1, "some other failure"));
         assert!(!detect_wsl_absent(0, "not installed"));
     }
@@ -1070,8 +1100,7 @@ mod tests {
 
     #[test]
     fn free_preferred_name_creates_preferred() {
-        let decision =
-            choose_distro_name(&[entry("Ubuntu")], None, "ab12cd34").unwrap();
+        let decision = choose_distro_name(&[entry("Ubuntu")], None, "ab12cd34").unwrap();
         assert_eq!(decision, DistroNameDecision::CreatePreferred);
     }
 
@@ -1120,7 +1149,9 @@ mod tests {
         ManagedDistroIdentity {
             distro_name: PREFERRED_DISTRO_NAME.to_string(),
             install_id: "ab12cd34".to_string(),
-            install_dir: PathBuf::from(r"C:\Users\u\AppData\Local\Local Workspace MCP Manager\browser\wsl\distro-1"),
+            install_dir: PathBuf::from(
+                r"C:\Users\u\AppData\Local\Local Workspace MCP Manager\browser\wsl\distro-1",
+            ),
         }
     }
 
@@ -1152,13 +1183,17 @@ mod tests {
         let mut marker = OwnershipMarker::new("ab12cd34");
         marker.owner = "evil".to_string();
         assert_eq!(
-            verify_ownership(&id, Some(&marker), &id.install_dir.clone()).unwrap_err().code,
+            verify_ownership(&id, Some(&marker), &id.install_dir.clone())
+                .unwrap_err()
+                .code,
             ErrorCode::BrowserWslDistroConflict
         );
         let mut marker = OwnershipMarker::new("ab12cd34");
         marker.runtime = "not-lightpanda".to_string();
         assert_eq!(
-            verify_ownership(&id, Some(&marker), &id.install_dir.clone()).unwrap_err().code,
+            verify_ownership(&id, Some(&marker), &id.install_dir.clone())
+                .unwrap_err()
+                .code,
             ErrorCode::BrowserWslDistroConflict
         );
     }
@@ -1179,28 +1214,49 @@ mod tests {
         let cmd = build_lightpanda_command(
             Path::new("wsl.exe"),
             "LocalWorkspaces-Lightpanda",
-            &["--user-data-dir".to_string(), "/var/lib/local-workspaces/browser/profile".to_string()],
+            &[
+                "--user-data-dir".to_string(),
+                "/var/lib/local-workspaces/browser/profile".to_string(),
+            ],
         )
         .unwrap();
-        let args: Vec<String> = cmd.get_args().map(|s| s.to_string_lossy().into_owned()).collect();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
         assert_eq!(
             args,
             vec![
-                "-d", "LocalWorkspaces-Lightpanda",
-                "-u", "localworkspaces",
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "localworkspaces",
                 "--",
                 "/opt/local-workspaces/lightpanda/current/lightpanda",
                 "mcp",
-                "--log-level", "warn",
-                "--user-data-dir", "/var/lib/local-workspaces/browser/profile",
+                "--log-level",
+                "warn",
+                "--user-data-dir",
+                "/var/lib/local-workspaces/browser/profile",
             ]
         );
         let envs: HashMap<String, String> = cmd
             .get_envs()
-            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
             .collect();
-        assert_eq!(envs.get("LIGHTPANDA_DISABLE_TELEMETRY").map(String::as_str), Some("true"));
-        assert_eq!(envs.get("LIGHTPANDA_DISABLE_CORE_DUMP").map(String::as_str), Some("1"));
+        assert_eq!(
+            envs.get("LIGHTPANDA_DISABLE_TELEMETRY").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            envs.get("LIGHTPANDA_DISABLE_CORE_DUMP").map(String::as_str),
+            Some("1")
+        );
     }
 
     #[test]
@@ -1216,11 +1272,19 @@ mod tests {
         let (fake, _calls) = FakeRunner::new();
         fake.script(
             &["--status"],
-            out(0, "Default Distribution: Ubuntu\nWindows Subsystem for Linux version: 2.5.9.0\n", ""),
+            out(
+                0,
+                "Default Distribution: Ubuntu\nWindows Subsystem for Linux version: 2.5.9.0\n",
+                "",
+            ),
         );
         fake.script(
             &["--list", "--verbose"],
-            out(0, "  NAME      STATE     VERSION\n* Ubuntu    Stopped   2\n", ""),
+            out(
+                0,
+                "  NAME      STATE     VERSION\n* Ubuntu    Stopped   2\n",
+                "",
+            ),
         );
         let adapter = WslHostAdapter::new(fake);
         let status = adapter.host_status().await.unwrap();
@@ -1238,7 +1302,10 @@ mod tests {
             &["--status"],
             out(1, "", "Windows Subsystem for Linux is not installed."),
         );
-        fake.script(&["--list", "--verbose"], out(1, "", "Windows Subsystem for Linux is not installed."));
+        fake.script(
+            &["--list", "--verbose"],
+            out(1, "", "Windows Subsystem for Linux is not installed."),
+        );
         let adapter = WslHostAdapter::new(fake);
         let status = adapter.host_status().await.unwrap();
         assert!(!status.wsl_installed);
@@ -1301,11 +1368,27 @@ mod tests {
     async fn read_marker_returns_none_when_file_missing() {
         let (fake, _calls) = FakeRunner::new();
         fake.script(
-            &["-d", "LocalWorkspaces-Lightpanda", "-u", "root", "--", "cat", MARKER_PATH],
-            out(1, "", "cat: /etc/local-workspaces-runtime.json: No such file or directory"),
+            &[
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "cat",
+                MARKER_PATH,
+            ],
+            out(
+                1,
+                "",
+                "cat: /etc/local-workspaces-runtime.json: No such file or directory",
+            ),
         );
         let adapter = WslHostAdapter::new(fake);
-        assert!(adapter.read_marker("LocalWorkspaces-Lightpanda").await.unwrap().is_none());
+        assert!(adapter
+            .read_marker("LocalWorkspaces-Lightpanda")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1314,12 +1397,23 @@ mod tests {
         let json = serde_json::to_string(&marker).unwrap();
         let (fake, _calls) = FakeRunner::new();
         fake.script(
-            &["-d", "LocalWorkspaces-Lightpanda", "-u", "root", "--", "cat", MARKER_PATH],
+            &[
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "cat",
+                MARKER_PATH,
+            ],
             out(0, &json, ""),
         );
         let adapter = WslHostAdapter::new(fake);
         assert_eq!(
-            adapter.read_marker("LocalWorkspaces-Lightpanda").await.unwrap(),
+            adapter
+                .read_marker("LocalWorkspaces-Lightpanda")
+                .await
+                .unwrap(),
             Some(marker)
         );
     }
@@ -1328,11 +1422,23 @@ mod tests {
     async fn read_marker_treats_corrupt_marker_as_not_owned() {
         let (fake, _calls) = FakeRunner::new();
         fake.script(
-            &["-d", "LocalWorkspaces-Lightpanda", "-u", "root", "--", "cat", MARKER_PATH],
+            &[
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "cat",
+                MARKER_PATH,
+            ],
             out(0, "{not-json", ""),
         );
         let adapter = WslHostAdapter::new(fake);
-        assert!(adapter.read_marker("LocalWorkspaces-Lightpanda").await.unwrap().is_none());
+        assert!(adapter
+            .read_marker("LocalWorkspaces-Lightpanda")
+            .await
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]
@@ -1340,7 +1446,13 @@ mod tests {
         let (fake, _calls) = FakeRunner::new();
         let marker = OwnershipMarker::new("ab12cd34");
         let expected_args: Vec<&str> = vec![
-            "-d", "LocalWorkspaces-Lightpanda", "-u", "root", "--", "sh", "-c",
+            "-d",
+            "LocalWorkspaces-Lightpanda",
+            "-u",
+            "root",
+            "--",
+            "sh",
+            "-c",
         ];
         // The shell fragment must be a constant (no marker data inside it).
         fake.script(
@@ -1351,7 +1463,10 @@ mod tests {
             out(0, "", ""),
         );
         let adapter = WslHostAdapter::new(fake);
-        adapter.write_marker("LocalWorkspaces-Lightpanda", &marker).await.unwrap();
+        adapter
+            .write_marker("LocalWorkspaces-Lightpanda", &marker)
+            .await
+            .unwrap();
         let _ = expected_args;
     }
 
@@ -1360,19 +1475,31 @@ mod tests {
         let (fake, _calls) = FakeRunner::new();
         fake.script(
             &[
-                "-d", "LocalWorkspaces-Lightpanda", "-u", "root", "--", "sh", "-c",
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "sh",
+                "-c",
                 "cat > /etc/wsl.conf && chmod 0644 /etc/wsl.conf",
             ],
             out(0, "", ""),
         );
         let adapter = WslHostAdapter::new(fake);
-        adapter.write_wsl_conf("LocalWorkspaces-Lightpanda").await.unwrap();
+        adapter
+            .write_wsl_conf("LocalWorkspaces-Lightpanda")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
     async fn terminate_owned_runs_after_ownership_check() {
         let (fake, _calls) = FakeRunner::new();
-        fake.script(&["--terminate", "LocalWorkspaces-Lightpanda"], out(0, "", ""));
+        fake.script(
+            &["--terminate", "LocalWorkspaces-Lightpanda"],
+            out(0, "", ""),
+        );
         let adapter = WslHostAdapter::new(fake);
         let id = identity();
         let marker = OwnershipMarker::new("ab12cd34");
@@ -1413,7 +1540,10 @@ mod tests {
     #[tokio::test]
     async fn unregister_owned_runs_after_ownership_check() {
         let (fake, _calls) = FakeRunner::new();
-        fake.script(&["--unregister", "LocalWorkspaces-Lightpanda"], out(0, "", ""));
+        fake.script(
+            &["--unregister", "LocalWorkspaces-Lightpanda"],
+            out(0, "", ""),
+        );
         let adapter = WslHostAdapter::new(fake);
         let id = identity();
         let marker = OwnershipMarker::new("ab12cd34");
@@ -1428,8 +1558,13 @@ mod tests {
         let (fake, _calls) = FakeRunner::new();
         fake.script(
             &[
-                "-d", "LocalWorkspaces-Lightpanda", "-u", "localworkspaces", "--",
-                "/opt/local-workspaces/lightpanda/current/lightpanda", "version",
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "localworkspaces",
+                "--",
+                "/opt/local-workspaces/lightpanda/current/lightpanda",
+                "version",
             ],
             out(0, "0.3.7", ""),
         );
@@ -1453,5 +1588,4 @@ mod tests {
         let adapter = WslHostAdapter::new(fake);
         adapter.launch_elevated_install().unwrap();
     }
-
 }
