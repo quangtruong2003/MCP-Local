@@ -16,3 +16,4 @@ src-tauri/target/
 .cache/browser-runtime/
 .cache/lwsl-rootfs-artifacts/
 src-tauri/browser-runtime/
+.worktrees/
