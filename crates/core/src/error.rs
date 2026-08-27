@@ -44,6 +44,15 @@ pub enum ErrorCode {
     BrowserDownloadDenied,
     BrowserArtifactFailed,
     BrowserProtocolError,
+    BrowserWslUnavailable,
+    BrowserWslRebootRequired,
+    BrowserWslDistroConflict,
+    BrowserRuntimeNotReady,
+    BrowserRuntimeDownloadFailed,
+    BrowserRuntimeIntegrityFailed,
+    BrowserRuntimeVersionMismatch,
+    BrowserRuntimeProvisionFailed,
+    BrowserRuntimeRepairRequired,
 }
 
 impl ErrorCode {
@@ -89,6 +98,15 @@ impl ErrorCode {
             Self::BrowserDownloadDenied => "BROWSER_DOWNLOAD_DENIED",
             Self::BrowserArtifactFailed => "BROWSER_ARTIFACT_FAILED",
             Self::BrowserProtocolError => "BROWSER_PROTOCOL_ERROR",
+            Self::BrowserWslUnavailable => "BROWSER_WSL_UNAVAILABLE",
+            Self::BrowserWslRebootRequired => "BROWSER_WSL_REBOOT_REQUIRED",
+            Self::BrowserWslDistroConflict => "BROWSER_WSL_DISTRO_CONFLICT",
+            Self::BrowserRuntimeNotReady => "BROWSER_RUNTIME_NOT_READY",
+            Self::BrowserRuntimeDownloadFailed => "BROWSER_RUNTIME_DOWNLOAD_FAILED",
+            Self::BrowserRuntimeIntegrityFailed => "BROWSER_RUNTIME_INTEGRITY_FAILED",
+            Self::BrowserRuntimeVersionMismatch => "BROWSER_RUNTIME_VERSION_MISMATCH",
+            Self::BrowserRuntimeProvisionFailed => "BROWSER_RUNTIME_PROVISION_FAILED",
+            Self::BrowserRuntimeRepairRequired => "BROWSER_RUNTIME_REPAIR_REQUIRED",
         }
     }
 }
@@ -251,6 +269,42 @@ mod tests {
         assert_eq!(
             ErrorCode::BrowserProtocolError.as_str(),
             "BROWSER_PROTOCOL_ERROR"
+        );
+        assert_eq!(
+            ErrorCode::BrowserWslUnavailable.as_str(),
+            "BROWSER_WSL_UNAVAILABLE"
+        );
+        assert_eq!(
+            ErrorCode::BrowserWslRebootRequired.as_str(),
+            "BROWSER_WSL_REBOOT_REQUIRED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserWslDistroConflict.as_str(),
+            "BROWSER_WSL_DISTRO_CONFLICT"
+        );
+        assert_eq!(
+            ErrorCode::BrowserRuntimeNotReady.as_str(),
+            "BROWSER_RUNTIME_NOT_READY"
+        );
+        assert_eq!(
+            ErrorCode::BrowserRuntimeDownloadFailed.as_str(),
+            "BROWSER_RUNTIME_DOWNLOAD_FAILED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserRuntimeIntegrityFailed.as_str(),
+            "BROWSER_RUNTIME_INTEGRITY_FAILED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserRuntimeVersionMismatch.as_str(),
+            "BROWSER_RUNTIME_VERSION_MISMATCH"
+        );
+        assert_eq!(
+            ErrorCode::BrowserRuntimeProvisionFailed.as_str(),
+            "BROWSER_RUNTIME_PROVISION_FAILED"
+        );
+        assert_eq!(
+            ErrorCode::BrowserRuntimeRepairRequired.as_str(),
+            "BROWSER_RUNTIME_REPAIR_REQUIRED"
         );
     }
 

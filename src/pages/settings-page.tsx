@@ -29,8 +29,6 @@ import { api, parseErrorMessage } from "../api";
 import type {
   AgentMode,
   AppSettings,
-  BrowserEngine,
-  BrowserRunMode,
   BrowserRuntimeStatus,
   CaptureScope,
   ConnectionStatus,
@@ -46,13 +44,6 @@ const UNRESTRICTED_TITLE = "Enable unrestricted execution?";
 const UNRESTRICTED_BODY =
   "Every workspace loses its guards: ANY file becomes readable and editable (including .env, *.pem, *.key), ANY installed program can run, full PowerShell is always available, and execution bounds are lifted (timeouts up to 24 hours, 32 MiB of output per stream). The folder boundary, the Pause kill switch and the audit log stay in force. Only enable this if you fully trust the conversations you use it in.";
 const UNRESTRICTED_KEYWORD = "UNRESTRICTED";
-
-const ENGINE_LABELS: Record<BrowserEngine, string> = {
-  bundled_chromium: "Bundled Chromium",
-  chrome: "Chrome",
-  edge: "Edge",
-  firefox: "Firefox",
-};
 
 const PROFILE_RESET_TITLE = "Reset the automation browser profile?";
 const PROFILE_SEPARATION_COPY =
@@ -119,9 +110,7 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
   const [resettingProfile, setResettingProfile] = useState(false);
 
   async function updateBrowserSettings(
-    patch: Partial<
-      Pick<AppSettings, "browser_automation_enabled" | "browser_engine" | "browser_run_mode">
-    >,
+    patch: Partial<Pick<AppSettings, "browser_automation_enabled">>,
   ) {
     if (!settings) return;
     try {
@@ -135,7 +124,9 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
     if (!settings || resettingProfile) return;
     setResettingProfile(true);
     try {
-      const status = await api.resetBrowserProfile(settings.browser_engine);
+      // The backend accepts a fixed bundled engine identity; user engine
+      // selection was removed with the v6 settings schema.
+      const status = await api.resetBrowserProfile("bundled_chromium");
       setBrowserStatus(status);
       setResetProfileOpen(false);
     } catch (err) {
@@ -211,16 +202,15 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
 
   const fqdn = connection?.state.state === "online" ? connection.state.fqdn : null;
 
-  // Engine availability from backend diagnostics; `undefined` while loading
-  // (options stay enabled until we know otherwise).
-  const engineAvailability: Record<BrowserEngine, boolean | undefined> = {
+  // Engine availability from backend diagnostics; `undefined` while loading.
+  // Engine selection was removed from settings (v6); these flags are shown as
+  // read-only diagnostics until the Lightpanda runtime replaces them.
+  const engineAvailability = {
     bundled_chromium: browserStatus?.bundled_chromium_available,
     chrome: browserStatus?.chrome_available,
     edge: browserStatus?.edge_available,
     firefox: browserStatus?.firefox_available,
   };
-  const configuredEngineUnavailable =
-    !!settings && !!browserStatus && engineAvailability[settings.browser_engine] === false;
   const browserStateLabel = !browserStatus
     ? "Checking…"
     : !browserStatus.enabled
@@ -364,7 +354,7 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
           <div>
             <h2 className="text-sm font-semibold">Browser Automation</h2>
             <p className="text-[13px] text-muted-foreground">
-              Engine, run mode and dedicated profile for agent-driven browsing.
+              Background browser automation for agents, with a dedicated profile.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -382,71 +372,6 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
             />
           </div>
         </div>
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="setting-browser-engine">Browser</Label>
-            <Select
-              value={settings?.browser_engine ?? "bundled_chromium"}
-              disabled={!settings || !settings.browser_automation_enabled}
-              onValueChange={(value) =>
-                void updateBrowserSettings({ browser_engine: value as BrowserEngine })
-              }
-            >
-              <SelectTrigger id="setting-browser-engine" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem
-                  value="bundled_chromium"
-                  disabled={engineAvailability.bundled_chromium === false}
-                >
-                  Bundled Chromium
-                </SelectItem>
-                <SelectItem value="chrome" disabled={engineAvailability.chrome === false}>
-                  Chrome
-                </SelectItem>
-                <SelectItem value="edge" disabled={engineAvailability.edge === false}>
-                  Edge
-                </SelectItem>
-                <SelectItem value="firefox" disabled={engineAvailability.firefox === false}>
-                  Firefox
-                </SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-[13px] text-muted-foreground">
-              Engines that are not installed are disabled based on the diagnostics below.
-            </p>
-          </div>
-
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="setting-browser-run-mode">Run mode</Label>
-            <Select
-              value={settings?.browser_run_mode ?? "background"}
-              disabled={!settings || !settings.browser_automation_enabled}
-              onValueChange={(value) =>
-                void updateBrowserSettings({ browser_run_mode: value as BrowserRunMode })
-              }
-            >
-              <SelectTrigger id="setting-browser-run-mode" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="background">Background</SelectItem>
-                <SelectItem value="visible_debug">Visible Debug</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-[13px] text-muted-foreground">
-              Background runs headless; Visible Debug opens a browser window with DevTools.
-            </p>
-          </div>
-        </div>
-        {configuredEngineUnavailable ? (
-          <p role="alert" className="flex items-start gap-1.5 text-[13px] text-warning">
-            <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
-            {ENGINE_LABELS[settings?.browser_engine ?? "bundled_chromium"]} is not currently
-            available on this machine. Choose another engine or install the missing browser.
-          </p>
-        ) : null}
         <ul className="flex flex-col divide-y">
           <li className="flex items-center justify-between gap-3 py-2 text-sm first:pt-0">
             <span>Status</span>
@@ -699,9 +624,8 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
             <AlertDialogTitle>{PROFILE_RESET_TITLE}</AlertDialogTitle>
             <AlertDialogDescription>
               Resetting stops any running automation browser, then removes the automation
-              cookies, saved logins and localStorage stored in the dedicated{" "}
-              {settings ? ENGINE_LABELS[settings.browser_engine] : "selected"} profile. Your
-              normal browser profile and personal data are not touched.
+              cookies, saved logins and localStorage stored in the dedicated Local Workspaces
+              profile. Your normal browser profile and personal data are not touched.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

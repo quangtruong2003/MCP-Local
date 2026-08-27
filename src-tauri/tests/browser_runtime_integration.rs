@@ -41,10 +41,7 @@ use local_workspace_mcp_manager::{
     browser::{manager::BrowserManager, playwright::PlaywrightMcpDriver},
     screen_capture::{CaptureTarget, CapturedImage, ScreenCaptureProvider},
     server::WorkspaceServer,
-    settings::{
-        save_app_settings, AgentPolicyState, AgentSettingsController, AppSettings, BrowserEngine,
-        BrowserRunMode,
-    },
+    settings::{save_app_settings, AgentPolicyState, AgentSettingsController, AppSettings},
 };
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult},
@@ -190,20 +187,11 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
     }
 }
 
-fn background_settings(engine: BrowserEngine) -> AppSettings {
+/// v6 settings removed the user-owned engine/run-mode choice: every real
+/// session runs the fixed bundled backend in the background.
+fn background_settings() -> AppSettings {
     AppSettings {
         browser_automation_enabled: true,
-        browser_engine: engine,
-        browser_run_mode: BrowserRunMode::Background,
-        ..AppSettings::default()
-    }
-}
-
-fn visible_debug_settings(engine: BrowserEngine) -> AppSettings {
-    AppSettings {
-        browser_automation_enabled: true,
-        browser_engine: engine,
-        browser_run_mode: BrowserRunMode::VisibleDebug,
         ..AppSettings::default()
     }
 }
@@ -438,44 +426,6 @@ async fn fixture_count(fixture: &Fixture) -> usize {
     body["count"].as_u64().expect("count value") as usize
 }
 
-/// Detects whether a system Chrome/Edge channel binary is present so the
-/// conditional compatibility tests can report a deterministic skip otherwise.
-fn channel_available(engine: BrowserEngine) -> bool {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let local = PathBuf::from(local);
-        match engine {
-            BrowserEngine::Chrome => {
-                candidates.push(local.join(r"Google\Chrome\Application\chrome.exe"))
-            }
-            BrowserEngine::Edge => {
-                candidates.push(local.join(r"Microsoft\Edge\Application\msedge.exe"))
-            }
-            _ => {}
-        }
-    }
-    match engine {
-        BrowserEngine::Chrome => {
-            candidates.push(PathBuf::from(
-                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            ));
-            candidates.push(PathBuf::from(
-                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            ));
-        }
-        BrowserEngine::Edge => {
-            candidates.push(PathBuf::from(
-                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-            ));
-            candidates.push(PathBuf::from(
-                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-            ));
-        }
-        _ => return true,
-    }
-    candidates.iter().any(|p| p.exists())
-}
-
 // ---------------------------------------------------------------------------
 // Win32 helpers for the Background no-visible-window test
 // ---------------------------------------------------------------------------
@@ -568,7 +518,7 @@ async fn real_background_lifecycle_navigation_interaction() {
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(BrowserEngine::BundledChromium)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
     let base = fixture.base_url();
 
@@ -675,7 +625,7 @@ async fn real_responsive_screenshot_trace() {
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(BrowserEngine::BundledChromium)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
     open_url(client, &fixture.base_url()).await;
 
@@ -837,7 +787,7 @@ async fn real_upload_download_confinement() {
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(BrowserEngine::BundledChromium)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
 
     // Approved workspace with an upload source file.
@@ -984,7 +934,7 @@ async fn real_background_no_visible_window() {
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(BrowserEngine::BundledChromium)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
     open_url(client, &fixture.base_url()).await;
     // Give the browser tree a moment to spawn its child processes.
@@ -1030,7 +980,7 @@ async fn real_crash_readonly_safe_restart() {
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(BrowserEngine::BundledChromium)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
     open_url(client, &fixture.base_url()).await;
     let first_session = current_session_id(client).await;
@@ -1079,7 +1029,7 @@ async fn real_crash_ambiguous_click_no_replay() {
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(BrowserEngine::BundledChromium)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
     open_url(client, &fixture.base_url()).await;
 
@@ -1125,130 +1075,23 @@ async fn real_crash_ambiguous_click_no_replay() {
 }
 
 // ---------------------------------------------------------------------------
-// Step 7: browser compatibility — staged Firefox core navigation/interaction
-// and DevTools gating (unsupported for Firefox)
+// Step 7: engine selection removed (v6 settings) — the fixed bundled backend
+// serves core navigation/interaction, and DevTools fails closed because
+// Visible Debug is no longer a selectable run mode.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_firefox_core_and_devtools_unsupported() {
+async fn real_fixed_backend_core_and_devtools_fail_closed() {
     let _guard = SERIAL.lock().await;
-    if !runtime_available("firefox_core") {
+    if !runtime_available("fixed_backend_core") {
         return;
     }
 
     let fixture = browser_test_app::spawn().await;
     wait_fixture_ready(&fixture).await;
-    // Visible Debug so the DevTools assertion reaches the engine gate (the mode
-    // gate passes), proving Firefox itself is the reason DevTools is unsupported.
-    let env = spawn_real(visible_debug_settings(BrowserEngine::Firefox)).await;
+    let env = spawn_real(background_settings()).await;
     let client = &env.client;
 
-    open_url(client, &fixture.base_url()).await;
-
-    // Core navigation/interaction on staged Firefox. Firefox's cold start can
-    // exceed the 10s action budget, and playwright-mcp's post-click "settle"
-    // wait can report BROWSER_ACTION_TIMEOUT even after the click was actually
-    // delivered. We therefore assert on the DOM *effect* of the interaction:
-    // retry fill+click with fresh snapshots until the page's result state shows
-    // the click landed (or a deadline passes), regardless of the tool's
-    // reported status.
-    const EXPECTED_RESULT: &str = "result:name=firefox,color=red";
-    let deadline = Instant::now() + Duration::from_secs(45);
-    let mut result_text = String::new();
-    let mut last_status = String::from("no attempts run");
-    let mut interacted = false;
-    let mut attempt = 0u32;
-    while Instant::now() < deadline {
-        attempt += 1;
-        let snap = take_snapshot(client).await;
-        let name_ref = find_ref(&snap, "Name");
-        let submit_ref = find_ref(&snap, "Submit");
-        let fill = call(
-            client,
-            "browser_fill",
-            json!({ "ref": name_ref, "text": "firefox" }),
-        )
-        .await;
-        let fill_ok = is_ok(&fill);
-        let click_result = call(client, "browser_click", json!({ "ref": submit_ref })).await;
-        let click_ok = is_ok(&click_result);
-        last_status = format!("fill_ok={fill_ok} click_ok={click_ok}");
-        // Give the DOM a beat, then read the effect.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-        if let Some(text) = try_evaluate_str(
-            client,
-            "() => document.getElementById('result').textContent",
-        )
-        .await
-        {
-            result_text = text.clone();
-            if text == EXPECTED_RESULT {
-                interacted = true;
-                break;
-            }
-        }
-        eprintln!(
-            "[retry] firefox interaction attempt {attempt} not yet landed ({last_status}); result={result_text:?}"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    assert!(
-        interacted,
-        "firefox fill+click never landed after {attempt} attempts; last status = {last_status}; last result = {result_text:?}"
-    );
-    assert_eq!(result_text, EXPECTED_RESULT);
-    let title = evaluate_str(client, "() => document.title").await;
-    assert_eq!(title, "Browser Test App");
-
-    // DevTools is unsupported for Firefox (engine gate), even in Visible Debug.
-    let devtools = call(client, "browser_devtools", json!({})).await;
-    assert_error_code(
-        &devtools,
-        ErrorCode::BrowserFeatureUnsupported,
-        "firefox browser_devtools",
-    );
-
-    let close = call(client, "browser_close", json!({})).await;
-    assert_ok(&close, "browser_close");
-}
-
-// ---------------------------------------------------------------------------
-// Step 7: DevTools available only for Visible Debug Chromium-family
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_chromium_visible_debug_devtools_supported() {
-    let _guard = SERIAL.lock().await;
-    if !runtime_available("chromium_devtools_supported") {
-        return;
-    }
-
-    let fixture = browser_test_app::spawn().await;
-    wait_fixture_ready(&fixture).await;
-    let env = spawn_real(visible_debug_settings(BrowserEngine::BundledChromium)).await;
-    let client = &env.client;
-    open_url(client, &fixture.base_url()).await;
-
-    let devtools = call(client, "browser_devtools", json!({})).await;
-    assert_ok(&devtools, "chromium visible-debug browser_devtools");
-    let body = structured(&devtools);
-    assert_eq!(body["supported"], true);
-    assert_eq!(body["mode"], "visible_debug");
-    assert_eq!(body["auto_open"], true);
-
-    let close = call(client, "browser_close", json!({})).await;
-    assert_ok(&close, "browser_close");
-}
-
-// ---------------------------------------------------------------------------
-// Step 7: conditional Chrome / Edge channel compatibility
-// ---------------------------------------------------------------------------
-
-async fn run_channel_core_case(engine: BrowserEngine, label: &str) {
-    let fixture = browser_test_app::spawn().await;
-    wait_fixture_ready(&fixture).await;
-    let env = spawn_real(background_settings(engine)).await;
-    let client = &env.client;
     open_url(client, &fixture.base_url()).await;
 
     let snap = take_snapshot(client).await;
@@ -1257,45 +1100,28 @@ async fn run_channel_core_case(engine: BrowserEngine, label: &str) {
     let fill = call(
         client,
         "browser_fill",
-        json!({ "ref": name_ref, "text": label }),
+        json!({ "ref": name_ref, "text": "fixed" }),
     )
     .await;
-    assert_ok(&fill, &format!("{label} browser_fill"));
+    assert_ok(&fill, "fixed backend browser_fill");
     let click = call(client, "browser_click", json!({ "ref": submit_ref })).await;
-    assert_ok(&click, &format!("{label} browser_click"));
+    assert_ok(&click, "fixed backend browser_click");
     let result_text = evaluate_str(
         client,
         "() => document.getElementById('result').textContent",
     )
     .await;
-    assert_eq!(result_text, format!("result:name={label},color=red"));
+    assert_eq!(result_text, "result:name=fixed,color=red");
+
+    // DevTools can never be supported now: Visible Debug is not a selectable
+    // run mode under the fixed background backend.
+    let devtools = call(client, "browser_devtools", json!({})).await;
+    assert_error_code(
+        &devtools,
+        ErrorCode::BrowserFeatureUnsupportedInMode,
+        "fixed backend browser_devtools",
+    );
 
     let close = call(client, "browser_close", json!({})).await;
     assert_ok(&close, "browser_close");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_chrome_conditional() {
-    let _guard = SERIAL.lock().await;
-    if !runtime_available("chrome_conditional") {
-        return;
-    }
-    if !channel_available(BrowserEngine::Chrome) {
-        println!("SKIP [chrome_conditional]: no Chrome channel binary detected on this machine; deterministic skipped-unavailable condition.");
-        return;
-    }
-    run_channel_core_case(BrowserEngine::Chrome, "chrome").await;
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn real_edge_conditional() {
-    let _guard = SERIAL.lock().await;
-    if !runtime_available("edge_conditional") {
-        return;
-    }
-    if !channel_available(BrowserEngine::Edge) {
-        println!("SKIP [edge_conditional]: no Edge channel binary detected on this machine; deterministic skipped-unavailable condition.");
-        return;
-    }
-    run_channel_core_case(BrowserEngine::Edge, "edge").await;
 }

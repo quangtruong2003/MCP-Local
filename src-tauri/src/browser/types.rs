@@ -2,8 +2,6 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{BrowserEngine, BrowserRunMode};
-
 pub const DEFAULT_ACTION_TIMEOUT_MS: u64 = 10_000;
 pub const DEFAULT_NAVIGATION_TIMEOUT_MS: u64 = 60_000;
 pub const MAX_TOOL_TIMEOUT_MS: u64 = 120_000;
@@ -22,19 +20,68 @@ pub const MAX_COMPLETED_ARTIFACT_SESSIONS: usize = 10;
 pub const MAX_ARTIFACT_AGE_DAYS: u64 = 7;
 pub const MAX_ARTIFACT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
 
+/// The fixed product-visible browser backend. v0.2.0 has exactly one backend:
+/// Lightpanda running inside the app-owned WSL2 distro. This is a runtime
+/// status identity, not a user choice.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserBackend {
+    #[default]
+    Lightpanda,
+}
+
+/// Legacy engine identity retained for the bundled Playwright runtime until
+/// the Lightpanda migration removes it. No longer a user-visible setting.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserEngine {
+    #[default]
+    BundledChromium,
+    Chrome,
+    Edge,
+    Firefox,
+}
+
+impl BrowserEngine {
+    pub fn profile_key(self) -> &'static str {
+        match self {
+            Self::BundledChromium => "bundled_chromium",
+            Self::Chrome => "chrome",
+            Self::Edge => "edge",
+            Self::Firefox => "firefox",
+        }
+    }
+
+    pub fn is_chromium_family(self) -> bool {
+        !matches!(self, Self::Firefox)
+    }
+}
+
+/// Runtime-only run mode. Background is the sole supported mode; the legacy
+/// visible-debug variant is retained until the Playwright runtime is removed.
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserRunMode {
+    #[default]
+    Background,
+    VisibleDebug,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserRuntimeSettings {
     pub enabled: bool,
-    pub engine: BrowserEngine,
-    pub run_mode: BrowserRunMode,
 }
 
 impl From<&crate::settings::AppSettings> for BrowserRuntimeSettings {
     fn from(settings: &crate::settings::AppSettings) -> Self {
         Self {
             enabled: settings.browser_automation_enabled,
-            engine: settings.browser_engine,
-            run_mode: settings.browser_run_mode,
         }
     }
 }

@@ -1631,7 +1631,7 @@ impl WorkspaceServer {
             let launch = self.browser.active_launch().await.ok_or_else(|| {
                 CoreError::new(ErrorCode::BrowserNotRunning, "browser is not running")
             })?;
-            if launch.run_mode != crate::settings::BrowserRunMode::VisibleDebug {
+            if launch.run_mode != crate::browser::types::BrowserRunMode::VisibleDebug {
                 return Err(CoreError::new(
                     ErrorCode::BrowserFeatureUnsupportedInMode,
                     "visible DevTools requires Visible Debug run mode",

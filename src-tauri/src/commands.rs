@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::{Manager, State};
 
 use crate::{
+    browser::types::{BrowserEngine, BrowserRunMode},
     connection::{
         manager::{ConnectionError, ConnectionManager as TailscaleManager},
         state::ConnectionState,
@@ -423,8 +424,8 @@ fn sync_launch_on_startup(app: &tauri::AppHandle, want: bool) -> Result<(), Stri
 pub struct BrowserRuntimeStatus {
     pub enabled: bool,
     pub running: bool,
-    pub configured_engine: settings::BrowserEngine,
-    pub run_mode: settings::BrowserRunMode,
+    pub configured_engine: BrowserEngine,
+    pub run_mode: BrowserRunMode,
     pub bundled_chromium_available: bool,
     pub chrome_available: bool,
     pub edge_available: bool,
@@ -556,7 +557,7 @@ pub async fn browser_runtime_status(
 /// runtime status.
 #[tauri::command]
 pub async fn reset_browser_profile(
-    engine: settings::BrowserEngine,
+    engine: BrowserEngine,
     state: State<'_, AppState>,
 ) -> Result<BrowserRuntimeStatus, String> {
     state
@@ -738,8 +739,8 @@ mod tests {
         let status = BrowserRuntimeStatus {
             enabled: true,
             running: true,
-            configured_engine: settings::BrowserEngine::BundledChromium,
-            run_mode: settings::BrowserRunMode::Background,
+            configured_engine: BrowserEngine::BundledChromium,
+            run_mode: BrowserRunMode::Background,
             bundled_chromium_available: true,
             chrome_available: false,
             edge_available: false,

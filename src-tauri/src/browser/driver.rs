@@ -2,9 +2,7 @@ use lc_core::error::CoreError;
 use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
-use crate::settings::BrowserEngine;
-
-use super::types::BrowserLaunchSpec;
+use super::types::{BrowserEngine, BrowserLaunchSpec};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BrowserDriverStatus {

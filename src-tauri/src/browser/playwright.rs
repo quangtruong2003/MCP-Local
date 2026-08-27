@@ -21,14 +21,11 @@ use rmcp::{
 use serde_json::{json, Map, Value};
 use tokio::{io::AsyncBufReadExt, sync::Mutex};
 
-use crate::{
-    process_job::JobHandle,
-    settings::{BrowserEngine, BrowserRunMode},
-};
+use crate::process_job::JobHandle;
 
 use super::{
     driver::{BrowserDriver, BrowserDriverStatus},
-    types::BrowserLaunchSpec,
+    types::{BrowserEngine, BrowserLaunchSpec, BrowserRunMode},
 };
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;

@@ -15,12 +15,10 @@ use local_workspace_mcp_manager::{
     browser::{
         driver::{BrowserDriver, BrowserDriverStatus},
         manager::BrowserManager,
-        types::BrowserLaunchSpec,
+        types::{BrowserEngine, BrowserLaunchSpec, BrowserRunMode},
     },
     screen_capture::{CaptureTarget, CapturedImage, ScreenCaptureProvider},
-    settings::{
-        AgentPolicyState, AgentSettingsController, AppSettings, BrowserEngine, BrowserRunMode,
-    },
+    settings::{AgentPolicyState, AgentSettingsController, AppSettings},
 };
 use rmcp::{model::CallToolRequestParams, transport::StreamableHttpClientTransport, ServiceExt};
 
@@ -1957,49 +1955,26 @@ async fn evaluate_maps_to_page_context_and_never_process_code() {
 }
 
 #[tokio::test]
-async fn performance_merges_cdp_for_chromium_and_degrades_for_firefox() {
-    {
-        let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
-        let client = client(port).await;
-        open_browser(&client).await;
+async fn performance_reports_cdp_for_fixed_chromium_backend() {
+    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
 
-        let result = client
-            .call_tool(CallToolRequestParams::new("browser_performance"))
-            .await
-            .unwrap();
-        assert!(!result.is_error.unwrap_or(false));
-        let structured = result.structured_content.as_ref().unwrap().clone();
-        assert_eq!(structured["cdp_supported"], true);
-        assert_eq!(structured["cdp"], serde_json::json!({"metrics": []}));
-        assert_eq!(driver.cdp_calls.load(Ordering::SeqCst), 1);
-        assert!(driver.calls().iter().any(|c| {
-            c.tool == "browser_evaluate"
-                && c.arguments["function"]
-                    .as_str()
-                    .is_some_and(|f| f.contains("performance.getEntriesByType"))
-        }));
-    }
-
-    let firefox_settings = AppSettings {
-        browser_engine: BrowserEngine::Firefox,
-        ..AppSettings::default()
-    };
-    let (port, _dir, _core, driver) = spawn(firefox_settings).await;
-    let firefox_client = client(port).await;
-    open_browser(&firefox_client).await;
-    let result = firefox_client
+    let result = client
         .call_tool(CallToolRequestParams::new("browser_performance"))
         .await
         .unwrap();
-    assert!(
-        !result.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&result).unwrap()
-    );
+    assert!(!result.is_error.unwrap_or(false));
     let structured = result.structured_content.as_ref().unwrap().clone();
-    assert_eq!(structured["cdp_supported"], false);
-    assert!(structured["cdp"].is_null());
-    assert_eq!(driver.cdp_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(structured["cdp_supported"], true);
+    assert_eq!(structured["cdp"], serde_json::json!({"metrics": []}));
+    assert_eq!(driver.cdp_calls.load(Ordering::SeqCst), 1);
+    assert!(driver.calls().iter().any(|c| {
+        c.tool == "browser_evaluate"
+            && c.arguments["function"]
+                .as_str()
+                .is_some_and(|f| f.contains("performance.getEntriesByType"))
+    }));
 }
 
 #[tokio::test]
@@ -2090,42 +2065,23 @@ async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
 }
 
 #[tokio::test]
-async fn devtools_reports_launch_time_state_truthfully() {
-    {
-        let visible_firefox = AppSettings {
-            browser_run_mode: BrowserRunMode::VisibleDebug,
-            browser_engine: BrowserEngine::Firefox,
-            ..AppSettings::default()
-        };
-        let (port, _dir, _core, _driver) = spawn(visible_firefox).await;
-        let client = client(port).await;
-        open_browser(&client).await;
-        let result = client
-            .call_tool(CallToolRequestParams::new("browser_devtools"))
-            .await
-            .unwrap();
-        let text = serde_json::to_string(&result).unwrap();
-        assert!(result.is_error.unwrap_or(false), "{text}");
-        assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
-    }
-
-    let visible_chromium = AppSettings {
-        browser_run_mode: BrowserRunMode::VisibleDebug,
-        ..AppSettings::default()
-    };
-    let (port, _dir, _core, driver) = spawn(visible_chromium).await;
-    let chromium_client = client(port).await;
-    open_browser(&chromium_client).await;
-    let result = chromium_client
+async fn devtools_is_unsupported_under_fixed_background_backend() {
+    // Visible Debug is no longer a user-selectable run mode (v6 settings), so
+    // the fixed background backend can never report DevTools support. The tool
+    // must fail closed and never launch a second browser.
+    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let result = client
         .call_tool(CallToolRequestParams::new("browser_devtools"))
         .await
         .unwrap();
     let text = serde_json::to_string(&result).unwrap();
-    assert!(!result.is_error.unwrap_or(false), "{text}");
-    let structured = result.structured_content.as_ref().unwrap().clone();
-    assert_eq!(structured["supported"], true);
-    assert_eq!(structured["mode"], "visible_debug");
-    assert_eq!(structured["auto_open"], true);
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(
+        text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{text}"
+    );
     assert_eq!(
         driver.starts.load(Ordering::SeqCst),
         1,

@@ -18,7 +18,7 @@ use rmcp::model::CallToolResult;
 use serde_json::{Map, Value};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::settings::{AppSettings, BrowserEngine};
+use crate::settings::AppSettings;
 
 use super::{
     artifacts::ArtifactStore,
@@ -26,8 +26,9 @@ use super::{
     playwright::PlaywrightMcpDriver,
     policy::validate_navigation_url,
     types::{
-        BrowserEmulation, BrowserLaunchSpec, BrowserPageStatus, BrowserRuntimeSettings,
-        BrowserSessionStatus, DEFAULT_ACTION_TIMEOUT_MS, DEFAULT_NAVIGATION_TIMEOUT_MS,
+        BrowserEmulation, BrowserEngine, BrowserLaunchSpec, BrowserPageStatus,
+        BrowserRunMode, BrowserRuntimeSettings, BrowserSessionStatus,
+        DEFAULT_ACTION_TIMEOUT_MS, DEFAULT_NAVIGATION_TIMEOUT_MS,
     },
 };
 
@@ -39,6 +40,13 @@ pub(crate) struct PageBinding {
     pub url: String,
     pub active: bool,
 }
+
+/// Fixed internal launch identity for the bundled Playwright runtime. User
+/// engine/run-mode choice was removed with the v6 settings schema; the backend
+/// is pinned to the bundled Chromium in background mode until the Lightpanda
+/// page driver replaces this runtime entirely.
+const LEGACY_FIXED_ENGINE: BrowserEngine = BrowserEngine::BundledChromium;
+const LEGACY_FIXED_RUN_MODE: BrowserRunMode = BrowserRunMode::Background;
 
 #[derive(Debug, Clone)]
 struct ActiveSession {
@@ -163,17 +171,17 @@ impl BrowserManager {
 
     async fn start_new_session(
         &self,
-        settings: BrowserRuntimeSettings,
+        _settings: BrowserRuntimeSettings,
         emulation: Option<BrowserEmulation>,
     ) -> Result<BrowserSessionStatus, CoreError> {
         let session_id = self.new_session_id();
         let artifact_dir = self.artifacts.create_session(&session_id)?;
-        let profile_dir = self.profile_dir_for(settings.engine);
+        let profile_dir = self.profile_dir_for(LEGACY_FIXED_ENGINE);
         std::fs::create_dir_all(&profile_dir).map_err(CoreError::io)?;
         let launch = BrowserLaunchSpec {
             session_id: session_id.clone(),
-            engine: settings.engine,
-            run_mode: settings.run_mode,
+            engine: LEGACY_FIXED_ENGINE,
+            run_mode: LEGACY_FIXED_RUN_MODE,
             profile_dir,
             artifact_dir,
             action_timeout_ms: DEFAULT_ACTION_TIMEOUT_MS,
@@ -218,9 +226,9 @@ impl BrowserManager {
         BrowserSessionStatus {
             enabled: settings.enabled,
             paused: self.core.pause.is_paused(),
-            configured_engine: settings.engine,
+            configured_engine: LEGACY_FIXED_ENGINE,
             actual_engine: active.map(|s| s.driver.actual_engine),
-            run_mode: settings.run_mode,
+            run_mode: LEGACY_FIXED_RUN_MODE,
             running: active.is_some(),
             session_id: active.map(|s| s.session_id.clone()),
             active_page,
@@ -305,13 +313,9 @@ impl BrowserManager {
             previous
         };
         let running = self.state.lock().await.active.is_some();
-        if running
-            && (!settings.enabled
-                || settings.engine != previous.engine
-                || settings.run_mode != previous.run_mode)
-        {
+        if running && !settings.enabled && previous.enabled {
             // Settings were already committed in-memory above. Even if stop
-            // fails, OFF/new config governs every subsequent guard.
+            // fails, OFF governs every subsequent guard.
             self.stop_active_unchecked().await?;
         }
         Ok(self.status().await)
@@ -549,7 +553,6 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
 
-    use crate::settings::BrowserRunMode;
     use rmcp::model::{CallToolResult, ContentBlock};
 
     #[derive(Default)]
@@ -617,7 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn disabling_or_changing_launch_config_stops_session_and_next_open_is_new() {
+    async fn disabling_stops_session_and_next_open_is_new() {
         let dir = tempfile::tempdir().unwrap();
         let core = core(dir.path());
         let driver = Arc::new(FakeDriver::default());
@@ -628,28 +631,18 @@ mod tests {
         let first = manager.open(None).await.unwrap();
         let first_id = first.session_id.unwrap();
         manager
-            .apply_settings(BrowserRuntimeSettings {
-                enabled: true,
-                engine: BrowserEngine::Firefox,
-                run_mode: BrowserRunMode::Background,
-            })
+            .apply_settings(BrowserRuntimeSettings { enabled: false })
             .await
             .unwrap();
         assert_eq!(driver.stops.load(Ordering::SeqCst), 1);
-        assert!(!manager.status().await.running);
-        let second = manager.open(None).await.unwrap();
-        assert_ne!(second.session_id.as_deref(), Some(first_id.as_str()));
+        assert!(!manager.status().await.enabled);
 
         manager
-            .apply_settings(BrowserRuntimeSettings {
-                enabled: false,
-                engine: BrowserEngine::Firefox,
-                run_mode: BrowserRunMode::Background,
-            })
+            .apply_settings(BrowserRuntimeSettings { enabled: true })
             .await
             .unwrap();
-        assert_eq!(driver.stops.load(Ordering::SeqCst), 2);
-        assert!(!manager.status().await.enabled);
+        let second = manager.open(None).await.unwrap();
+        assert_ne!(second.session_id.as_deref(), Some(first_id.as_str()));
     }
 
     #[tokio::test]

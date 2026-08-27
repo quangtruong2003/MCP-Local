@@ -416,7 +416,7 @@ pub struct BrowserTraceOutput {
 pub struct BrowserDevtoolsOutput {
     pub supported: bool,
     pub mode: String,
-    pub engine: crate::settings::BrowserEngine,
+    pub engine: super::types::BrowserEngine,
     pub auto_open: bool,
 }
 

@@ -373,45 +373,13 @@ impl AgentSettingsController {
     }
 }
 
-#[derive(
-    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserEngine {
-    #[default]
-    BundledChromium,
-    Chrome,
-    Edge,
-    Firefox,
-}
-
-impl BrowserEngine {
-    pub fn profile_key(self) -> &'static str {
-        match self {
-            Self::BundledChromium => "bundled_chromium",
-            Self::Chrome => "chrome",
-            Self::Edge => "edge",
-            Self::Firefox => "firefox",
-        }
-    }
-
-    pub fn is_chromium_family(self) -> bool {
-        !matches!(self, Self::Firefox)
-    }
-}
-
-#[derive(
-    Debug, Clone, Copy, Default, Serialize, Deserialize, schemars::JsonSchema, PartialEq, Eq,
-)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserRunMode {
-    #[default]
-    Background,
-    VisibleDebug,
-}
-
-/// Versioned application settings (`version: 5`). All non-version fields are
+/// Versioned application settings (`version: 6`). All non-version fields are
 /// serde-defaulted so older files keep parsing after upgrades.
+///
+/// v6 removes the user-owned browser engine/run-mode choices: the browser
+/// backend is fixed to Lightpanda (WSL2) running in the background, so only
+/// the `browser_automation_enabled` toggle remains a user setting. Legacy v5
+/// choice fields are ignored on load and dropped on the next save.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AppSettings {
     pub version: u32,
@@ -453,14 +421,10 @@ pub struct AppSettings {
     #[serde(default = "default_true")]
     pub visual_verification: bool,
     /// Broad browser automation/debugging capability. Desktop-owned setting.
+    /// The backend is fixed to Lightpanda (WSL2) in the background; there is
+    /// no engine or visible-debug choice.
     #[serde(default = "default_true")]
     pub browser_automation_enabled: bool,
-    /// Browser engine used for the next automation session.
-    #[serde(default)]
-    pub browser_engine: BrowserEngine,
-    /// Background/headless by default; visible debug is explicit user choice.
-    #[serde(default)]
-    pub browser_run_mode: BrowserRunMode,
 }
 
 impl From<&AppSettings> for AgentPolicySnapshot {
@@ -502,7 +466,7 @@ impl AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            version: 5,
+            version: 6,
             start_on_launch: false,
             tailscale_hostname: default_tailscale_hostname(),
             onboarding_complete: false,
@@ -516,8 +480,6 @@ impl Default for AppSettings {
             capture_scope: CaptureScope::WindowsAndDisplays,
             visual_verification: true,
             browser_automation_enabled: true,
-            browser_engine: BrowserEngine::BundledChromium,
-            browser_run_mode: BrowserRunMode::Background,
         }
     }
 }
@@ -566,8 +528,9 @@ pub fn load_app_settings(dir: &Path) -> Result<AppSettings, String> {
         settings.normalize();
         // Older versioned files deserialize through serde defaults; once in
         // memory they use the current schema version and will be persisted as
-        // v5 on the next settings update.
-        settings.version = 5;
+        // v6 on the next settings update. Legacy v5 browser engine/run-mode
+        // choice fields are unknown keys at that point and are dropped.
+        settings.version = 6;
         settings
     };
     Ok(settings)
@@ -664,11 +627,11 @@ mod tests {
     }
 
     #[test]
-    fn app_settings_missing_file_yields_secure_v5_browser_defaults() {
+    fn app_settings_missing_file_yields_secure_v6_browser_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();
         assert_eq!(loaded, AppSettings::default());
-        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.version, 6);
         assert!(!loaded.start_on_launch);
         assert_eq!(loaded.tailscale_hostname, "local-workspace-mcp");
         assert!(!loaded.onboarding_complete);
@@ -681,10 +644,11 @@ mod tests {
         assert!(!loaded.screen_capture_enabled);
         assert_eq!(loaded.capture_scope, CaptureScope::WindowsAndDisplays);
         assert!(loaded.visual_verification);
+        assert!(loaded.browser_automation_enabled);
     }
 
     #[test]
-    fn v4_file_upgrades_to_v5_browser_defaults() {
+    fn v4_file_upgrades_to_v6_browser_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
@@ -693,28 +657,61 @@ mod tests {
         .unwrap();
 
         let loaded = load_app_settings(dir.path()).unwrap();
-        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.version, 6);
         assert!(loaded.browser_automation_enabled);
-        assert_eq!(loaded.browser_engine, BrowserEngine::BundledChromium);
-        assert_eq!(loaded.browser_run_mode, BrowserRunMode::Background);
     }
 
     #[test]
     fn browser_settings_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let settings = AppSettings {
-            version: 5,
+            version: 6,
             browser_automation_enabled: false,
-            browser_engine: BrowserEngine::Firefox,
-            browser_run_mode: BrowserRunMode::VisibleDebug,
             ..AppSettings::default()
         };
         save_app_settings(dir.path(), &settings).unwrap();
         assert_eq!(load_app_settings(dir.path()).unwrap(), settings);
     }
 
+    /// v5 files that carried user-selected engine/run-mode choices migrate
+    /// deterministically: the toggle survives, the choice fields are dropped
+    /// from the serialized form, and the backend is fixed to Lightpanda by the
+    /// runtime rather than persisted as a user choice.
     #[test]
-    fn v3_file_upgrades_to_v5_agent_and_browser_defaults() {
+    fn v5_browser_choices_migrate_to_v6_fixed_lightpanda_backend() {
+        for engine in ["bundled_chromium", "chrome", "edge", "firefox", "bogus"] {
+            for run_mode in ["background", "visible_debug", "bogus"] {
+                let dir = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    dir.path().join("settings.json"),
+                    format!(
+                        r#"{{"version":5,"browser_automation_enabled":false,"browser_engine":"{engine}","browser_run_mode":"{run_mode}"}}"#
+                    ),
+                )
+                .unwrap();
+                let loaded = load_app_settings(dir.path()).unwrap();
+                assert_eq!(loaded.version, 6, "engine={engine} run_mode={run_mode}");
+                assert!(
+                    !loaded.browser_automation_enabled,
+                    "toggle must survive migration (engine={engine} run_mode={run_mode})"
+                );
+                save_app_settings(dir.path(), &loaded).unwrap();
+                let text = std::fs::read_to_string(dir.path().join("settings.json")).unwrap();
+                assert!(
+                    !text.contains("browser_engine"),
+                    "legacy engine field must not be re-serialized: {text}"
+                );
+                assert!(
+                    !text.contains("browser_run_mode"),
+                    "legacy run-mode field must not be re-serialized: {text}"
+                );
+                assert!(text.contains("\"browser_automation_enabled\": false"));
+            }
+        }
+    }
+
+    #[test]
+    fn v3_file_upgrades_to_v6_agent_and_browser_defaults() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(
             dir.path().join("settings.json"),
@@ -722,7 +719,7 @@ mod tests {
         )
         .unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();
-        assert_eq!(loaded.version, 5);
+        assert_eq!(loaded.version, 6);
         assert_eq!(loaded.agent_mode, AgentMode::Autonomous);
         assert!(!loaded.screen_capture_enabled);
         assert_eq!(loaded.capture_scope, CaptureScope::WindowsAndDisplays);
@@ -783,7 +780,7 @@ mod tests {
     fn app_settings_roundtrip_preserves_all_fields() {
         let dir = tempfile::tempdir().unwrap();
         let settings = AppSettings {
-            version: 5,
+            version: 6,
             start_on_launch: true,
             tailscale_hostname: "my-machine.tailnet-name.ts.net".into(),
             onboarding_complete: true,
@@ -797,8 +794,6 @@ mod tests {
             capture_scope: CaptureScope::WindowsOnly,
             visual_verification: false,
             browser_automation_enabled: false,
-            browser_engine: BrowserEngine::Firefox,
-            browser_run_mode: BrowserRunMode::VisibleDebug,
         };
         save_app_settings(dir.path(), &settings).unwrap();
         let loaded = load_app_settings(dir.path()).unwrap();
