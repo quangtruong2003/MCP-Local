@@ -132,7 +132,7 @@ impl BrowserManager {
         Ok(settings)
     }
 
-    fn engine_slug(engine: BrowserEngine) -> &'static str {
+    pub(crate) fn engine_slug(engine: BrowserEngine) -> &'static str {
         match engine {
             BrowserEngine::BundledChromium => "bundled-chromium",
             BrowserEngine::Chrome => "chrome",

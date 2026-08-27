@@ -562,18 +562,23 @@ pub async fn reset_browser_profile(
     engine: settings::BrowserEngine,
     state: State<'_, AppState>,
 ) -> Result<BrowserRuntimeStatus, String> {
-    let profile = state.browser.profile_dir_for(engine);
     state
         .browser
         .reset_profile(engine)
         .await
         .map_err(err_string)?;
+    // Audit only the managed-relative profile path, never the absolute
+    // filesystem location (final-review Minor 3).
+    let audit_path = format!(
+        "browser/profiles/{}",
+        crate::browser::manager::BrowserManager::engine_slug(engine)
+    );
     audit_ui(
         &state.core.db,
         None,
         "reset_browser_profile",
         None,
-        Some(&profile.display().to_string()),
+        Some(&audit_path),
         Some(serde_json::json!({ "engine": engine })),
     );
     Ok(build_browser_runtime_status(&state).await)

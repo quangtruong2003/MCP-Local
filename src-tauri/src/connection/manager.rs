@@ -21,11 +21,27 @@ use std::time::Duration;
 use async_trait::async_trait;
 use tokio::sync::{mpsc, Mutex, Notify};
 
-/// Pause before re-verifying after a public-health verification exhausted
-/// its own bounded budget while the sidecar is still alive. The verifier
-/// already spent its full window probing; this cadence only keeps a
-/// persistently failing endpoint from being re-probed back-to-back.
-const REVERIFY_DELAY: Duration = Duration::from_secs(2);
+/// Base pause before the first re-verification after a public-health
+/// verification exhausted its own bounded budget while the sidecar is still
+/// alive. Each consecutive failure doubles the pause (exponential backoff) so a
+/// persistently failing endpoint is not re-probed back-to-back; the pause never
+/// exceeds [`REVERIFY_MAX_DELAY`]. Retries keep being scheduled internally and
+/// the `Error` state stays visible the whole time, so genuinely broken setups
+/// keep reporting honestly without a manual Retry.
+const REVERIFY_BASE_DELAY: Duration = Duration::from_secs(2);
+/// Upper bound for the exponential re-verification backoff.
+const REVERIFY_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Exponential backoff for the `consecutive_failures`-th failed public-health
+/// re-verification (1-based): 2s, 4s, 8s, 16s, then capped at
+/// [`REVERIFY_MAX_DELAY`]. Pure and overflow-safe so it is directly testable.
+fn reverify_backoff(consecutive_failures: u64) -> Duration {
+    let shift = consecutive_failures.saturating_sub(1).min(63) as u32;
+    let secs = REVERIFY_BASE_DELAY
+        .as_secs()
+        .saturating_mul(1u64.checked_shl(shift).unwrap_or(u64::MAX));
+    Duration::from_secs(secs.min(REVERIFY_MAX_DELAY.as_secs()))
+}
 
 use super::health::{verify_public_health, HealthError};
 use super::secrets::CapabilitySecretStore;
@@ -488,7 +504,9 @@ enum RunWake {
 /// alive: cold-start funnel/ingress propagation can complete right after the
 /// verifier's bounded budget expires, and re-verifying recovers to `Online`
 /// without a manual Retry. The error state stays visible until recovery, so
-/// genuinely broken setups keep reporting honestly.
+/// genuinely broken setups keep reporting honestly. Consecutive failures back
+/// off exponentially ([`reverify_backoff`]) so a persistently failing endpoint
+/// is probed less and less often instead of every couple of seconds.
 async fn verify_and_apply(
     shared: &Shared,
     gen: u64,
@@ -496,6 +514,7 @@ async fn verify_and_apply(
     capability: &str,
     verify_fqdn: &mut Option<String>,
     reverify_at: &mut Option<tokio::time::Instant>,
+    reverify_failures: &mut u64,
 ) -> bool {
     shared
         .set_state(
@@ -515,6 +534,7 @@ async fn verify_and_apply(
         Ok(()) => {
             *verify_fqdn = None;
             *reverify_at = None;
+            *reverify_failures = 0;
             let url = endpoint(fqdn, capability);
             shared
                 .set_state(
@@ -530,7 +550,8 @@ async fn verify_and_apply(
             // HealthError messages name the FQDN/status only, never the
             // capability path.
             *verify_fqdn = Some(fqdn.to_string());
-            *reverify_at = Some(tokio::time::Instant::now() + REVERIFY_DELAY);
+            *reverify_failures += 1;
+            *reverify_at = Some(tokio::time::Instant::now() + reverify_backoff(*reverify_failures));
             shared
                 .set_state(
                     gen,
@@ -550,8 +571,9 @@ async fn verify_and_apply(
 /// generations never write state.
 ///
 /// While the sidecar is alive, an exhausted public-health verification
-/// schedules a re-verification every [`REVERIFY_DELAY`] instead of leaving
-/// the run stuck in `HEALTH_VERIFY_FAILED` until a manual Retry.
+/// schedules a re-verification with exponential backoff
+/// ([`reverify_backoff`]) instead of leaving the run stuck in
+/// `HEALTH_VERIFY_FAILED` until a manual Retry.
 async fn run_loop(
     shared: Arc<Shared>,
     mut session: Box<dyn SidecarSession>,
@@ -563,6 +585,9 @@ async fn run_loop(
     // verification and cleared by a successful one, a sidecar error, or stop.
     let mut verify_fqdn: Option<String> = None;
     let mut reverify_at: Option<tokio::time::Instant> = None;
+    // Count of consecutive failed re-verifications for this target; drives the
+    // exponential backoff and resets on success or when the target is cleared.
+    let mut reverify_failures: u64 = 0;
 
     loop {
         // The re-verification branch stays pending forever unless one is
@@ -612,6 +637,7 @@ async fn run_loop(
                 &capability,
                 &mut verify_fqdn,
                 &mut reverify_at,
+                &mut reverify_failures,
             )
             .await
             {
@@ -636,6 +662,7 @@ async fn run_loop(
                 // serve; a pending re-verification of the old fqdn is moot.
                 verify_fqdn = None;
                 reverify_at = None;
+                reverify_failures = 0;
                 if code == "FUNNEL_NOT_ALLOWED" {
                     // Actionable permission problem, not a fatal error: keep
                     // listening so a later FunnelListening still lands.
@@ -1190,6 +1217,61 @@ mod tests {
         drop(tx);
     }
 
+    /// Regression (final-review Important 1): repeated public-health failures
+    /// must back off exponentially instead of re-probing every couple of
+    /// seconds, yet the run must still recover to Online on its own once the
+    /// endpoint becomes healthy. With ONE funnel_listening event and a scripted
+    /// fail-fail-fail-then-success verifier, the same sidecar recovers with
+    /// exactly four verification calls and no respawn.
+    #[tokio::test(start_paused = true)]
+    async fn repeated_health_failures_back_off_then_recover_same_sidecar() {
+        let (sess, tx, stop_called) = fake_session();
+        tx.send(SidecarEvent::Starting).unwrap();
+        tx.send(SidecarEvent::FunnelListening {
+            fqdn: HOSTNAME.into(),
+        })
+        .unwrap();
+        // tx intentionally kept alive: recovery must come from re-verification.
+
+        let verifier = ScriptedVerifier::new([
+            Err(HealthError::Request("connect".into())),
+            Err(HealthError::Request("connect".into())),
+            Err(HealthError::Request("connect".into())),
+            Ok(()),
+        ]);
+        let h = harness([sess], verifier.clone());
+        h.mgr.start().await.unwrap();
+
+        // The run reports the failure honestly and stays recoverable.
+        wait_for(
+            &h.mgr,
+            Duration::from_secs(5),
+            |s| matches!(s, ConnectionState::Error { code, .. } if code == "HEALTH_VERIFY_FAILED"),
+        )
+        .await;
+
+        // After backing off (2s, 4s, 8s under the paused clock) the same run
+        // recovers to Online without a manual Retry or a sidecar respawn.
+        let online = wait_for(&h.mgr, Duration::from_secs(10), |s| {
+            matches!(s, ConnectionState::Online { .. })
+        })
+        .await;
+        assert_eq!(
+            online,
+            ConnectionState::Online {
+                fqdn: HOSTNAME.into(),
+                endpoint: endpoint(HOSTNAME, &h.initial_capability),
+            }
+        );
+
+        assert_eq!(h.driver.spawn_count(), 1, "must not respawn the sidecar");
+        assert_eq!(verifier.calls(), 4, "three failures then one success");
+        assert!(
+            !stop_called.load(Ordering::SeqCst),
+            "must not stop the live sidecar"
+        );
+    }
+
     #[tokio::test]
     async fn double_start_returns_same_status_without_duplicate_spawn() {
         let (sess, tx, _) = fake_session();
@@ -1359,5 +1441,22 @@ mod tests {
             endpoint("box.tailnet.ts.net", "cap123"),
             "https://box.tailnet.ts.net/cap123/mcp"
         );
+    }
+
+    /// Final-review Important 1: the re-verification backoff doubles on each
+    /// consecutive failure and is capped at [`REVERIFY_MAX_DELAY`], so a
+    /// persistently failing endpoint is probed less and less often rather than
+    /// every couple of seconds. Pure and deterministic.
+    #[test]
+    fn reverify_backoff_grows_exponentially_and_caps() {
+        assert_eq!(reverify_backoff(1), Duration::from_secs(2));
+        assert_eq!(reverify_backoff(2), Duration::from_secs(4));
+        assert_eq!(reverify_backoff(3), Duration::from_secs(8));
+        assert_eq!(reverify_backoff(4), Duration::from_secs(16));
+        // 2^5 = 32 exceeds the cap.
+        assert_eq!(reverify_backoff(5), REVERIFY_MAX_DELAY);
+        assert_eq!(reverify_backoff(6), REVERIFY_MAX_DELAY);
+        // Overflow-safe: huge attempt counts still clamp to the cap.
+        assert_eq!(reverify_backoff(u64::MAX), REVERIFY_MAX_DELAY);
     }
 }

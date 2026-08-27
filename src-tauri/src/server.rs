@@ -492,10 +492,10 @@ async fn browser_wait_internal(
                 browser.guard_page_operation().await?;
                 let (function, target, expected) = match &other {
                     BrowserWaitCondition::RefVisible { ref_id } => {
-                        (WAIT_VISIBLE_FUNCTION, Some(ref_id.as_str()), Some("true"))
+                        (WAIT_VISIBLE_FUNCTION, Some(ref_id.as_str()), Some(true))
                     }
                     BrowserWaitCondition::RefHidden { ref_id } => {
-                        (WAIT_VISIBLE_FUNCTION, Some(ref_id.as_str()), Some("false"))
+                        (WAIT_VISIBLE_FUNCTION, Some(ref_id.as_str()), Some(false))
                     }
                     BrowserWaitCondition::UrlContains { .. } => (WAIT_URL_FUNCTION, None, None),
                     BrowserWaitCondition::LoadState { .. } => (WAIT_READY_FUNCTION, None, None),
@@ -514,7 +514,13 @@ async fn browser_wait_internal(
                 let matched = match &other {
                     BrowserWaitCondition::RefVisible { .. }
                     | BrowserWaitCondition::RefHidden { .. } => {
-                        text.to_ascii_lowercase().contains(expected.unwrap())
+                        // Upstream browser_evaluate returns JSON.stringify(result).
+                        // Parse it and compare the boolean instead of substring
+                        // matching, so an error message or string that merely
+                        // contains "true"/"false" can never false-match.
+                        serde_json::from_str::<serde_json::Value>(&text)
+                            .map(|value| value == serde_json::Value::Bool(expected.unwrap()))
+                            .unwrap_or(false)
                     }
                     BrowserWaitCondition::UrlContains { value } => text.contains(value),
                     BrowserWaitCondition::LoadState { state } => {
@@ -1521,9 +1527,18 @@ impl WorkspaceServer {
                         .collect(),
                 ),
             );
-            self.browser
+            let upload = self
+                .browser
                 .call_upstream("browser_file_upload", args)
-                .await?;
+                .await;
+            // Best-effort: the staged copies have served their purpose once the
+            // upstream call returns (success or failure); remove them so the
+            // session sandbox does not accumulate duplicate upload bytes
+            // (final-review Minor 5).
+            for path in &staged {
+                let _ = std::fs::remove_file(path);
+            }
+            upload?;
             Ok::<_, CoreError>(serde_json::json!({"file_count":staged.len(),"bytes":total}))
         }
         .await;
