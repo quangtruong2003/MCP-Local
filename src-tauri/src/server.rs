@@ -887,14 +887,8 @@ impl WorkspaceServer {
     )]
     async fn browser_snapshot(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = async {
-            let response = self
-                .browser
-                .call_upstream("browser_snapshot", serde_json::Map::new())
-                .await?;
-            let (text, truncated) = truncate_utf8(
-                call_result_text(&response),
-                crate::browser::types::MAX_SNAPSHOT_BYTES,
-            );
+            let text = self.browser.snapshot_tree().await?;
+            let (text, truncated) = truncate_utf8(text, crate::browser::types::MAX_SNAPSHOT_BYTES);
             let bytes = text.len();
             Ok::<_, CoreError>(BrowserSnapshotOutput {
                 snapshot: text,
@@ -917,9 +911,7 @@ impl WorkspaceServer {
     )]
     async fn browser_click(&self, Parameters(a): Parameters<BrowserTargetArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
-            let r = self.browser.call_upstream("browser_click", args).await?;
+            let r = self.browser.click_ref(&a.ref_id).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&r), 64 * 1024);
             Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
         }
@@ -939,14 +931,12 @@ impl WorkspaceServer {
     )]
     async fn browser_fill(&self, Parameters(a): Parameters<BrowserFillArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
-            args.insert("text".into(), serde_json::Value::String(a.text.clone()));
-            args.insert("submit".into(), serde_json::Value::Bool(a.submit));
-            args.insert("slowly".into(), serde_json::Value::Bool(a.slowly));
-            let r = self.browser.call_upstream("browser_type", args).await?;
+            self.browser.fill_ref(&a.ref_id, &a.text, a.submit).await?;
+            // Fixed output on purpose: Lightpanda echoes the filled value back
+            // in its action result, and filled text never leaves the audit
+            // boundary as content.
             Ok::<_, CoreError>(BrowserTextOutput {
-                text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
+                text: format!("filled {} bytes into the target element", a.text.len()),
             })
         }
         .await;
@@ -991,7 +981,6 @@ impl WorkspaceServer {
             Some(serde_json::json!({"key":a.key})),
         )
     }
-
     #[tool(
         description = "Select one or more values in a select element target.",
         annotations(read_only_hint = false),
@@ -1005,15 +994,11 @@ impl WorkspaceServer {
                     "browser_select requires 1 to 64 values",
                 ));
             }
-            let mut args = serde_json::Map::new();
-            args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
-            args.insert("values".into(), serde_json::json!(a.values));
-            let r = self
-                .browser
-                .call_upstream("browser_select_option", args)
-                .await?;
+            self.browser.select_ref(&a.ref_id, &a.values).await?;
+            // Fixed output: option values are model-supplied data and are not
+            // echoed back through the tool response.
             Ok::<_, CoreError>(BrowserTextOutput {
-                text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
+                text: format!("selected {} values in the target element", a.values.len()),
             })
         }
         .await;
@@ -1032,9 +1017,7 @@ impl WorkspaceServer {
     )]
     async fn browser_hover(&self, Parameters(a): Parameters<BrowserTargetArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
-            self.browser.call_upstream("browser_hover", args).await?;
+            self.browser.hover_ref(&a.ref_id).await?;
             Ok::<_, CoreError>(BrowserOkOutput { ok: true })
         }
         .await;

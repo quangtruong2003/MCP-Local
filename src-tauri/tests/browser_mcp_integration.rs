@@ -148,7 +148,23 @@ impl BrowserPageDriver for FakePageDriver {
         }
 
         match tool {
-            "browser_snapshot" => return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("- button 'Save' [target=e1]\n- textbox 'Name' [target=e2]")])),
+            // Mirrors Lightpanda 0.3.7 `tree` output: one space of indent per
+            // depth level, then a decimal backendNodeId followed by
+            // interactivity/role/name/value markers.
+            "tree" => return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("1 WebArea 'Browser Test App'\n 2 [i] textbox 'Name'\n 3 [i] combobox 'Color' options=['red','green','blue']\n 4 [i] button 'Submit'\n")])),
+            // Mirrors Lightpanda 0.3.7 `nodeDetails`: JSON carrying a
+            // ready-to-use CSS selector for the backend node.
+            "nodeDetails" => {
+                let id = arguments
+                    .get("backendNodeId")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                return Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(format!(
+                        "{{\"backendNodeId\":{id},\"tagName\":\"div\",\"role\":\"generic\",\"isInteractive\":true,\"selector\":\"#nd-{id}\"}}"
+                    )),
+                ]));
+            }
             "browser_take_screenshot" => {
                 let block = self.shared.screenshot_block.lock().unwrap().take();
                 return Ok(rmcp::model::CallToolResult::success(vec![
@@ -469,6 +485,15 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
             "{name}: {}",
             serde_json::to_string(&result).unwrap()
         );
+        // Side-effecting interactions invalidate snapshot refs; the next ref
+        // use must re-snapshot first, exactly like a real agent flow.
+        if matches!(name, "browser_click" | "browser_fill" | "browser_select") {
+            let resnap = client
+                .call_tool(CallToolRequestParams::new("browser_snapshot"))
+                .await
+                .unwrap();
+            assert!(!resnap.is_error.unwrap_or(false));
+        }
     }
 
     // Viewport resizing is structurally unsupported under the lightpanda
@@ -1050,107 +1075,165 @@ async fn open_browser(client: &rmcp::service::RunningService<rmcp::service::Role
 }
 
 #[tokio::test]
-async fn interaction_tools_map_exactly_to_upstream_primitives() {
+async fn interaction_tools_resolve_refs_to_native_selectors_via_node_details() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
-    let cases: Vec<(&str, serde_json::Value, &str, serde_json::Value)> = vec![
-        (
-            "browser_snapshot",
-            serde_json::json!({}),
-            "browser_snapshot",
-            serde_json::json!({}),
-        ),
-        (
-            "browser_click",
-            serde_json::json!({"ref":"e12"}),
-            "browser_click",
-            serde_json::json!({"target":"e12"}),
-        ),
-        (
-            "browser_fill",
-            serde_json::json!({"ref":"e3","text":"secret"}),
-            "browser_type",
-            serde_json::json!({"target":"e3","text":"secret","slowly":false,"submit":false}),
-        ),
-        (
-            "browser_press",
-            serde_json::json!({"key":"Enter"}),
-            "browser_press_key",
-            serde_json::json!({"key":"Enter"}),
-        ),
-        (
-            "browser_select",
-            serde_json::json!({"ref":"e7","values":["US"]}),
-            "browser_select_option",
-            serde_json::json!({"target":"e7","values":["US"]}),
-        ),
-        (
-            "browser_hover",
-            serde_json::json!({"ref":"e1"}),
-            "browser_hover",
-            serde_json::json!({"target":"e1"}),
-        ),
-        (
-            "browser_drag",
-            serde_json::json!({"start_ref":"e1","end_ref":"e2"}),
-            "browser_drag",
-            serde_json::json!({"startTarget":"e1","endTarget":"e2"}),
-        ),
-        (
-            "browser_dialog",
-            serde_json::json!({"accept":true}),
-            "browser_handle_dialog",
-            serde_json::json!({"accept":true}),
-        ),
-    ];
-    for (tool, args, upstream, upstream_args) in cases {
-        let result = client
-            .call_tool(CallToolRequestParams::new(tool).with_arguments(arguments(args)))
-            .await
-            .unwrap();
-        assert!(
-            !result.is_error.unwrap_or(false),
-            "{tool}: {}",
-            serde_json::to_string(&result).unwrap()
-        );
-        let call = driver
-            .calls()
-            .into_iter()
-            .rev()
-            .find(|c| c.tool == upstream)
-            .unwrap_or_else(|| panic!("{tool} must map to {upstream}"));
-        assert_eq!(call.arguments, upstream_args, "{tool} mapping changed");
-    }
+    // Snapshot registers opaque refs e1..e4 from the tree backend node ids.
+    let snap = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snap.is_error.unwrap_or(false));
 
-    for (action, upstream) in [
-        ("back", "browser_navigate_back"),
-        ("forward", "browser_navigate_forward"),
-        ("reload", "browser_reload"),
-    ] {
-        let result = client
-            .call_tool(
-                CallToolRequestParams::new("browser_navigate")
-                    .with_arguments(arguments(serde_json::json!({"action": action}))),
-            )
-            .await
-            .unwrap();
-        assert!(
-            !result.is_error.unwrap_or(false),
-            "{action}: {}",
-            serde_json::to_string(&result).unwrap()
-        );
-        assert!(
-            driver.calls().iter().any(|c| c.tool == upstream),
-            "navigate {action} must map to {upstream}"
-        );
+    // click: ref -> nodeDetails(backendNodeId) -> native click(selector).
+    let click = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e4"}))),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !click.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&click).unwrap()
+    );
+    let details = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "nodeDetails")
+        .expect("click must recover a selector via nodeDetails");
+    assert_eq!(details.arguments, serde_json::json!({"backendNodeId": 4}));
+    let click_call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "click")
+        .expect("click must reach the native click tool");
+    assert_eq!(
+        click_call.arguments,
+        serde_json::json!({"selector": "#nd-4"})
+    );
+
+    // Side-effecting interactions invalidate refs; re-snapshot before the next.
+    let resnap = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!resnap.is_error.unwrap_or(false));
+    let fill = client
+        .call_tool(
+            CallToolRequestParams::new("browser_fill")
+                .with_arguments(arguments(serde_json::json!({"ref":"e2","text":"secret"}))),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !fill.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&fill).unwrap()
+    );
+    let fill_call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "fill")
+        .expect("fill must reach the native fill tool");
+    assert_eq!(
+        fill_call.arguments,
+        serde_json::json!({"selector": "#nd-2", "value": "secret"})
+    );
+
+    client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    let select = client
+        .call_tool(
+            CallToolRequestParams::new("browser_select").with_arguments(arguments(
+                serde_json::json!({"ref":"e3","values":["US","CA"]}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !select.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&select).unwrap()
+    );
+    // Lightpanda selectOption accepts one value per call; the selector is
+    // recovered once and reused for every value.
+    let select_calls: Vec<RecordedCall> = driver
+        .calls()
+        .into_iter()
+        .filter(|c| c.tool == "selectOption")
+        .collect();
+    assert_eq!(select_calls.len(), 2);
+    assert_eq!(
+        select_calls[0].arguments,
+        serde_json::json!({"selector": "#nd-3", "value": "US"})
+    );
+    assert_eq!(
+        select_calls[1].arguments,
+        serde_json::json!({"selector": "#nd-3", "value": "CA"})
+    );
+
+    client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    let hover = client
+        .call_tool(
+            CallToolRequestParams::new("browser_hover")
+                .with_arguments(arguments(serde_json::json!({"ref":"e1"}))),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !hover.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&hover).unwrap()
+    );
+    let hover_call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "hover")
+        .expect("hover must reach the native hover tool");
+    assert_eq!(
+        hover_call.arguments,
+        serde_json::json!({"selector": "#nd-1"})
+    );
+
+    // Neither opaque refs nor backend node ids may reach action arguments.
+    for call in driver.calls() {
+        if matches!(
+            call.tool.as_str(),
+            "click" | "hover" | "fill" | "selectOption"
+        ) {
+            let text = serde_json::to_string(&call.arguments).unwrap();
+            assert!(
+                !text.contains("backendNodeId"),
+                "{} leaks a backend node id: {text}",
+                call.tool
+            );
+            for leaked in ["\"e1\"", "\"e2\"", "\"e3\"", "\"e4\""] {
+                assert!(
+                    !text.contains(leaked),
+                    "{} leaks a public ref: {text}",
+                    call.tool
+                );
+            }
+        }
     }
 
     let rows = matching_audit(&core, "browser_fill");
     assert_eq!(rows.len(), 1);
     let detail = rows[0].detail.as_ref().unwrap();
-    assert_eq!(detail["target"], "e3");
+    assert_eq!(detail["target"], "e2");
     assert_eq!(detail["text_bytes"], 6);
     assert!(
         !serde_json::to_string(detail).unwrap().contains("secret"),
@@ -1159,28 +1242,201 @@ async fn interaction_tools_map_exactly_to_upstream_primitives() {
 }
 
 #[tokio::test]
+async fn ref_ids_in_snapshot_are_opaque_and_backend_ids_never_leak() {
+    let (port, _dir, _core, _driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    let result = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let snapshot = result.structured_content.as_ref().unwrap()["snapshot"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        snapshot.contains("e1 WebArea 'Browser Test App'"),
+        "{snapshot}"
+    );
+    assert!(snapshot.contains("e2 [i] textbox 'Name'"), "{snapshot}");
+    assert!(snapshot.contains("e4 [i] button 'Submit'"), "{snapshot}");
+    // Raw backend node ids must not survive as line identities: every
+    // snapshot line starts with an opaque ref, never a bare digit.
+    for line in snapshot.lines() {
+        let rest = line.trim_start_matches(' ');
+        assert!(
+            !rest.chars().next().is_some_and(|c| c.is_ascii_digit()),
+            "raw backend id leaked in snapshot line: {line}"
+        );
+    }
+
+    // A second snapshot in the same generation reuses the same refs.
+    let again = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert_eq!(
+        again.structured_content.as_ref().unwrap()["snapshot"]
+            .as_str()
+            .unwrap(),
+        snapshot
+    );
+}
+
+#[tokio::test]
+async fn ref_is_scoped_to_its_page_and_cross_page_use_fails_closed() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    // New page; snapshot registers refs on that page only.
+    let new_tab = client
+        .call_tool(
+            CallToolRequestParams::new("browser_tabs")
+                .with_arguments(arguments(serde_json::json!({"action":"new"}))),
+        )
+        .await
+        .unwrap();
+    let pages = new_tab
+        .structured_content
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .clone();
+    let first_id = pages[0]["page_id"].as_str().unwrap().to_string();
+    let second_id = pages[1]["page_id"].as_str().unwrap().to_string();
+    let snap = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snap.is_error.unwrap_or(false));
+
+    // On the first page no ref was ever registered: fail closed.
+    client
+        .call_tool(
+            CallToolRequestParams::new("browser_tabs").with_arguments(arguments(
+                serde_json::json!({"action":"select","page_id":first_id}),
+            )),
+        )
+        .await
+        .unwrap();
+    let cross = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e1"}))),
+        )
+        .await
+        .unwrap();
+    let cross_text = serde_json::to_string(&cross).unwrap();
+    assert!(cross.is_error.unwrap_or(false), "{cross_text}");
+    assert!(cross_text.contains("BROWSER_STALE_REF"), "{cross_text}");
+
+    // Back on the second page the same ref text resolves normally.
+    client
+        .call_tool(
+            CallToolRequestParams::new("browser_tabs").with_arguments(arguments(
+                serde_json::json!({"action":"select","page_id":second_id}),
+            )),
+        )
+        .await
+        .unwrap();
+    let ok = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e4"}))),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !ok.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&ok).unwrap()
+    );
+    let click_call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "click")
+        .expect("native click");
+    assert_eq!(
+        click_call.arguments,
+        serde_json::json!({"selector": "#nd-4"})
+    );
+}
+
+#[tokio::test]
+async fn ref_malformed_ids_are_rejected_before_any_upstream_call() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+
+    for bad in ["", "1", "x1", "e1x", "E1", "e 1"] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("browser_click")
+                    .with_arguments(arguments(serde_json::json!({"ref": bad}))),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{bad:?}: {text}");
+        assert!(text.contains("INVALID_ARGUMENT"), "{bad:?}: {text}");
+    }
+    assert!(
+        driver
+            .calls()
+            .iter()
+            .all(|c| c.tool != "nodeDetails" && c.tool != "click"),
+        "malformed refs must be rejected before any upstream call"
+    );
+}
+
+#[tokio::test]
 async fn interaction_stale_ref_surfaces_stable_code_and_audits_error() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-    driver.fail(
-        "browser_click",
-        CoreError::new(
-            ErrorCode::BrowserStaleRef,
-            "browser element reference is stale; take a new snapshot",
-        ),
-    );
+
+    // Register refs, then navigate: navigation invalidates the generation.
+    client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    let nav = client
+        .call_tool(
+            CallToolRequestParams::new("browser_open").with_arguments(arguments(
+                serde_json::json!({"url":"https://example.test/next"}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!nav.is_error.unwrap_or(false));
 
     let result = client
         .call_tool(
             CallToolRequestParams::new("browser_click")
-                .with_arguments(arguments(serde_json::json!({"ref":"e12"}))),
+                .with_arguments(arguments(serde_json::json!({"ref":"e4"}))),
         )
         .await
         .unwrap();
     let text = serde_json::to_string(&result).unwrap();
     assert!(result.is_error.unwrap_or(false), "{text}");
     assert!(text.contains("BROWSER_STALE_REF"), "{text}");
+
+    // Stale refs fail closed before any native action.
+    assert!(
+        driver
+            .calls()
+            .iter()
+            .all(|c| c.tool != "nodeDetails" && c.tool != "click"),
+        "stale ref reached a native action"
+    );
 
     let rows = matching_audit(&core, "browser_click");
     assert_eq!(rows.len(), 1);
@@ -1193,7 +1449,7 @@ async fn snapshot_300kib_is_truncated_to_256kib_with_byte_only_audit() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-    driver.respond("browser_snapshot", "x".repeat(300 * 1024));
+    driver.respond("tree", "x".repeat(300 * 1024));
 
     let result = client
         .call_tool(CallToolRequestParams::new("browser_snapshot"))

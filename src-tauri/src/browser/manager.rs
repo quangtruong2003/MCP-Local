@@ -31,7 +31,7 @@ use crate::settings::AppSettings;
 use super::{
     artifacts::ArtifactStore,
     driver::{BrowserPageDriver, BrowserPageDriverFactory, PageLaunchSpec},
-    mcp::call_result_text,
+    mcp::{call_result_text, is_valid_ref, normalize_tree_text, parse_node_selector},
     policy::validate_navigation_url,
     runtime::{BrowserRuntimeManager, RuntimeProvisionState},
     types::{
@@ -279,9 +279,14 @@ pub(crate) struct PageBinding {
 struct ManagedPage {
     page_id: String,
     driver: Arc<dyn BrowserPageDriver>,
-    /// Ref generation counter (Task 7 increments it on navigation/mutations).
-    #[allow(dead_code)]
+    /// Ref generation counter. Bumped on navigation/reload/restart and major
+    /// mutations; every ref registered under an older generation is stale.
     generation: u64,
+    /// Opaque ref -> Lightpanda backend node id (current generation only).
+    refs: HashMap<String, u64>,
+    /// Reverse index keeping one stable ref per backend node per generation.
+    backend_ids: HashMap<u64, String>,
+    next_ref: u64,
     url: Option<String>,
     title: Option<String>,
     lost: bool,
@@ -559,6 +564,9 @@ impl BrowserManager {
                 page_id: page_id.clone(),
                 driver,
                 generation: 1,
+                refs: HashMap::new(),
+                backend_ids: HashMap::new(),
+                next_ref: 1,
                 url: None,
                 title: None,
                 lost: false,
@@ -577,6 +585,8 @@ impl BrowserManager {
                 .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
             {
                 page.url = Some(url.to_string());
+                // Navigation replaces major DOM state: every older ref is stale.
+                Self::invalidate_page_refs(page);
             }
         }
         Ok(page_id)
@@ -706,6 +716,8 @@ impl BrowserManager {
                 .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
             {
                 page.url = Some(url.to_string());
+                // Navigation replaces major DOM state: every older ref is stale.
+                Self::invalidate_page_refs(page);
             }
         }
         Ok(self.status().await)
@@ -746,6 +758,233 @@ impl BrowserManager {
             Self::active_page_id_or_err(&state)?
         };
         self.route_to_page(&page_id, tool, arguments).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Opaque refs: (ref, page_id, generation) -> backendNodeId. Lightpanda
+    // backend node ids never become public identity; every public ref is
+    // scoped to one page and one generation and dies with it.
+    // -----------------------------------------------------------------------
+
+    fn page_mut<'a>(
+        state: &'a mut ManagerState,
+        page_id: &str,
+    ) -> Result<&'a mut ManagedPage, CoreError> {
+        let session = state.active.as_mut().ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserNotRunning,
+                "browser is not running; call browser_open first",
+            )
+        })?;
+        session
+            .pages
+            .iter_mut()
+            .find(|p| p.page_id == page_id)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserTargetNotFound,
+                    "browser page id is not valid for the current session",
+                )
+            })
+    }
+
+    /// Registers one backend node id under the page's current generation and
+    /// returns its stable opaque ref. The same backend id always maps to the
+    /// same ref within one generation.
+    fn register_backend_node(page: &mut ManagedPage, backend_node_id: u64) -> String {
+        if let Some(existing) = page.backend_ids.get(&backend_node_id) {
+            return existing.clone();
+        }
+        let ref_id = format!("e{}", page.next_ref);
+        page.next_ref += 1;
+        page.backend_ids.insert(backend_node_id, ref_id.clone());
+        page.refs.insert(ref_id.clone(), backend_node_id);
+        ref_id
+    }
+
+    fn invalidate_page_refs(page: &mut ManagedPage) {
+        page.generation += 1;
+        page.refs.clear();
+        page.backend_ids.clear();
+        page.next_ref = 1;
+    }
+
+    /// Bumps the page generation, invalidating every ref registered before.
+    pub(crate) async fn invalidate_refs(&self, page_id: &str) {
+        let mut state = self.state.lock().await;
+        if let Ok(page) = Self::page_mut(&mut state, page_id) {
+            Self::invalidate_page_refs(page);
+        }
+    }
+
+    /// Resolves one opaque ref against a page's current generation. Stale and
+    /// cross-page refs are indistinguishable on purpose: both fail closed
+    /// with BROWSER_STALE_REF before any native action.
+    pub(crate) async fn resolve_ref(&self, page_id: &str, ref_id: &str) -> Result<u64, CoreError> {
+        if !is_valid_ref(ref_id) {
+            return Err(CoreError::new(
+                ErrorCode::InvalidArgument,
+                "browser ref must look like e1, e2, ...",
+            ));
+        }
+        let state = self.state.lock().await;
+        let session = state.active.as_ref().ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserNotRunning,
+                "browser is not running; call browser_open first",
+            )
+        })?;
+        let page = session
+            .pages
+            .iter()
+            .find(|p| p.page_id == page_id)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserTargetNotFound,
+                    "browser page id is not valid for the current session",
+                )
+            })?;
+        page.refs.get(ref_id).copied().ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserStaleRef,
+                "snapshot ref is stale for this page; take a new browser_snapshot",
+            )
+        })
+    }
+
+    /// Recovers the element's current CSS selector via `nodeDetails`. The
+    /// backend node id never leaves the manager; a node-gone failure
+    /// invalidates the whole generation and surfaces BROWSER_STALE_REF.
+    pub(crate) async fn selector_for_ref(
+        &self,
+        page_id: &str,
+        ref_id: &str,
+    ) -> Result<String, CoreError> {
+        let backend_node_id = self.resolve_ref(page_id, ref_id).await?;
+        let mut args = Map::new();
+        args.insert("backendNodeId".into(), Value::from(backend_node_id));
+        let response = match self.route_to_page(page_id, "nodeDetails", args).await {
+            Ok(response) => response,
+            Err(error) if error.code == ErrorCode::BrowserProcessLost => return Err(error),
+            Err(_) => {
+                self.invalidate_refs(page_id).await;
+                return Err(CoreError::new(
+                    ErrorCode::BrowserStaleRef,
+                    "the node behind this ref no longer exists; take a new browser_snapshot",
+                ));
+            }
+        };
+        match parse_node_selector(&call_result_text(&response)) {
+            Some(selector) => Ok(selector),
+            None => {
+                self.invalidate_refs(page_id).await;
+                Err(CoreError::new(
+                    ErrorCode::BrowserStaleRef,
+                    "the node behind this ref has no usable selector; take a new browser_snapshot",
+                ))
+            }
+        }
+    }
+
+    /// Semantic-tree snapshot of the active page with every backend node id
+    /// replaced by a freshly registered opaque ref for the current generation.
+    pub async fn snapshot_tree(&self) -> Result<String, CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let response = self.route_to_page(&page_id, "tree", Map::new()).await?;
+        let text = call_result_text(&response);
+        let mut state = self.state.lock().await;
+        let page = Self::page_mut(&mut state, &page_id)?;
+        Ok(normalize_tree_text(&text, &mut |id| {
+            Self::register_backend_node(page, id)
+        }))
+    }
+
+    /// Resolves ref -> nodeDetails selector -> one native selector-based
+    /// action. Refs are invalidated conservatively after the side-effecting
+    /// action, even when the action itself fails.
+    async fn act_on_ref(
+        &self,
+        ref_id: &str,
+        tool: &'static str,
+        mut args: Map<String, Value>,
+    ) -> Result<CallToolResult, CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let selector = self.selector_for_ref(&page_id, ref_id).await?;
+        args.insert("selector".into(), Value::String(selector));
+        let result = self.route_to_page(&page_id, tool, args).await;
+        self.invalidate_refs(&page_id).await;
+        result
+    }
+
+    pub async fn click_ref(&self, ref_id: &str) -> Result<CallToolResult, CoreError> {
+        self.act_on_ref(ref_id, "click", Map::new()).await
+    }
+
+    pub async fn hover_ref(&self, ref_id: &str) -> Result<CallToolResult, CoreError> {
+        self.act_on_ref(ref_id, "hover", Map::new()).await
+    }
+
+    /// Fills the target and optionally submits with a native Enter press.
+    /// Lightpanda `fill` has no slow-typing mode; `slowly` is accepted for
+    /// contract compatibility and audited, but has no native effect.
+    pub async fn fill_ref(
+        &self,
+        ref_id: &str,
+        text: &str,
+        submit: bool,
+    ) -> Result<CallToolResult, CoreError> {
+        let mut args = Map::new();
+        args.insert("value".into(), Value::String(text.to_string()));
+        let result = self.act_on_ref(ref_id, "fill", args).await?;
+        if submit {
+            let page_id = {
+                let state = self.state.lock().await;
+                Self::active_page_id_or_err(&state)?
+            };
+            let mut press = Map::new();
+            press.insert("key".into(), Value::String("Enter".into()));
+            self.route_to_page(&page_id, "press", press).await?;
+        }
+        Ok(result)
+    }
+
+    /// Selects one or more values. Lightpanda `selectOption` accepts one
+    /// value per call, so multi-select issues one call per value against the
+    /// selector recovered once up front.
+    pub async fn select_ref(
+        &self,
+        ref_id: &str,
+        values: &[String],
+    ) -> Result<CallToolResult, CoreError> {
+        if values.is_empty() {
+            return Err(CoreError::new(
+                ErrorCode::InvalidArgument,
+                "browser_select requires at least one value",
+            ));
+        }
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let selector = self.selector_for_ref(&page_id, ref_id).await?;
+        let mut result = CallToolResult::success(Vec::new());
+        for value in values {
+            let mut args = Map::new();
+            args.insert("selector".into(), Value::String(selector.clone()));
+            args.insert("value".into(), Value::String(value.clone()));
+            result = self.route_to_page(&page_id, "selectOption", args).await?;
+        }
+        self.invalidate_refs(&page_id).await;
+        Ok(result)
     }
 
     // -----------------------------------------------------------------------
@@ -985,6 +1224,17 @@ mod tests {
             tool: &'static str,
             arguments: Map<String, Value>,
         ) -> Result<CallToolResult, CoreError> {
+            let details_id = arguments
+                .get("backendNodeId")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            // Record before the crash check: a crashed call still reached the
+            // child and must be observable to the tests.
+            self.recorder
+                .calls
+                .lock()
+                .await
+                .push((self.index, tool.to_string(), arguments));
             let crash = {
                 let mut guard = self.recorder.crash_driver.lock().await;
                 match *guard {
@@ -1001,15 +1251,20 @@ mod tests {
                     "page process was lost",
                 ));
             }
-            self.recorder
-                .calls
-                .lock()
-                .await
-                .push((self.index, tool.to_string(), arguments));
             if tool == "getCookies" {
                 return Ok(CallToolResult::success(vec![ContentBlock::text(
                     "{\"cookies\":[{\"name\":\"sid\",\"domain\":\"a.test\",\"path\":\"/\",\"value\":\"v\"}]}",
                 )]));
+            }
+            if tool == "tree" {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    "1 WebArea 'x'\n 2 [i] button 'Go'\n",
+                )]));
+            }
+            if tool == "nodeDetails" {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                    "{{\"backendNodeId\":{details_id},\"selector\":\"#nd-{details_id}\"}}"
+                ))]));
             }
             Ok(CallToolResult::success(vec![ContentBlock::text("ok")]))
         }
@@ -1396,5 +1651,47 @@ mod tests {
         assert!(status.enabled);
         assert!(!status.running);
         assert!(status.session_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn snapshot_registers_refs_and_navigation_invalidates_them() {
+        let (manager, _recorder, _store, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        let tree = manager.snapshot_tree().await.unwrap();
+        assert!(tree.contains("e1 WebArea"));
+        assert!(tree.contains("e2 [i] button"));
+        assert_eq!(manager.resolve_ref("p-1", "e2").await.unwrap(), 2);
+
+        // Navigation bumps the generation: the same ref text is now stale.
+        manager
+            .open(Some("https://example.test/next"))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.resolve_ref("p-1", "e2").await.unwrap_err().code,
+            ErrorCode::BrowserStaleRef
+        );
+
+        // A fresh snapshot re-registers from e1 in the new generation.
+        manager.snapshot_tree().await.unwrap();
+        assert_eq!(manager.resolve_ref("p-1", "e1").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn process_loss_during_selector_recovery_surfaces_process_lost() {
+        let (manager, recorder, _store, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        manager.snapshot_tree().await.unwrap();
+        // Crash the page while nodeDetails is in flight: the caller must see
+        // BROWSER_PROCESS_LOST, never a stale-ref rewrite or a replay.
+        *recorder.crash_driver.lock().await = Some(0);
+        let err = manager.click_ref("e2").await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserProcessLost);
+        let calls = recorded_calls(&recorder).await;
+        assert!(calls.iter().any(|(_, tool)| tool == "nodeDetails"));
+        assert!(
+            calls.iter().all(|(_, tool)| tool != "click"),
+            "no native action may run after process loss"
+        );
     }
 }
