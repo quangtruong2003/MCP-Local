@@ -2,6 +2,7 @@ pub mod artifacts;
 pub mod audit;
 pub mod driver;
 pub mod files;
+pub mod lightpanda;
 pub mod manager;
 pub mod mcp;
 pub mod playwright;

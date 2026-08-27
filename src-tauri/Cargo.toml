@@ -60,6 +60,12 @@ tokio = { workspace = true, features = ["test-util"] }
 name = "fake_sidecar"
 path = "tests/fixtures/fake_sidecar.rs"
 
+# Fake Lightpanda native MCP child used by the browser runtime integration
+# suite; `cargo test` builds it into `<profile>/examples/fake_lightpanda_mcp.exe`.
+[[example]]
+name = "fake_lightpanda_mcp"
+path = "tests/fixtures/fake_lightpanda_mcp.rs"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
