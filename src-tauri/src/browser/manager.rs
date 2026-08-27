@@ -988,6 +988,131 @@ impl BrowserManager {
     }
 
     // -----------------------------------------------------------------------
+    // Native-first content and action tools. Native Lightpanda tool names
+    // and argument shapes stay private to the manager; server handlers never
+    // construct raw native argument maps.
+    // -----------------------------------------------------------------------
+
+    async fn active_page_guarded(&self) -> Result<String, CoreError> {
+        self.guard_page_operation().await?;
+        let state = self.state.lock().await;
+        Self::active_page_id_or_err(&state)
+    }
+
+    /// Routes one read-only native content tool that takes no arguments.
+    async fn route_content_tool(&self, tool: &'static str) -> Result<CallToolResult, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        self.route_to_page(&page_id, tool, Map::new()).await
+    }
+
+    pub async fn links_content(&self) -> Result<CallToolResult, CoreError> {
+        self.route_content_tool("links").await
+    }
+
+    pub async fn interactive_elements_content(&self) -> Result<CallToolResult, CoreError> {
+        self.route_content_tool("interactiveElements").await
+    }
+
+    pub async fn structured_data_content(&self) -> Result<CallToolResult, CoreError> {
+        self.route_content_tool("structuredData").await
+    }
+
+    pub async fn detect_forms_content(&self) -> Result<CallToolResult, CoreError> {
+        self.route_content_tool("detectForms").await
+    }
+
+    /// Renders the page, or one snapshot ref's subtree, as markdown.
+    pub async fn markdown_content(
+        &self,
+        ref_id: Option<&str>,
+    ) -> Result<CallToolResult, CoreError> {
+        self.scoped_content_tool("markdown", ref_id).await
+    }
+
+    /// Dumps raw HTML for the document, or one snapshot ref's outerHTML.
+    pub async fn html_content(&self, ref_id: Option<&str>) -> Result<CallToolResult, CoreError> {
+        self.scoped_content_tool("html", ref_id).await
+    }
+
+    async fn scoped_content_tool(
+        &self,
+        tool: &'static str,
+        ref_id: Option<&str>,
+    ) -> Result<CallToolResult, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let mut args = Map::new();
+        if let Some(ref_id) = ref_id {
+            let selector = self.selector_for_ref(&page_id, ref_id).await?;
+            args.insert("selector".into(), Value::String(selector));
+        }
+        self.route_to_page(&page_id, tool, args).await
+    }
+
+    /// Finds interactive elements by role and/or accessible name. Callers
+    /// must validate that at least one criterion is present.
+    pub async fn find_element(
+        &self,
+        role: Option<&str>,
+        name: Option<&str>,
+    ) -> Result<CallToolResult, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let mut args = Map::new();
+        if let Some(role) = role.map(str::trim).filter(|r| !r.is_empty()) {
+            args.insert("role".into(), Value::String(role.to_string()));
+        }
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            args.insert("name".into(), Value::String(name.to_string()));
+        }
+        self.route_to_page(&page_id, "findElement", args).await
+    }
+
+    /// Runs one schema-driven extraction. The schema must already be
+    /// validated and encoded by `validate_extract_schema`.
+    pub async fn extract_data(&self, encoded_schema: &str) -> Result<CallToolResult, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let mut args = Map::new();
+        args.insert("schema".into(), Value::String(encoded_schema.to_string()));
+        self.route_to_page(&page_id, "extract", args).await
+    }
+
+    /// Scrolls the window, or one snapshot ref's element when a ref is
+    /// given. Upstream `scroll` targets elements by backend node id only;
+    /// the id never leaves the manager. Scrolling does not mutate the DOM,
+    /// so existing refs stay valid.
+    pub async fn scroll_page(
+        &self,
+        ref_id: Option<&str>,
+        x: Option<i64>,
+        y: Option<i64>,
+    ) -> Result<CallToolResult, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let mut args = Map::new();
+        if let Some(ref_id) = ref_id {
+            let backend_node_id = self.resolve_ref(&page_id, ref_id).await?;
+            args.insert("backendNodeId".into(), Value::from(backend_node_id));
+        }
+        if let Some(x) = x {
+            args.insert("x".into(), Value::from(x));
+        }
+        if let Some(y) = y {
+            args.insert("y".into(), Value::from(y));
+        }
+        self.route_to_page(&page_id, "scroll", args).await
+    }
+
+    /// Checks or unchecks a checkbox or radio through its recovered
+    /// selector. Side-effecting: refs are invalidated even on failure.
+    pub async fn set_checked_ref(
+        &self,
+        ref_id: &str,
+        checked: bool,
+    ) -> Result<CallToolResult, CoreError> {
+        let mut args = Map::new();
+        args.insert("checked".into(), Value::Bool(checked));
+        self.act_on_ref(ref_id, "setChecked", args).await
+    }
+
+    // -----------------------------------------------------------------------
     // Logical tabs: manager-owned, one Lightpanda child each. There is no
     // upstream tabs primitive.
     // -----------------------------------------------------------------------

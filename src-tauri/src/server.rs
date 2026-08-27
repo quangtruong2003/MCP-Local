@@ -10,19 +10,23 @@ use crate::{
     browser::{
         files::{BrowserDownloadInfo, BrowserSavedDownloadOutput},
         mcp::{
-            call_result_text, truncate_utf8, BrowserConsoleArgs, BrowserConsoleOutput,
-            BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs, BrowserDomOutput,
-            BrowserDragArgs, BrowserEmulateArgs, BrowserEvaluateArgs, BrowserEvaluateOutput,
-            BrowserFillArgs, BrowserLoadState, BrowserNavigateArgs, BrowserNavigationAction,
-            BrowserNavigationOutput, BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput,
-            BrowserOpenArgs, BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput,
-            BrowserPressArgs, BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
+            call_result_text, truncate_utf8, validate_extract_schema, validate_find_element,
+            validate_scroll_offsets, validated_content_cap, BrowserConsoleArgs,
+            BrowserConsoleOutput, BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs,
+            BrowserDomOutput, BrowserDragArgs, BrowserEmulateArgs, BrowserEvaluateArgs,
+            BrowserEvaluateOutput, BrowserExtractArgs, BrowserExtractOutput, BrowserFillArgs,
+            BrowserFindElementArgs, BrowserHtmlArgs, BrowserLoadState, BrowserMarkdownArgs,
+            BrowserNavigateArgs, BrowserNavigationAction, BrowserNavigationOutput,
+            BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput, BrowserOpenArgs,
+            BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput, BrowserPressArgs,
+            BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
             BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScreenshotMode,
-            BrowserSearchArgs, BrowserSelectArgs, BrowserSnapshotOutput, BrowserStep,
-            BrowserStepError, BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs,
-            BrowserTextOutput, BrowserTextTruncatedOutput, BrowserTraceAction, BrowserTraceArgs,
-            BrowserTraceOutput, BrowserUploadArgs, BrowserUploadOutput, BrowserUploadSource,
-            BrowserViewportArgs, BrowserViewportOutput, BrowserWaitArgs, BrowserWaitCondition,
+            BrowserScrollArgs, BrowserSearchArgs, BrowserSelectArgs, BrowserSetCheckedArgs,
+            BrowserSnapshotOutput, BrowserStep, BrowserStepError, BrowserTabAction,
+            BrowserTabsArgs, BrowserTargetArgs, BrowserTextOutput, BrowserTextTruncatedOutput,
+            BrowserTraceAction, BrowserTraceArgs, BrowserTraceOutput, BrowserUploadArgs,
+            BrowserUploadOutput, BrowserUploadSource, BrowserViewportArgs, BrowserViewportOutput,
+            BrowserWaitArgs, BrowserWaitCondition,
         },
         playwright::{
             DOM_INSPECT_FUNCTION, PERFORMANCE_FUNCTION, WAIT_READY_FUNCTION, WAIT_URL_FUNCTION,
@@ -1026,6 +1030,231 @@ impl WorkspaceServer {
             "browser_hover",
             result,
             Some(serde_json::json!({"target":a.ref_id})),
+        )
+    }
+
+    #[tool(
+        description = "Render the active page, or one snapshot ref's subtree, as markdown. Bounded output.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_markdown(
+        &self,
+        Parameters(a): Parameters<BrowserMarkdownArgs>,
+    ) -> CallToolResult {
+        let result = async {
+            let cap = validated_content_cap(a.max_bytes)?;
+            let response = self.browser.markdown_content(a.ref_id.as_deref()).await?;
+            let (text, truncated) = truncate_utf8(call_result_text(&response), cap);
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        browser_outcome(
+            &self.core,
+            "browser_markdown",
+            result,
+            Some(serde_json::json!({"ref":a.ref_id,"max_bytes":a.max_bytes})),
+        )
+    }
+
+    #[tool(
+        description = "Return raw HTML for the active page, or one snapshot ref's outerHTML. Verbose; prefer browser_markdown. Bounded output.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_html(&self, Parameters(a): Parameters<BrowserHtmlArgs>) -> CallToolResult {
+        let result = async {
+            let cap = validated_content_cap(a.max_bytes)?;
+            let response = self.browser.html_content(a.ref_id.as_deref()).await?;
+            let (text, truncated) = truncate_utf8(call_result_text(&response), cap);
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        browser_outcome(
+            &self.core,
+            "browser_html",
+            result,
+            Some(serde_json::json!({"ref":a.ref_id,"max_bytes":a.max_bytes})),
+        )
+    }
+
+    #[tool(
+        description = "List all links on the active page with visible text and resolved href. Bounded output.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_links(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
+        let result = async {
+            let response = self.browser.links_content().await?;
+            let (text, truncated) = truncate_utf8(
+                call_result_text(&response),
+                crate::browser::mcp::MAX_CONTENT_BYTES,
+            );
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        browser_outcome(&self.core, "browser_links", result, None)
+    }
+
+    #[tool(
+        description = "Find interactive elements by ARIA role and/or accessible name. Requires at least one criterion.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_find_element(
+        &self,
+        Parameters(a): Parameters<BrowserFindElementArgs>,
+    ) -> CallToolResult {
+        let result = async {
+            validate_find_element(a.role.as_deref(), a.name.as_deref())?;
+            let response = self
+                .browser
+                .find_element(a.role.as_deref(), a.name.as_deref())
+                .await?;
+            let (text, truncated) = truncate_utf8(
+                call_result_text(&response),
+                crate::browser::mcp::MAX_CONTENT_BYTES,
+            );
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        let detail = Some(serde_json::json!({
+            "role_bytes": a.role.as_ref().map(|s| s.len()).unwrap_or(0),
+            "name_bytes": a.name.as_ref().map(|s| s.len()).unwrap_or(0),
+        }));
+        browser_outcome(&self.core, "browser_find_element", result, detail)
+    }
+
+    #[tool(
+        description = "List interactive elements on the active page. Bounded output.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_interactive_elements(
+        &self,
+        Parameters(_): Parameters<EmptyArgs>,
+    ) -> CallToolResult {
+        let result = async {
+            let response = self.browser.interactive_elements_content().await?;
+            let (text, truncated) = truncate_utf8(
+                call_result_text(&response),
+                crate::browser::mcp::MAX_CONTENT_BYTES,
+            );
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        browser_outcome(&self.core, "browser_interactive_elements", result, None)
+    }
+
+    #[tool(
+        description = "Extract structured data from the active page using a CSS-selector schema object. The schema is validated before any native call.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserExtractOutput>()
+    )]
+    async fn browser_extract(
+        &self,
+        Parameters(a): Parameters<BrowserExtractArgs>,
+    ) -> CallToolResult {
+        let result = async {
+            let encoded = validate_extract_schema(&a.schema)?;
+            let response = self.browser.extract_data(&encoded).await?;
+            let text = call_result_text(&response);
+            let data = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
+            Ok::<_, CoreError>(BrowserExtractOutput { data })
+        }
+        .await;
+        let detail = Some(serde_json::json!({
+            "schema_bytes": serde_json::to_string(&a.schema).map(|s| s.len()).unwrap_or(0),
+        }));
+        browser_outcome(&self.core, "browser_extract", result, detail)
+    }
+
+    #[tool(
+        description = "Extract structured data such as JSON-LD and OpenGraph metadata from the active page. Bounded output.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_structured_data(
+        &self,
+        Parameters(_): Parameters<EmptyArgs>,
+    ) -> CallToolResult {
+        let result = async {
+            let response = self.browser.structured_data_content().await?;
+            let (text, truncated) = truncate_utf8(
+                call_result_text(&response),
+                crate::browser::mcp::MAX_CONTENT_BYTES,
+            );
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        browser_outcome(&self.core, "browser_structured_data", result, None)
+    }
+
+    #[tool(
+        description = "Detect all forms on the active page with field structure, types, and required status. Field values are never included.",
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_detect_forms(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
+        let result = async {
+            let response = self.browser.detect_forms_content().await?;
+            let (text, truncated) = truncate_utf8(
+                call_result_text(&response),
+                crate::browser::mcp::MAX_CONTENT_BYTES,
+            );
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        browser_outcome(&self.core, "browser_detect_forms", result, None)
+    }
+
+    #[tool(
+        description = "Scroll the window, or one snapshot ref's element, by the given offsets.",
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
+    )]
+    async fn browser_scroll(&self, Parameters(a): Parameters<BrowserScrollArgs>) -> CallToolResult {
+        let result = async {
+            validate_scroll_offsets(a.x, a.y)?;
+            let response = self
+                .browser
+                .scroll_page(a.ref_id.as_deref(), a.x, a.y)
+                .await?;
+            let (text, truncated) = truncate_utf8(call_result_text(&response), 64 * 1024);
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
+        }
+        .await;
+        let detail = Some(serde_json::json!({
+            "ref": a.ref_id,
+            "x": a.x,
+            "y": a.y,
+        }));
+        browser_outcome(&self.core, "browser_scroll", result, detail)
+    }
+
+    #[tool(
+        description = "Check or uncheck a checkbox or radio element target. Audit records the opaque target and requested state only.",
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTextOutput>()
+    )]
+    async fn browser_set_checked(
+        &self,
+        Parameters(a): Parameters<BrowserSetCheckedArgs>,
+    ) -> CallToolResult {
+        let result = async {
+            self.browser.set_checked_ref(&a.ref_id, a.checked).await?;
+            // Fixed output on purpose: the native result echoes element
+            // state text that need not leave the audit boundary.
+            Ok::<_, CoreError>(BrowserTextOutput {
+                text: "updated the checked state of the target element".to_string(),
+            })
+        }
+        .await;
+        browser_outcome(
+            &self.core,
+            "browser_set_checked",
+            result,
+            Some(serde_json::json!({"target":a.ref_id,"checked":a.checked})),
         )
     }
 

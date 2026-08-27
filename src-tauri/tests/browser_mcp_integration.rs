@@ -362,7 +362,7 @@ fn matching_audit(core: &lc_core::CoreServices, op: &str) -> Vec<lc_core::models
 }
 
 #[tokio::test]
-async fn browser_discovery_exposes_exactly_29_public_browser_tools() {
+async fn browser_discovery_exposes_exactly_39_public_browser_tools() {
     let (port, _dir, _core, _driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     let tools = client.list_all_tools().await.unwrap();
@@ -375,6 +375,25 @@ async fn browser_discovery_exposes_exactly_29_public_browser_tools() {
     assert!(
         missing_output_schema.is_empty(),
         "every browser tool must declare an outputSchema: {missing_output_schema:?}"
+    );
+    // Upstream Lightpanda admin/state tools are internal-only: they leak
+    // environment, cookies, and session control and must never be discovered.
+    let forbidden = [
+        "getEnv",
+        "getCookies",
+        "save",
+        "session_new",
+        "session_list",
+        "session_close",
+    ];
+    let exposed_admin: Vec<String> = tools
+        .iter()
+        .map(|tool| tool.name.to_string())
+        .filter(|name| forbidden.contains(&name.as_str()))
+        .collect();
+    assert!(
+        exposed_admin.is_empty(),
+        "upstream admin tools must never be exposed: {exposed_admin:?}"
     );
     let names: std::collections::BTreeSet<String> = tools
         .into_iter()
@@ -411,11 +430,21 @@ async fn browser_discovery_exposes_exactly_29_public_browser_tools() {
         "browser_downloads",
         "browser_save_download_to_workspace",
         "browser_run_steps",
+        "browser_markdown",
+        "browser_html",
+        "browser_links",
+        "browser_find_element",
+        "browser_interactive_elements",
+        "browser_extract",
+        "browser_structured_data",
+        "browser_detect_forms",
+        "browser_scroll",
+        "browser_set_checked",
     ]
     .into_iter()
     .map(str::to_string)
     .collect();
-    assert_eq!(names.len(), 29, "browser tool count changed: {names:?}");
+    assert_eq!(names.len(), 39, "browser tool count changed: {names:?}");
     assert_eq!(names, expected);
 }
 

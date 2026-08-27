@@ -1,3 +1,4 @@
+use lc_core::error::{CoreError, ErrorCode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -79,6 +80,70 @@ pub struct BrowserSelectArgs {
 pub struct BrowserDragArgs {
     pub start_ref: String,
     pub end_ref: String,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BrowserMarkdownArgs {
+    /// Optional element ref from the current snapshot to scope the render.
+    #[serde(default, rename = "ref")]
+    pub ref_id: Option<String>,
+    /// Optional soft cap on returned bytes, bounded by the server.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BrowserHtmlArgs {
+    /// Optional element ref from the current snapshot to scope the dump.
+    #[serde(default, rename = "ref")]
+    pub ref_id: Option<String>,
+    /// Optional soft cap on returned bytes, bounded by the server.
+    #[serde(default)]
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BrowserFindElementArgs {
+    /// ARIA role to match, such as button, link, or textbox.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Accessible name substring to match.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BrowserExtractArgs {
+    /// Extraction schema: a JSON object mapping output field names to
+    /// CSS-selector specs. Validated and rejected before any native call.
+    pub schema: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BrowserScrollArgs {
+    /// Optional element ref from the current snapshot to scroll instead of
+    /// the window.
+    #[serde(default, rename = "ref")]
+    pub ref_id: Option<String>,
+    /// Horizontal scroll offset.
+    #[serde(default)]
+    pub x: Option<i64>,
+    /// Vertical scroll offset.
+    #[serde(default)]
+    pub y: Option<i64>,
+}
+
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
+pub struct BrowserSetCheckedArgs {
+    #[serde(rename = "ref")]
+    pub ref_id: String,
+    /// Check (true) or uncheck (false). Defaults to true.
+    #[serde(default = "default_checked_true")]
+    pub checked: bool,
+}
+
+fn default_checked_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
@@ -339,6 +404,12 @@ pub struct BrowserTextTruncatedOutput {
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct BrowserExtractOutput {
+    /// Parsed structured result from the extraction schema.
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BrowserOpenOutput {
     pub status: super::types::BrowserSessionStatus,
     pub pages: Vec<BrowserPageSummary>,
@@ -558,6 +629,152 @@ pub(crate) fn normalize_backend_node_ids(
     }
 }
 
+/// Hard cap applied to native-first content output when the caller supplies
+/// no `max_bytes`, and the largest `max_bytes` value accepted.
+pub(crate) const MAX_CONTENT_BYTES: usize = super::types::MAX_SNAPSHOT_BYTES;
+/// Maximum encoded size of one `browser_extract` schema document.
+pub(crate) const MAX_EXTRACT_SCHEMA_BYTES: usize = 64 * 1024;
+/// Maximum nesting depth of one `browser_extract` schema document.
+pub(crate) const MAX_EXTRACT_SCHEMA_DEPTH: usize = 8;
+/// Maximum number of selector-like string entries in one extract schema.
+pub(crate) const MAX_EXTRACT_SCHEMA_STRINGS: usize = 256;
+/// Maximum `limit` value accepted inside an extract schema array spec.
+pub(crate) const MAX_EXTRACT_LIMIT: u64 = 10_000;
+/// Largest scroll offset accepted on either axis.
+pub(crate) const MAX_SCROLL_OFFSET: i64 = 10_000_000;
+
+/// Resolves the caller-supplied content cap, bounded to MAX_CONTENT_BYTES.
+pub(crate) fn validated_content_cap(max_bytes: Option<u64>) -> Result<usize, CoreError> {
+    match max_bytes {
+        None => Ok(MAX_CONTENT_BYTES),
+        Some(n) if n >= 1 && n <= MAX_CONTENT_BYTES as u64 => Ok(n as usize),
+        Some(_) => Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            format!("max_bytes must be between 1 and {MAX_CONTENT_BYTES}"),
+        )),
+    }
+}
+
+/// Requires at least one bounded search criterion for find-element.
+pub(crate) fn validate_find_element(
+    role: Option<&str>,
+    name: Option<&str>,
+) -> Result<(), CoreError> {
+    let role = role.unwrap_or_default().trim();
+    let name = name.unwrap_or_default().trim();
+    if role.is_empty() && name.is_empty() {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            "browser_find_element requires role, name, or both",
+        ));
+    }
+    if role.len() > 128 {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            "browser_find_element role must be at most 128 bytes",
+        ));
+    }
+    if name.len() > 512 {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            "browser_find_element name must be at most 512 bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// Validates scroll offsets before any native call.
+pub(crate) fn validate_scroll_offsets(x: Option<i64>, y: Option<i64>) -> Result<(), CoreError> {
+    let in_bounds = |v: Option<i64>| v.is_none_or(|v| v.abs() <= MAX_SCROLL_OFFSET);
+    if in_bounds(x) && in_bounds(y) {
+        Ok(())
+    } else {
+        Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            format!("scroll offsets must be within +/-{MAX_SCROLL_OFFSET}"),
+        ))
+    }
+}
+
+/// Validates one `browser_extract` schema before any native call and returns
+/// its canonical encoded form for the upstream `extract` tool. Rejects
+/// non-object roots, oversized documents, deep nesting, too many selector
+/// strings, and malformed or excessive `limit` values.
+pub(crate) fn validate_extract_schema(schema: &serde_json::Value) -> Result<String, CoreError> {
+    if !schema.is_object() {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            "browser_extract schema must be a JSON object",
+        ));
+    }
+    let encoded = serde_json::to_string(schema).map_err(|_| {
+        CoreError::new(
+            ErrorCode::InvalidArgument,
+            "browser_extract schema is not serializable",
+        )
+    })?;
+    if encoded.len() > MAX_EXTRACT_SCHEMA_BYTES {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            format!("browser_extract schema must be at most {MAX_EXTRACT_SCHEMA_BYTES} bytes"),
+        ));
+    }
+    let mut strings = 0usize;
+    walk_extract_schema(schema, 1, &mut strings)?;
+    Ok(encoded)
+}
+
+fn walk_extract_schema(
+    value: &serde_json::Value,
+    depth: usize,
+    strings: &mut usize,
+) -> Result<(), CoreError> {
+    if depth > MAX_EXTRACT_SCHEMA_DEPTH {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            format!("browser_extract schema nesting exceeds {MAX_EXTRACT_SCHEMA_DEPTH} levels"),
+        ));
+    }
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map {
+                if key == "limit" {
+                    match val.as_u64() {
+                        Some(n) if n <= MAX_EXTRACT_LIMIT => {}
+                        _ => {
+                            return Err(CoreError::new(
+                                ErrorCode::InvalidArgument,
+                                format!(
+                                    "browser_extract limit must be an integer between 0 and {MAX_EXTRACT_LIMIT}"
+                                ),
+                            ))
+                        }
+                    }
+                }
+                walk_extract_schema(val, depth + 1, strings)?;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                walk_extract_schema(item, depth + 1, strings)?;
+            }
+        }
+        serde_json::Value::String(_) => {
+            *strings += 1;
+            if *strings > MAX_EXTRACT_SCHEMA_STRINGS {
+                return Err(CoreError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "browser_extract schema has more than {MAX_EXTRACT_SCHEMA_STRINGS} selector entries"
+                    ),
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod ref_adapter_tests {
     use super::*;
@@ -651,5 +868,107 @@ mod ref_adapter_tests {
         assert_eq!(out["items"][1].get("ref"), None);
         assert_eq!(out["nested"]["ref"], "e3");
         assert_eq!(ids, vec![1, 3, 2]);
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    #[test]
+    fn content_cap_is_bounded() {
+        assert_eq!(validated_content_cap(None).unwrap(), MAX_CONTENT_BYTES);
+        assert_eq!(validated_content_cap(Some(1)).unwrap(), 1);
+        assert_eq!(
+            validated_content_cap(Some(MAX_CONTENT_BYTES as u64)).unwrap(),
+            MAX_CONTENT_BYTES
+        );
+        for bad in [0u64, MAX_CONTENT_BYTES as u64 + 1, u64::MAX] {
+            let err = validated_content_cap(Some(bad)).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn find_element_requires_one_bounded_criterion() {
+        assert!(validate_find_element(None, None).is_err());
+        assert!(validate_find_element(Some("  "), Some("")).is_err());
+        assert!(validate_find_element(Some("button"), None).is_ok());
+        assert!(validate_find_element(None, Some("Submit")).is_ok());
+        assert!(validate_find_element(Some(&"r".repeat(129)), None).is_err());
+        assert!(validate_find_element(None, Some(&"n".repeat(513))).is_err());
+    }
+
+    #[test]
+    fn scroll_offsets_are_bounded() {
+        assert!(validate_scroll_offsets(None, None).is_ok());
+        assert!(validate_scroll_offsets(Some(0), Some(-100)).is_ok());
+        assert!(validate_scroll_offsets(Some(MAX_SCROLL_OFFSET), Some(-MAX_SCROLL_OFFSET)).is_ok());
+        assert!(validate_scroll_offsets(Some(MAX_SCROLL_OFFSET + 1), None).is_err());
+        assert!(validate_scroll_offsets(None, Some(-(MAX_SCROLL_OFFSET + 1))).is_err());
+    }
+
+    #[test]
+    fn extract_schema_requires_object_root() {
+        for bad in [
+            serde_json::json!(["title"]),
+            serde_json::json!("title"),
+            serde_json::json!(null),
+        ] {
+            let err = validate_extract_schema(&bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
+        }
+    }
+
+    #[test]
+    fn extract_schema_accepts_valid_shapes_and_encodes_once() {
+        let schema = serde_json::json!({
+            "title": "h1",
+            "items": [{"selector": ".row", "fields": {"name": ".n"}, "limit": 3}],
+            "link": {"selector": "a.more", "attr": "href"}
+        });
+        let encoded = validate_extract_schema(&schema).unwrap();
+        assert_eq!(encoded, serde_json::to_string(&schema).unwrap());
+    }
+
+    #[test]
+    fn extract_schema_rejects_excessive_limits() {
+        for bad in [
+            serde_json::json!({"items": [{"selector": ".row", "limit": -1}]}),
+            serde_json::json!({"items": [{"selector": ".row", "limit": 10_001}]}),
+            serde_json::json!({"items": [{"selector": ".row", "limit": "5"}]}),
+        ] {
+            let err = validate_extract_schema(&bad).unwrap_err();
+            assert_eq!(err.code, ErrorCode::InvalidArgument);
+        }
+        assert!(validate_extract_schema(
+            &serde_json::json!({"items": [{"selector": ".row", "limit": 10_000}]})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn extract_schema_rejects_deep_nesting_and_too_many_selectors() {
+        // 9 levels of nesting: one past the bound.
+        let mut deep = serde_json::json!({"sel": ".x"});
+        for _ in 0..MAX_EXTRACT_SCHEMA_DEPTH {
+            deep = serde_json::json!({"fields": deep});
+        }
+        assert!(validate_extract_schema(&deep).is_err());
+
+        let many = serde_json::Value::Array(
+            (0..=MAX_EXTRACT_SCHEMA_STRINGS)
+                .map(|i| serde_json::json!(format!(".s{i}")))
+                .collect(),
+        );
+        let many = serde_json::json!({"items": many});
+        assert!(validate_extract_schema(&many).is_err());
+    }
+
+    #[test]
+    fn extract_schema_rejects_oversized_documents() {
+        let big = serde_json::json!({"field": "x".repeat(MAX_EXTRACT_SCHEMA_BYTES)});
+        let err = validate_extract_schema(&big).unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidArgument);
     }
 }
