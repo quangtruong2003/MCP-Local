@@ -374,6 +374,15 @@ fn matching_audit(core: &lc_core::CoreServices, op: &str) -> Vec<lc_core::models
         .collect()
 }
 
+/// The `text` field of a BrowserTextTruncatedOutput structured result, free of
+/// the outer JSON escaping that `serde_json::to_string(&result)` would add.
+fn truncated_text(result: &rmcp::model::CallToolResult) -> String {
+    result.structured_content.as_ref().unwrap()["text"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string()
+}
+
 #[tokio::test]
 async fn browser_discovery_exposes_exactly_39_public_browser_tools() {
     let (port, _dir, _core, _driver, _browser) = spawn(AppSettings::default()).await;
@@ -3249,4 +3258,672 @@ async fn run_steps_rejects_disallowed_step_types() {
     );
     // Protocol-level rejections happen before the handler: no audit rows.
     assert!(matching_audit(&core, "browser_run_steps").is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Native-first wrappers (Task 10): every tool maps to a pinned Lightpanda
+// native primitive, backend node ids are rewritten to opaque refs, content is
+// bounded, and audit rows carry byte counts / opaque targets only.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn native_first_markdown_maps_to_native_with_ref_scope_and_bounded_bytes() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    // Whole-page markdown maps to the native `markdown` tool.
+    driver.respond("markdown", "# Title\n\nBody text".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_markdown")
+                .with_arguments(arguments(serde_json::json!({}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("# Title"), "{text}");
+    assert!(text.contains("\"truncated\":false"), "{text}");
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "markdown" && c.arguments.get("selector").is_none()));
+
+    // A snapshot ref scopes the read through a recovered selector.
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+    driver.respond("markdown", "scoped body".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_markdown")
+                .with_arguments(arguments(serde_json::json!({"ref":"e2"}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "nodeDetails" && c.arguments["backendNodeId"] == 2));
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "markdown")
+        .unwrap();
+    assert_eq!(call.arguments["selector"], "#nd-2");
+
+    // Caller-supplied caps truncate and are bounded to the hard maximum.
+    driver.respond("markdown", "0123456789".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_markdown")
+                .with_arguments(arguments(serde_json::json!({"max_bytes":5}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(text.contains("01234"), "{text}");
+    assert!(text.contains("\"truncated\":true"), "{text}");
+
+    let calls_before = driver.calls().len();
+    for bad in [
+        serde_json::json!({"max_bytes":0}),
+        serde_json::json!({"max_bytes":262145}),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("browser_markdown").with_arguments(arguments(bad)),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{text}");
+        assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    }
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "invalid cap reached the driver"
+    );
+
+    // Audit stores request metadata only, never page content.
+    let rows = matching_audit(&core, "browser_markdown");
+    assert_eq!(rows.len(), 5);
+    for row in &rows {
+        let detail = serde_json::to_string(row.detail.as_ref().unwrap()).unwrap();
+        assert!(
+            !detail.contains("Title")
+                && !detail.contains("scoped body")
+                && !detail.contains("01234"),
+            "markdown audit must not carry content: {detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_first_html_maps_to_native_with_ref_scope_and_bounded_bytes() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    driver.respond("html", "<html><body><p>hi</p></body></html>".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_html")
+                .with_arguments(arguments(serde_json::json!({}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("<p>hi</p>"), "{text}");
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "html" && c.arguments.get("selector").is_none()));
+
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+    driver.respond("html", "<input>".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_html")
+                .with_arguments(arguments(serde_json::json!({"ref":"e3"}))),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "nodeDetails" && c.arguments["backendNodeId"] == 3));
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "html")
+        .unwrap();
+    assert_eq!(call.arguments["selector"], "#nd-3");
+
+    let calls_before = driver.calls().len();
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_html")
+                .with_arguments(arguments(serde_json::json!({"max_bytes":0}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "invalid cap reached the driver"
+    );
+
+    let rows = matching_audit(&core, "browser_html");
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        let detail = serde_json::to_string(row.detail.as_ref().unwrap()).unwrap();
+        assert!(!detail.contains("<p>hi</p>"), "{detail}");
+    }
+}
+
+#[tokio::test]
+async fn native_first_links_normalizes_backend_ids_to_actionable_refs() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    driver.respond(
+        "links",
+        "[{\"backendNodeId\":7,\"text\":\"Docs\",\"href\":\"https://example.com/docs\"},{\"backendNodeId\":8,\"text\":\"Blog\",\"href\":\"https://example.com/blog\"}]"
+            .to_string(),
+    );
+    let result = client
+        .call_tool(CallToolRequestParams::new("browser_links"))
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let text = truncated_text(&result);
+    assert!(driver.calls().iter().any(|c| c.tool == "links"));
+    assert!(text.contains("\"ref\":\"e1\""), "{text}");
+    assert!(text.contains("\"ref\":\"e2\""), "{text}");
+    assert!(!text.contains("backendNodeId"), "{text}");
+
+    // Normalized refs resolve back to the same backend nodes.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e1"}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "nodeDetails" && c.arguments["backendNodeId"] == 7));
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "click" && c.arguments["selector"] == "#nd-7"));
+
+    let rows = matching_audit(&core, "browser_links");
+    assert_eq!(rows.len(), 1);
+    if let Some(detail) = &rows[0].detail {
+        let detail = serde_json::to_string(detail).unwrap();
+        assert!(
+            !detail.contains("Docs") && !detail.contains("example.com"),
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_first_find_element_validates_criteria_and_normalizes_refs() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    let calls_before = driver.calls().len();
+    for bad in [
+        serde_json::json!({}),
+        serde_json::json!({"role":"  "}),
+        serde_json::json!({"name":""}),
+        serde_json::json!({"role":"","name":" "}),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("browser_find_element").with_arguments(arguments(bad)),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{text}");
+        assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    }
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "criterion-less find reached the driver"
+    );
+
+    driver.respond(
+        "findElement",
+        "[{\"backendNodeId\":9,\"tagName\":\"button\",\"role\":\"button\",\"name\":\"Go\"}]"
+            .to_string(),
+    );
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_find_element").with_arguments(arguments(
+                serde_json::json!({"role":" button ","name":" Go "}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let text = truncated_text(&result);
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "findElement")
+        .unwrap();
+    assert_eq!(call.arguments["role"], "button");
+    assert_eq!(call.arguments["name"], "Go");
+    assert!(text.contains("\"ref\":\"e1\""), "{text}");
+    assert!(!text.contains("backendNodeId"), "{text}");
+
+    let rows = matching_audit(&core, "browser_find_element");
+    let ok_rows: Vec<_> = rows.iter().filter(|r| r.decision == "allow").collect();
+    assert_eq!(ok_rows.len(), 1);
+    let detail = ok_rows[0].detail.as_ref().unwrap();
+    assert_eq!(detail["role_bytes"], 8);
+    assert_eq!(detail["name_bytes"], 4);
+    assert!(
+        !serde_json::to_string(detail).unwrap().contains("Go"),
+        "find_element audit must be byte counts only"
+    );
+}
+
+#[tokio::test]
+async fn native_first_interactive_elements_normalizes_backend_ids() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    driver.respond(
+        "interactiveElements",
+        "[{\"backendNodeId\":5,\"tagName\":\"input\",\"role\":\"textbox\",\"name\":\"Name\",\"type\":\"native\"},{\"backendNodeId\":6,\"tagName\":\"button\",\"role\":\"button\",\"name\":\"Submit\",\"type\":\"native\"}]"
+            .to_string(),
+    );
+    let result = client
+        .call_tool(CallToolRequestParams::new("browser_interactive_elements"))
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let text = truncated_text(&result);
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "interactiveElements"));
+    assert!(text.contains("\"ref\":\"e1\""), "{text}");
+    assert!(text.contains("\"ref\":\"e2\""), "{text}");
+    assert!(!text.contains("backendNodeId"), "{text}");
+    assert!(text.contains("Submit"), "{text}");
+}
+
+#[tokio::test]
+async fn native_first_extract_validates_schema_and_parses_structured_result() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    // Non-object roots and invalid shapes are rejected before any native call.
+    let calls_before = driver.calls().len();
+    for bad in [
+        serde_json::json!({"schema":"title"}),
+        serde_json::json!({"schema":["h1"]}),
+        serde_json::json!({"schema":42}),
+    ] {
+        let result = client
+            .call_tool(CallToolRequestParams::new("browser_extract").with_arguments(arguments(bad)))
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{text}");
+        assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    }
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "invalid schema reached the driver"
+    );
+
+    // A valid schema is serialized once into the upstream schema string and
+    // the structured result is parsed JSON, not a raw string.
+    let schema = serde_json::json!({
+        "title": {"selector": "h1"},
+        "prices": {"selector": ".price", "limit": 5, "fields": {"amount": {"selector": ".amt"}}}
+    });
+    driver.respond(
+        "extract",
+        "{\"title\":\"Hello\",\"prices\":[{\"amount\":\"$10\"}]}".to_string(),
+    );
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_extract")
+                .with_arguments(arguments(serde_json::json!({"schema": schema}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "extract")
+        .unwrap();
+    let encoded = call.arguments["schema"]
+        .as_str()
+        .expect("upstream schema must be a string");
+    let parsed: serde_json::Value = serde_json::from_str(encoded).unwrap();
+    assert_eq!(parsed, schema);
+    let structured = result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["data"]["title"], "Hello");
+    assert_eq!(structured["data"]["prices"][0]["amount"], "$10");
+
+    // Non-JSON upstream text is wrapped as a string value, never dropped.
+    driver.respond("extract", "not json".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_extract").with_arguments(arguments(
+                serde_json::json!({"schema": {"title": {"selector": "h1"}}}),
+            )),
+        )
+        .await
+        .unwrap();
+    let structured = result.structured_content.as_ref().unwrap();
+    assert_eq!(structured["data"], "not json");
+
+    // Audit records schema bytes only.
+    let rows = matching_audit(&core, "browser_extract");
+    let ok_rows: Vec<_> = rows.iter().filter(|r| r.decision == "allow").collect();
+    assert_eq!(ok_rows.len(), 2);
+    for row in &ok_rows {
+        let detail = serde_json::to_string(row.detail.as_ref().unwrap()).unwrap();
+        assert!(detail.contains("schema_bytes"), "{detail}");
+        assert!(
+            !detail.contains("h1") && !detail.contains("selector"),
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_first_structured_data_maps_to_native_tool() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    driver.respond(
+        "structuredData",
+        "{\"jsonLd\":[{\"@type\":\"Article\"}],\"openGraph\":{\"title\":\"OG\"}}".to_string(),
+    );
+    let result = client
+        .call_tool(CallToolRequestParams::new("browser_structured_data"))
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("Article"), "{text}");
+    assert!(text.contains("\"truncated\":false"), "{text}");
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "structuredData")
+        .unwrap();
+    assert!(call.arguments.as_object().is_some_and(|m| m.is_empty()));
+}
+
+#[tokio::test]
+async fn native_first_detect_forms_redacts_passwords_and_normalizes_refs() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    let forms = serde_json::json!([{
+        "backendNodeId": 2,
+        "action": "/login",
+        "method": "post",
+        "fields": [
+            {"backendNodeId": 3, "tagName": "input", "name": "user", "inputType": "text",
+             "required": true, "disabled": false, "value": "visible-user"},
+            {"backendNodeId": 4, "tagName": "input", "name": "pass", "inputType": "password",
+             "required": true, "disabled": false, "value": "hunter2-secret"}
+        ]
+    }]);
+    driver.respond("detectForms", serde_json::to_string(&forms).unwrap());
+    let result = client
+        .call_tool(CallToolRequestParams::new("browser_detect_forms"))
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let text = truncated_text(&result);
+    assert!(driver.calls().iter().any(|c| c.tool == "detectForms"));
+    assert!(
+        !text.contains("hunter2-secret"),
+        "password value leaked: {text}"
+    );
+    assert!(text.contains("*****"), "{text}");
+    assert!(
+        text.contains("visible-user"),
+        "non-password values stay: {text}"
+    );
+    assert!(!text.contains("backendNodeId"), "{text}");
+    assert!(text.contains("\"ref\":\"e1\""), "{text}");
+    assert!(text.contains("\"ref\":\"e2\""), "{text}");
+    assert!(text.contains("\"ref\":\"e3\""), "{text}");
+
+    let rows = matching_audit(&core, "browser_detect_forms");
+    assert_eq!(rows.len(), 1);
+    if let Some(detail) = &rows[0].detail {
+        let detail = serde_json::to_string(detail).unwrap();
+        assert!(
+            !detail.contains("hunter2") && !detail.contains("visible-user"),
+            "{detail}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_first_scroll_maps_offsets_and_ref_without_invalidation() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    // Page scroll carries offsets only.
+    driver.respond("scroll", "scrolled".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_scroll")
+                .with_arguments(arguments(serde_json::json!({"y":500}))),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "scroll")
+        .unwrap();
+    assert_eq!(call.arguments["y"], 500);
+    assert!(call.arguments.get("backendNodeId").is_none());
+    assert!(call.arguments.get("selector").is_none());
+
+    // Ref scroll targets the backend node directly (upstream scroll has no
+    // selector support); the id never leaves the manager.
+    driver.respond("scroll", "scrolled".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_scroll")
+                .with_arguments(arguments(serde_json::json!({"ref":"e2","x":10,"y":20}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "scroll")
+        .unwrap();
+    assert_eq!(call.arguments["backendNodeId"], 2);
+    assert_eq!(call.arguments["x"], 10);
+    assert_eq!(call.arguments["y"], 20);
+    assert!(
+        driver.calls().iter().all(|c| c.tool != "nodeDetails"),
+        "scroll must not need selector recovery"
+    );
+
+    // Out-of-bounds offsets are rejected before any native call.
+    let calls_before = driver.calls().len();
+    for bad in [
+        serde_json::json!({"y":10_000_001}),
+        serde_json::json!({"x":-10_000_001}),
+    ] {
+        let result = client
+            .call_tool(CallToolRequestParams::new("browser_scroll").with_arguments(arguments(bad)))
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{text}");
+        assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    }
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "out-of-bounds scroll reached the driver"
+    );
+
+    // Scrolling never mutates the DOM: existing refs stay valid.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e4"}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "click" && c.arguments["selector"] == "#nd-4"));
+}
+
+#[tokio::test]
+async fn native_first_set_checked_recovers_selector_and_invalidates_refs() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    // `checked` defaults to true; the selector is recovered via nodeDetails.
+    driver.respond("setChecked", "ok".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_set_checked")
+                .with_arguments(arguments(serde_json::json!({"ref":"e3"}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(!result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("updated the checked state"), "{text}");
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "nodeDetails" && c.arguments["backendNodeId"] == 3));
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "setChecked")
+        .unwrap();
+    assert_eq!(call.arguments["selector"], "#nd-3");
+    assert_eq!(call.arguments["checked"], true);
+
+    // Side-effecting: refs are invalidated afterwards.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e3"}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_STALE_REF"), "{text}");
+
+    // Re-snapshot and pass checked=false explicitly.
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+    driver.respond("setChecked", "ok".to_string());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_set_checked")
+                .with_arguments(arguments(serde_json::json!({"ref":"e3","checked":false}))),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "setChecked")
+        .unwrap();
+    assert_eq!(call.arguments["checked"], false);
+
+    // Audit records the opaque target and requested state only.
+    // list_recent is newest-first: the checked=false call is row 0.
+    let rows = matching_audit(&core, "browser_set_checked");
+    let ok_rows: Vec<_> = rows.iter().filter(|r| r.decision == "allow").collect();
+    assert_eq!(ok_rows.len(), 2);
+    assert_eq!(ok_rows[0].detail.as_ref().unwrap()["checked"], false);
+    assert_eq!(ok_rows[1].detail.as_ref().unwrap()["target"], "e3");
+    assert_eq!(ok_rows[1].detail.as_ref().unwrap()["checked"], true);
+    for row in &ok_rows {
+        let detail = serde_json::to_string(row.detail.as_ref().unwrap()).unwrap();
+        assert!(!detail.contains("#nd-3"), "{detail}");
+    }
 }

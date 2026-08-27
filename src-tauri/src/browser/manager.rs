@@ -32,9 +32,9 @@ use super::{
     artifacts::ArtifactStore,
     driver::{BrowserPageDriver, BrowserPageDriverFactory, PageLaunchSpec},
     mcp::{
-        call_result_text, encode_js_string, is_valid_ref, normalize_tree_text,
-        page_evaluate_script, parse_node_selector, BrowserLoadState, BrowserNavigationAction,
-        BrowserWaitCondition,
+        call_result_text, encode_js_string, is_valid_ref, normalize_backend_node_ids,
+        normalize_tree_text, page_evaluate_script, parse_node_selector, redact_form_passwords,
+        BrowserLoadState, BrowserNavigationAction, BrowserWaitCondition,
     },
     policy::validate_navigation_url,
     runtime::{BrowserRuntimeManager, RuntimeProvisionState},
@@ -1325,12 +1325,46 @@ impl BrowserManager {
         self.route_to_page(&page_id, tool, Map::new()).await
     }
 
+    /// Routes one JSON-returning native tool and rewrites every upstream
+    /// `backendNodeId` field into a freshly registered opaque ref, so raw
+    /// backend ids never leave the manager. Non-JSON output passes through
+    /// unchanged. When `redact_passwords` is set, password field values are
+    /// redacted before normalization (detectForms defense-in-depth).
+    async fn route_json_tool_with_refs(
+        &self,
+        tool: &'static str,
+        arguments: Map<String, Value>,
+        redact_passwords: bool,
+    ) -> Result<CallToolResult, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let response = self.route_to_page(&page_id, tool, arguments).await?;
+        let text = call_result_text(&response);
+        let parsed: Value = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => return Ok(response),
+        };
+        let mut parsed = parsed;
+        if redact_passwords {
+            redact_form_passwords(&mut parsed);
+        }
+        let mut state = self.state.lock().await;
+        let page = Self::page_mut(&mut state, &page_id)?;
+        let normalized =
+            normalize_backend_node_ids(parsed, &mut |id| Self::register_backend_node(page, id));
+        let serialized = serde_json::to_string(&normalized).unwrap_or_else(|_| text.clone());
+        let mut rebuilt = response;
+        rebuilt.content = vec![rmcp::model::ContentBlock::text(serialized)];
+        Ok(rebuilt)
+    }
+
     pub async fn links_content(&self) -> Result<CallToolResult, CoreError> {
-        self.route_content_tool("links").await
+        self.route_json_tool_with_refs("links", Map::new(), false)
+            .await
     }
 
     pub async fn interactive_elements_content(&self) -> Result<CallToolResult, CoreError> {
-        self.route_content_tool("interactiveElements").await
+        self.route_json_tool_with_refs("interactiveElements", Map::new(), false)
+            .await
     }
 
     pub async fn structured_data_content(&self) -> Result<CallToolResult, CoreError> {
@@ -1338,7 +1372,8 @@ impl BrowserManager {
     }
 
     pub async fn detect_forms_content(&self) -> Result<CallToolResult, CoreError> {
-        self.route_content_tool("detectForms").await
+        self.route_json_tool_with_refs("detectForms", Map::new(), true)
+            .await
     }
 
     /// Renders the page, or one snapshot ref's subtree, as markdown.
@@ -1369,13 +1404,13 @@ impl BrowserManager {
     }
 
     /// Finds interactive elements by role and/or accessible name. Callers
-    /// must validate that at least one criterion is present.
+    /// must validate that at least one criterion is present. Returned backend
+    /// node ids are rewritten to opaque refs before leaving the manager.
     pub async fn find_element(
         &self,
         role: Option<&str>,
         name: Option<&str>,
     ) -> Result<CallToolResult, CoreError> {
-        let page_id = self.active_page_guarded().await?;
         let mut args = Map::new();
         if let Some(role) = role.map(str::trim).filter(|r| !r.is_empty()) {
             args.insert("role".into(), Value::String(role.to_string()));
@@ -1383,7 +1418,8 @@ impl BrowserManager {
         if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
             args.insert("name".into(), Value::String(name.to_string()));
         }
-        self.route_to_page(&page_id, "findElement", args).await
+        self.route_json_tool_with_refs("findElement", args, false)
+            .await
     }
 
     /// Runs one schema-driven extraction. The schema must already be

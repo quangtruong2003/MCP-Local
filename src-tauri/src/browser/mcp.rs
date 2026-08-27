@@ -596,11 +596,8 @@ pub(crate) fn normalize_tree_text(text: &str, register: &mut dyn FnMut(u64) -> S
 
 /// Recursively replaces integer `backendNodeId` fields with opaque `ref`
 /// string fields in one Lightpanda JSON document (links / interactiveElements
-/// / findElement / nodeDetails). Raw backend ids are never preserved: a
+/// / findElement / detectForms). Raw backend ids are never preserved: a
 /// malformed id field is dropped rather than leaked.
-// Wired into the native-first content tools (browser_links,
-// browser_find_element, browser_interactive_elements) in Task 10.
-#[allow(dead_code)]
 pub(crate) fn normalize_backend_node_ids(
     value: serde_json::Value,
     register: &mut dyn FnMut(u64) -> String,
@@ -626,6 +623,37 @@ pub(crate) fn normalize_backend_node_ids(
                 .collect(),
         ),
         other => other,
+    }
+}
+
+/// Defense-in-depth redaction for `detectForms` output. Upstream Lightpanda
+/// already reports password input values as `*****`, but this pass guarantees
+/// a password field's value never leaves the manager even if a future
+/// upstream release changes that behavior. Any object carrying
+/// `inputType: "password"` has its `value` forced to `*****`.
+pub(crate) fn redact_form_passwords(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            let is_password = map
+                .get("inputType")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t.eq_ignore_ascii_case("password"));
+            if is_password && map.contains_key("value") {
+                map.insert(
+                    "value".into(),
+                    serde_json::Value::String("*****".to_string()),
+                );
+            }
+            for val in map.values_mut() {
+                redact_form_passwords(val);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_form_passwords(item);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -903,6 +931,34 @@ mod ref_adapter_tests {
         assert_eq!(out["items"][1].get("ref"), None);
         assert_eq!(out["nested"]["ref"], "e3");
         assert_eq!(ids, vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn redact_form_passwords_forces_password_values_to_stars() {
+        let mut doc = serde_json::json!([
+            {
+                "backendNodeId": 2,
+                "action": "/login",
+                "fields": [
+                    {"backendNodeId": 3, "inputType": "text", "value": "visible-user"},
+                    {"backendNodeId": 4, "inputType": "password", "value": "hunter2-secret"},
+                    {"backendNodeId": 5, "inputType": "PASSWORD", "value": "loud-secret"},
+                    {"backendNodeId": 6, "inputType": "password"}
+                ]
+            }
+        ]);
+        redact_form_passwords(&mut doc);
+        let fields = &doc[0]["fields"];
+        assert_eq!(
+            fields[0]["value"], "visible-user",
+            "non-password value stays"
+        );
+        assert_eq!(fields[1]["value"], "*****");
+        assert_eq!(fields[2]["value"], "*****", "match is case-insensitive");
+        assert_eq!(fields[3].get("value"), None, "absent value is not invented");
+        let serialized = serde_json::to_string(&doc).unwrap();
+        assert!(!serialized.contains("hunter2-secret"));
+        assert!(!serialized.contains("loud-secret"));
     }
 }
 
