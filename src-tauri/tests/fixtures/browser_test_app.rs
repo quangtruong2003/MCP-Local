@@ -82,6 +82,9 @@ const INDEX_HTML: &str = r#"<!doctype html>
     <option value="blue">Blue</option>
   </select>
 
+  <label for="agree-checkbox">Agree</label>
+  <input id="agree-checkbox" type="checkbox">
+
   <button id="submit-btn">Submit</button>
   <div id="result" aria-live="polite">result:none</div>
 
@@ -157,8 +160,12 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
-/// Binds the fixture to an OS-assigned localhost port and spawns it on the
+/// Binds the fixture to an OS-assigned loopback port and spawns it on the
 /// current tokio runtime. The server lives until the runtime is dropped.
+///
+/// The real-runtime suite reaches this loopback server from inside the WSL2
+/// VM through the suite's own node TCP proxy (Windows Firewall blocks raw
+/// inbound connections to the test binary but allows node.exe).
 pub async fn spawn() -> Fixture {
     let state = FixtureState::default();
     let app = Router::new()

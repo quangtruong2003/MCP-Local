@@ -130,6 +130,8 @@ struct RunningPage {
     client: RunningService<RoleClient, ()>,
     _job: Option<JobHandle>,
     lost: bool,
+    /// Local diagnostics only; never surfaced through MCP handlers.
+    child_pid: Option<u32>,
 }
 
 pub struct LightpandaPageDriver {
@@ -167,16 +169,17 @@ impl LightpandaPageDriver {
 
     /// Fixed child argv suffix for one page. Every value is app-generated from
     /// the launch spec; MCP/model input never reaches this argv.
+    ///
+    /// The pinned Lightpanda 0.3.7 `mcp` mode rejects the `--storage-engine`
+    /// and `--storage-sqlite-path` flags (verified against the pinned binary:
+    /// `unknown argument`), so Web Storage is per-page and volatile. Only
+    /// flags the pinned binary accepts may appear here.
     pub(crate) fn page_args(spec: &PageLaunchSpec) -> Vec<String> {
         vec![
             "--cookie".to_string(),
             spec.cookie_path.clone(),
             "--cookie-jar".to_string(),
             spec.cookie_jar_path.clone(),
-            "--storage-engine".to_string(),
-            "sqlite".to_string(),
-            "--storage-sqlite-path".to_string(),
-            spec.storage_sqlite_path.clone(),
             "--http-cache-dir".to_string(),
             spec.http_cache_dir.clone(),
             "--http-cache-entry-limit".to_string(),
@@ -304,6 +307,7 @@ impl BrowserPageDriver for LightpandaPageDriver {
             client: spawned.client,
             _job: spawned.job,
             lost: false,
+            child_pid: spawned.child_pid,
         });
         Ok(status)
     }
@@ -366,6 +370,13 @@ impl BrowserPageDriver for LightpandaPageDriver {
             .await
             .as_ref()
             .is_some_and(|page| !page.lost)
+    }
+
+    fn child_pid(&self) -> Option<u32> {
+        self.running
+            .try_lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(|page| page.child_pid))
     }
 }
 
@@ -607,7 +618,6 @@ mod tests {
             page_id: "page-1".into(),
             cookie_path: "/var/lib/local-workspaces/browser/cookies/canonical.json".into(),
             cookie_jar_path: "/var/lib/local-workspaces/browser/cookies/page-1.exit.json".into(),
-            storage_sqlite_path: "/var/lib/local-workspaces/browser/profile/storage.sqlite".into(),
             http_cache_dir: "/var/lib/local-workspaces/browser/cache".into(),
         }
     }
@@ -639,10 +649,6 @@ mod tests {
             spec.cookie_path,
             "--cookie-jar".to_string(),
             spec.cookie_jar_path,
-            "--storage-engine".to_string(),
-            "sqlite".to_string(),
-            "--storage-sqlite-path".to_string(),
-            spec.storage_sqlite_path,
             "--http-cache-dir".to_string(),
             spec.http_cache_dir,
             "--http-cache-entry-limit".to_string(),
@@ -791,10 +797,6 @@ mod tests {
             spec.cookie_path.clone(),
             "--cookie-jar".into(),
             spec.cookie_jar_path.clone(),
-            "--storage-engine".into(),
-            "sqlite".into(),
-            "--storage-sqlite-path".into(),
-            spec.storage_sqlite_path.clone(),
             "--http-cache-dir".into(),
             spec.http_cache_dir.clone(),
             "--http-cache-entry-limit".into(),

@@ -57,7 +57,6 @@ const LEGACY_FIXED_RUN_MODE: BrowserRunMode = BrowserRunMode::Background;
 pub const BROWSER_PROFILE_DIR: &str = "/var/lib/local-workspaces/browser/profile";
 pub const BROWSER_COOKIE_DIR: &str = "/var/lib/local-workspaces/browser/cookies";
 pub const BROWSER_CACHE_DIR: &str = "/var/lib/local-workspaces/browser/cache";
-pub const STORAGE_SQLITE_PATH: &str = "/var/lib/local-workspaces/browser/profile/storage.sqlite";
 pub const CANONICAL_COOKIE_PATH: &str = "/var/lib/local-workspaces/browser/cookies/canonical.json";
 
 /// Fixed application-owned scripts for history navigation. Lightpanda has no
@@ -246,13 +245,14 @@ fn cookie_key(cookie: &Value) -> Option<(String, String, String)> {
     Some((name.to_string(), domain, path.to_string()))
 }
 
-/// Merges a page exit jar into the canonical cookie snapshot. Accepts either
-/// a top-level array or an object with a `cookies` array on both sides; the
-/// output preserves the canonical document shape (or the jar shape when no
-/// canonical snapshot exists yet). Cookies are keyed by (name, domain, path);
-/// jar entries win on conflict, canonical order is preserved, and new jar
-/// cookies are appended in jar order. Returns `None` when neither side holds
-/// a parsable cookie document.
+/// Merges a page cookie document into the canonical cookie snapshot. Accepts
+/// either a top-level array or an object with a `cookies` array on both
+/// sides. The output is ALWAYS a top-level cookie array — the only shape the
+/// pinned Lightpanda `--cookie` flag will load (an object wrapper fails
+/// `Cookie.parseFile`). Cookies are keyed by (name, domain, path); jar entries
+/// win on conflict, canonical order is preserved, and new jar cookies are
+/// appended in jar order. Returns `None` when neither side holds a parsable
+/// cookie document.
 pub(crate) fn merge_cookie_documents(canonical: Option<&str>, jar: Option<&str>) -> Option<String> {
     let canonical_doc = canonical.and_then(|s| serde_json::from_str::<Value>(s).ok());
     let jar_doc = jar.and_then(|s| serde_json::from_str::<Value>(s).ok());
@@ -291,16 +291,76 @@ pub(crate) fn merge_cookie_documents(canonical: Option<&str>, jar: Option<&str>)
         }
     }
 
-    let canonical_is_object =
-        matches!(&canonical_doc, Some(Value::Object(map)) if map.get("cookies").is_some());
-    let jar_is_object =
-        matches!(&jar_doc, Some(Value::Object(map)) if map.get("cookies").is_some());
-    let output = if canonical_is_object || jar_is_object || canonical_doc.is_some() {
-        serde_json::json!({ "cookies": merged })
-    } else {
-        Value::Array(merged)
-    };
-    serde_json::to_string(&output).ok()
+    serde_json::to_string(&Value::Array(merged)).ok()
+}
+
+/// Normalizes Lightpanda's `getCookies` output into a cookie-object array.
+/// The pinned runtime renders one `name=value; domain=<d>; path=<p>` line per
+/// cookie (not JSON), while persistence needs the cookie-object array that
+/// Lightpanda's `--cookie` flag loads. JSON cookie documents (a top-level
+/// array or an object with a `cookies` array) pass through unchanged so fake
+/// drivers and any JSON-emitting build keep working. Attribute fields the text
+/// form does not carry take the runtime's own defaults. Returns `None` when no
+/// cookie can be read.
+pub(crate) fn parse_get_cookies_to_array(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // JSON cookie document: pass the cookie array through.
+    if let Ok(doc) = serde_json::from_str::<Value>(trimmed) {
+        let items = extract_cookies_array(&doc)?;
+        if items.is_empty() {
+            return None;
+        }
+        return serde_json::to_string(&Value::Array(items.clone())).ok();
+    }
+    // Document-cookie text form: one `name=value; domain=..; path=..` line.
+    let mut cookies: Vec<Value> = Vec::new();
+    for line in trimmed.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut name: Option<String> = None;
+        let mut value = String::new();
+        let mut domain = String::new();
+        let mut path = String::new();
+        for (index, part) in line.split(';').enumerate() {
+            let part = part.trim();
+            let Some(eq) = part.find('=') else {
+                continue;
+            };
+            let key = part[..eq].trim();
+            let val = part[eq + 1..].trim();
+            if index == 0 {
+                name = Some(key.to_string());
+                value = val.to_string();
+            } else {
+                match key.to_ascii_lowercase().as_str() {
+                    "domain" => domain = val.to_string(),
+                    "path" => path = val.to_string(),
+                    _ => {}
+                }
+            }
+        }
+        if let Some(name) = name {
+            cookies.push(serde_json::json!({
+                "name": name,
+                "value": value,
+                "domain": domain,
+                "path": path,
+                "expires": null,
+                "secure": false,
+                "httpOnly": false,
+                "sameSite": "lax"
+            }));
+        }
+    }
+    if cookies.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&Value::Array(cookies)).ok()
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +409,27 @@ fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
+        .unwrap_or_default()
+}
+
+/// Test-only helper: best-effort kill of a process and its descendants. On
+/// Windows `taskkill /T` terminates the whole tree (the wsl.exe child plus
+/// anything it spawned); elsewhere a plain SIGKILL is used.
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
+#[cfg(not(windows))]
+fn kill_process_tree(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
 }
 
 struct ActiveSession {
@@ -544,11 +624,54 @@ impl BrowserManager {
         match self.route_to_page(&page_id, "getCookies", args).await {
             Ok(result) => {
                 let json = call_result_text(&result);
-                if let Err(error) = self.cookie_store.write(CANONICAL_COOKIE_PATH, &json).await {
-                    eprintln!("canonical cookie refresh failed: {error}");
-                }
+                self.merge_cookie_json_into_canonical(&json).await;
             }
             Err(error) => eprintln!("canonical cookie refresh skipped: {error}"),
+        }
+    }
+
+    /// Merges one page's cookie document (live `getCookies` output or an exit
+    /// jar) into the canonical snapshot. Merge — never overwrite — so cookies
+    /// persisted by an earlier page survive a later page with an empty store.
+    /// The input is normalized to the cookie-array Lightpanda loads.
+    async fn merge_cookie_json_into_canonical(&self, json: &str) {
+        let Some(normalized) = parse_get_cookies_to_array(json) else {
+            return;
+        };
+        let canonical = self
+            .cookie_store
+            .read(CANONICAL_COOKIE_PATH)
+            .await
+            .ok()
+            .flatten();
+        if let Some(merged) = merge_cookie_documents(canonical.as_deref(), Some(&normalized)) {
+            if let Err(error) = self
+                .cookie_store
+                .write(CANONICAL_COOKIE_PATH, &merged)
+                .await
+            {
+                eprintln!("canonical cookie merge failed: {error}");
+            }
+        }
+    }
+
+    /// Captures a page's live cookies into the canonical snapshot before its
+    /// child stops. The exit-jar file is only a best-effort backup — the child
+    /// is killed when its job handle drops and may never flush it — so the
+    /// reliable capture is a live `getCookies` while the page still runs.
+    /// Best-effort by design: a lost page must not block shutdown.
+    async fn capture_cookies_to_canonical(&self, page: &ManagedPage) {
+        if page.lost {
+            return;
+        }
+        let mut args = Map::new();
+        args.insert("all".into(), Value::Bool(true));
+        match page.driver.call("getCookies", args).await {
+            Ok(result) => {
+                self.merge_cookie_json_into_canonical(&call_result_text(&result))
+                    .await
+            }
+            Err(error) => eprintln!("canonical cookie capture skipped: {error}"),
         }
     }
 
@@ -590,7 +713,6 @@ impl BrowserManager {
             page_id: page_id.clone(),
             cookie_path: CANONICAL_COOKIE_PATH.to_string(),
             cookie_jar_path: cookie_jar_path.clone(),
-            storage_sqlite_path: STORAGE_SQLITE_PATH.to_string(),
             http_cache_dir: BROWSER_CACHE_DIR.to_string(),
         };
         let driver = self.page_factory.create();
@@ -757,6 +879,7 @@ impl BrowserManager {
         let active = self.state.lock().await.active.take();
         if let Some(active) = active {
             for page in &active.pages {
+                self.capture_cookies_to_canonical(page).await;
                 let _ = page.driver.stop().await;
                 self.merge_exit_jar(&page.cookie_jar_path).await;
             }
@@ -1758,6 +1881,9 @@ impl BrowserManager {
             }
             page
         };
+        // Capture the closing page's live cookies before its child is killed
+        // (the exit-jar flush races the kill-on-drop and is not reliable).
+        self.capture_cookies_to_canonical(&removed).await;
         let _ = removed.driver.stop().await;
         self.merge_exit_jar(&removed.cookie_jar_path).await;
         let empty = self
@@ -1801,6 +1927,51 @@ impl BrowserManager {
             self.stop_all_unchecked().await?;
         }
         Ok(())
+    }
+
+    /// Test-only: OS pid of one page's child process, for integration tests
+    /// that walk the process tree or wait for termination. `page_id = None`
+    /// targets the active page.
+    pub async fn test_page_child_pid(&self, page_id: Option<&str>) -> Option<u32> {
+        let state = self.state.lock().await;
+        let session = state.active.as_ref()?;
+        let page = match page_id {
+            Some(id) => session.pages.iter().find(|p| p.page_id == id),
+            None => session
+                .pages
+                .iter()
+                .find(|p| p.page_id == session.active_page_id),
+        }?;
+        page.driver.child_pid()
+    }
+
+    /// Test-only: forcefully terminate one page's child process WITHOUT
+    /// clearing manager state, simulating an unexpected crash. The next tool
+    /// call on that page must surface `BROWSER_PROCESS_LOST`; sibling pages
+    /// must keep working. `page_id = None` targets the active page.
+    pub async fn test_terminate_page_child(&self, page_id: Option<&str>) -> Result<u32, CoreError> {
+        let pid = {
+            let state = self.state.lock().await;
+            let session = state.active.as_ref().ok_or_else(|| {
+                CoreError::new(ErrorCode::BrowserNotRunning, "browser is not running")
+            })?;
+            let page = match page_id {
+                Some(id) => session.pages.iter().find(|p| p.page_id == id),
+                None => session
+                    .pages
+                    .iter()
+                    .find(|p| p.page_id == session.active_page_id),
+            }
+            .ok_or_else(|| CoreError::new(ErrorCode::BrowserTargetNotFound, "unknown page id"))?;
+            page.driver.child_pid().ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserNotRunning,
+                    "browser page child process pid is unknown",
+                )
+            })?
+        };
+        kill_process_tree(pid);
+        Ok(pid)
     }
 
     pub(crate) async fn active_artifact_dir(&self) -> Result<PathBuf, CoreError> {
@@ -2130,7 +2301,6 @@ mod tests {
         assert_eq!(specs[1].cookie_path, CANONICAL_COOKIE_PATH);
         assert!(specs[1].cookie_jar_path.ends_with(".exit.json"));
         assert_ne!(specs[0].cookie_jar_path, specs[1].cookie_jar_path);
-        assert_eq!(specs[1].storage_sqlite_path, STORAGE_SQLITE_PATH);
     }
 
     #[tokio::test]
@@ -2293,7 +2463,9 @@ mod tests {
         ]"#;
         let merged = merge_cookie_documents(Some(canonical), Some(jar)).unwrap();
         let doc: Value = serde_json::from_str(&merged).unwrap();
-        let items = doc.get("cookies").and_then(Value::as_array).unwrap();
+        // Output is always a top-level cookie array (the only shape Lightpanda
+        // --cookie loads), even when the canonical input was an object.
+        let items = doc.as_array().unwrap();
         assert_eq!(items.len(), 3);
         // Canonical order preserved; jar wins the (name,domain,path) conflict
         // case-insensitively on domain; new jar cookies append.
@@ -2308,6 +2480,35 @@ mod tests {
         // Nothing parsable on either side merges to nothing.
         assert!(merge_cookie_documents(None, None).is_none());
         assert!(merge_cookie_documents(Some("not json"), None).is_none());
+    }
+
+    #[tokio::test]
+    async fn get_cookies_text_form_normalizes_to_cookie_array() {
+        // The pinned runtime's real getCookies output: one text line per cookie.
+        let text = "live13=1; domain=172.27.192.1; path=/\n";
+        let array = parse_get_cookies_to_array(text).unwrap();
+        let doc: Value = serde_json::from_str(&array).unwrap();
+        let items = doc.as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "live13");
+        assert_eq!(items[0]["value"], "1");
+        assert_eq!(items[0]["domain"], "172.27.192.1");
+        assert_eq!(items[0]["path"], "/");
+
+        // JSON cookie documents pass through as an array.
+        let object = r#"{"cookies":[{"name":"sid","domain":"a.test","path":"/","value":"v"}]}"#;
+        let from_object = parse_get_cookies_to_array(object).unwrap();
+        assert!(from_object.starts_with('['));
+        assert!(from_object.contains("sid"));
+        let array_doc = r#"[{"name":"sid","domain":"a.test","path":"/","value":"v"}]"#;
+        assert!(parse_get_cookies_to_array(array_doc)
+            .unwrap()
+            .starts_with('['));
+
+        // No readable cookie yields nothing (so an empty page never clobbers
+        // the canonical snapshot).
+        assert!(parse_get_cookies_to_array("").is_none());
+        assert!(parse_get_cookies_to_array("   \n").is_none());
     }
 
     #[tokio::test]

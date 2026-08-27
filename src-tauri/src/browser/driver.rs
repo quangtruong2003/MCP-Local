@@ -17,8 +17,6 @@ pub struct PageLaunchSpec {
     pub cookie_path: String,
     /// Page-specific exit cookie jar path inside the managed distro.
     pub cookie_jar_path: String,
-    /// SQLite-backed storage path inside the managed distro.
-    pub storage_sqlite_path: String,
     /// HTTP cache directory inside the managed distro.
     pub http_cache_dir: String,
 }
@@ -43,6 +41,11 @@ pub trait BrowserPageDriver: Send + Sync {
     ) -> Result<CallToolResult, CoreError>;
     async fn stop(&self) -> Result<(), CoreError>;
     async fn is_alive(&self) -> bool;
+    /// OS pid of the page child, for local diagnostics and integration tests
+    /// only. Browser MCP handlers intentionally omit this.
+    fn child_pid(&self) -> Option<u32> {
+        None
+    }
 }
 
 /// Creates one fresh page driver per logical page.
