@@ -105,16 +105,6 @@ pub fn run() {
             } else {
                 development_runtime
             };
-            let browser = Arc::new(
-                browser::manager::BrowserManager::with_playwright(
-                    core.clone(),
-                    dir.clone(),
-                    browser_runtime.clone(),
-                    &app_settings,
-                )
-                .map_err(|e| e.to_string())?,
-            );
-
             // Typed Lightpanda/WSL runtime provisioner. Reads the pinned,
             // immutable runtime manifest but does NOT provision here; that is
             // deferred to session startup / explicit setup commands so opening
@@ -137,6 +127,16 @@ pub fn run() {
             let browser_runtime_manager =
                 browser::runtime::BrowserRuntimeManager::production(&manifest_json)
                     .map_err(|e| e.to_string())?;
+
+            let browser = Arc::new(
+                browser::manager::BrowserManager::with_lightpanda(
+                    core.clone(),
+                    dir.clone(),
+                    &app_settings,
+                    browser_runtime_manager.clone(),
+                )
+                .map_err(|e| e.to_string())?,
+            );
 
             let port = tauri::async_runtime::block_on(server::serve(
                 core.clone(),

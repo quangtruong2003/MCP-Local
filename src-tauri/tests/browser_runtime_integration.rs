@@ -38,7 +38,9 @@ use serde_json::{json, Value};
 
 use lc_core::{error::ErrorCode, CoreServices};
 use local_workspace_mcp_manager::{
-    browser::{manager::BrowserManager, playwright::PlaywrightMcpDriver},
+    browser::{
+        manager::BrowserManager, playwright::PlaywrightMcpDriver, runtime::BrowserRuntimeManager,
+    },
     screen_capture::{CaptureTarget, CapturedImage, ScreenCaptureProvider},
     server::WorkspaceServer,
     settings::{save_app_settings, AgentPolicyState, AgentSettingsController, AppSettings},
@@ -76,17 +78,26 @@ fn runtime_manifest() -> PathBuf {
 /// Returns true when the bundled browser runtime is staged. Otherwise prints an
 /// explicit skip message and returns false; callers `return` early so the test
 /// passes with a deterministic skipped-unavailable condition.
+///
+/// During the Lightpanda native MCP migration this Playwright real-runtime
+/// suite is superseded: `BrowserManager` no longer drives the Playwright
+/// runtime, and Task 14 replaces this file with the WSL2/Lightpanda
+/// real-runtime suite. Every case is a documented skip until then so the tree
+/// stays green without ever faking a pass on the detached path.
 fn runtime_available(case: &str) -> bool {
-    if runtime_manifest().is_file() {
-        true
-    } else {
+    if !runtime_manifest().is_file() {
         println!(
             "SKIP [{case}]: bundled browser runtime manifest absent at {}; \
              run `npm run build:browser-runtime` to stage it. Real-browser test skipped.",
             runtime_manifest().display()
         );
-        false
+        return false;
     }
+    println!(
+        "SKIP [{case}]: Playwright real-runtime suite is superseded by the Lightpanda WSL2 \
+         suite (Task 14); skipped during migration."
+    );
+    false
 }
 
 // ---------------------------------------------------------------------------
@@ -120,10 +131,10 @@ struct RealEnv {
     _dir: tempfile::TempDir,
 }
 
-/// Spawns the full production MCP HTTP server backed by the REAL
-/// `PlaywrightMcpDriver` (the same construction used by `lib.rs` via
-/// `BrowserManager::with_playwright`, but keeping a handle to the concrete
-/// driver so tests can simulate crashes / walk the process tree).
+/// Spawns the full production MCP HTTP server. During the Lightpanda migration
+/// the manager is wired exactly like production (`with_lightpanda`); the
+/// Playwright driver handle is kept only so the skipped test bodies still
+/// compile until Task 14 rewrites this suite.
 async fn spawn_real(settings: AppSettings) -> RealEnv {
     let dir = tempfile::tempdir().expect("tempdir");
     let app_data_dir = dir.path().to_path_buf();
@@ -135,14 +146,14 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
         policy.clone(),
     ));
     let driver = Arc::new(PlaywrightMcpDriver::new(runtime_root()));
+    let manifest_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("resources")
+        .join("lightpanda-runtime-manifest.json");
+    let manifest_json = std::fs::read_to_string(&manifest_path).expect("lightpanda manifest");
+    let runtime = BrowserRuntimeManager::production(&manifest_json).expect("runtime manager");
     let browser = Arc::new(
-        BrowserManager::new(
-            core.clone(),
-            app_data_dir.clone(),
-            &settings,
-            driver.clone(),
-        )
-        .expect("browser manager"),
+        BrowserManager::with_lightpanda(core.clone(), app_data_dir.clone(), &settings, runtime)
+            .expect("browser manager"),
     );
     let capture: Arc<dyn ScreenCaptureProvider> = Arc::new(EmptyCapture);
 

@@ -570,6 +570,13 @@ impl BrowserRuntimeManager {
         &self.manifest
     }
 
+    /// Shared host adapter for fixed WSL operations against the owned distro
+    /// (cookie persistence, runtime file checks). Callers must only run
+    /// fixed-shape commands built from application constants.
+    pub fn wsl_adapter(&self) -> Arc<WslHostAdapter<Arc<dyn WslCommandRunner>>> {
+        self.adapter.clone()
+    }
+
     /// Ensures the runtime is provisioned and verified. Lazy: only called by
     /// browser session startup / explicit setup commands, never by opening
     /// Settings. Returns `Ready` or a fail-closed error.

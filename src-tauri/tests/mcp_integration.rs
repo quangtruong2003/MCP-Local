@@ -10,9 +10,8 @@ use std::{io::Cursor, sync::Arc};
 
 use local_workspace_mcp_manager::{
     browser::{
-        driver::{BrowserDriver, BrowserDriverStatus},
-        manager::BrowserManager,
-        types::BrowserLaunchSpec,
+        driver::{BrowserPageDriver, BrowserPageDriverFactory, PageDriverStatus, PageLaunchSpec},
+        manager::{BrowserManager, CookieStore, RuntimeGate},
     },
     screen_capture::{
         CaptureGeometry, CaptureTarget, CaptureTargetKind, CapturedImage, ScreenCaptureProvider,
@@ -99,25 +98,19 @@ impl ScreenCaptureProvider for FakeCaptureProvider {
 }
 
 #[derive(Debug, Default)]
-struct FakeBrowserDriver;
+struct FakePageDriver;
 
 #[async_trait::async_trait]
-impl BrowserDriver for FakeBrowserDriver {
+impl BrowserPageDriver for FakePageDriver {
     async fn start(
         &self,
-        spec: BrowserLaunchSpec,
-    ) -> Result<BrowserDriverStatus, lc_core::error::CoreError> {
-        Ok(BrowserDriverStatus {
+        spec: PageLaunchSpec,
+    ) -> Result<PageDriverStatus, lc_core::error::CoreError> {
+        Ok(PageDriverStatus {
             running: true,
-            actual_engine: spec.engine,
-            sidecar_version: Some("test".into()),
-            browser_version: Some("test".into()),
+            page_id: spec.page_id,
             child_pid: None,
         })
-    }
-
-    async fn stop(&self) -> Result<(), lc_core::error::CoreError> {
-        Ok(())
     }
 
     async fn call(
@@ -130,10 +123,45 @@ impl BrowserDriver for FakeBrowserDriver {
         ]))
     }
 
-    async fn chromium_performance_metrics(
-        &self,
-    ) -> Result<serde_json::Value, lc_core::error::CoreError> {
-        Ok(serde_json::json!({}))
+    async fn stop(&self) -> Result<(), lc_core::error::CoreError> {
+        Ok(())
+    }
+
+    async fn is_alive(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug, Default)]
+struct FakePageFactory;
+
+impl BrowserPageDriverFactory for FakePageFactory {
+    fn create(&self) -> Arc<dyn BrowserPageDriver> {
+        Arc::new(FakePageDriver)
+    }
+}
+
+#[derive(Debug, Default)]
+struct OkRuntimeGate;
+
+#[async_trait::async_trait]
+impl RuntimeGate for OkRuntimeGate {
+    async fn ensure_ready(&self) -> Result<(), lc_core::error::CoreError> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, Default)]
+struct MemoryCookieStore;
+
+#[async_trait::async_trait]
+impl CookieStore for MemoryCookieStore {
+    async fn write(&self, _path: &str, _json: &str) -> Result<(), lc_core::error::CoreError> {
+        Ok(())
+    }
+
+    async fn read(&self, _path: &str) -> Result<Option<String>, lc_core::error::CoreError> {
+        Ok(None)
     }
 }
 
@@ -190,7 +218,9 @@ async fn spawn_server_with_settings(
             core.clone(),
             dir.path().to_path_buf(),
             &settings,
-            Arc::new(FakeBrowserDriver),
+            Arc::new(FakePageFactory),
+            Arc::new(OkRuntimeGate),
+            Arc::new(MemoryCookieStore),
         )
         .unwrap(),
     );

@@ -1,4 +1,11 @@
 //! Browser lifecycle, policy, and session state.
+//!
+//! One logical page = one Lightpanda child stdio MCP process inside the
+//! managed WSL2 distro. The manager owns the page table, the opaque page ids,
+//! the ref generation counters, and the canonical cookie snapshot. There is no
+//! upstream "tabs" primitive: logical tabs are manager-owned state, each
+//! backed by its own child process, so one crashing page can never take down
+//! its siblings.
 
 use std::{
     collections::HashMap,
@@ -10,6 +17,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use async_trait::async_trait;
 use lc_core::{
     error::{CoreError, ErrorCode},
     CoreServices,
@@ -22,45 +30,274 @@ use crate::settings::AppSettings;
 
 use super::{
     artifacts::ArtifactStore,
-    driver::{BrowserDriver, BrowserDriverStatus},
-    playwright::PlaywrightMcpDriver,
+    driver::{BrowserPageDriver, BrowserPageDriverFactory, PageLaunchSpec},
+    mcp::call_result_text,
     policy::validate_navigation_url,
+    runtime::{BrowserRuntimeManager, RuntimeProvisionState},
     types::{
-        BrowserEmulation, BrowserEngine, BrowserLaunchSpec, BrowserPageStatus, BrowserRunMode,
-        BrowserRuntimeSettings, BrowserSessionStatus, DEFAULT_ACTION_TIMEOUT_MS,
-        DEFAULT_NAVIGATION_TIMEOUT_MS,
+        BrowserEngine, BrowserPageStatus, BrowserRunMode, BrowserRuntimeSettings,
+        BrowserSessionStatus,
     },
+    wsl::{WslCommandRunner, WslHostAdapter, WslUser},
 };
+
+/// Fixed internal launch identity retained for desktop diagnostics until the
+/// Playwright runtime removal. The product backend is pinned to Lightpanda.
+const LEGACY_FIXED_ENGINE: BrowserEngine = BrowserEngine::BundledChromium;
+const LEGACY_FIXED_RUN_MODE: BrowserRunMode = BrowserRunMode::Background;
+
+/// Shared WSL-owned browser state. Every page child of every session uses the
+/// same profile/cookie/cache roots inside the app-owned distro.
+pub const BROWSER_PROFILE_DIR: &str = "/var/lib/local-workspaces/browser/profile";
+pub const BROWSER_COOKIE_DIR: &str = "/var/lib/local-workspaces/browser/cookies";
+pub const BROWSER_CACHE_DIR: &str = "/var/lib/local-workspaces/browser/cache";
+pub const STORAGE_SQLITE_PATH: &str = "/var/lib/local-workspaces/browser/profile/storage.sqlite";
+pub const CANONICAL_COOKIE_PATH: &str = "/var/lib/local-workspaces/browser/cookies/canonical.json";
+
+/// Per-page exit jar path. Page ids are app-generated opaque values; they are
+/// validated here so only a fixed alphabet ever reaches a distro path.
+pub fn cookie_exit_jar_path(page_id: &str) -> Result<String, CoreError> {
+    let valid = !page_id.is_empty()
+        && page_id.len() <= 64
+        && page_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !valid {
+        return Err(CoreError::new(
+            ErrorCode::InvalidArgument,
+            "browser page id is not valid",
+        ));
+    }
+    Ok(format!("{BROWSER_COOKIE_DIR}/{page_id}.exit.json"))
+}
+
+// ---------------------------------------------------------------------------
+// Runtime readiness seam
+// ---------------------------------------------------------------------------
+
+/// Gate over runtime readiness (managed WSL distro + pinned Lightpanda
+/// binary). Page operations fail closed unless the runtime is ready; status
+/// reads never call this and therefore never trigger a download.
+#[async_trait]
+pub trait RuntimeGate: Send + Sync {
+    async fn ensure_ready(&self) -> Result<(), CoreError>;
+}
+
+/// Production gate backed by the idempotent runtime provisioner. A runtime
+/// that is already `Ready` passes without re-provisioning; anything else runs
+/// the full lazy provisioning pipeline once.
+pub struct RuntimeManagerGate {
+    runtime: Arc<BrowserRuntimeManager>,
+}
+
+impl RuntimeManagerGate {
+    pub fn new(runtime: Arc<BrowserRuntimeManager>) -> Self {
+        Self { runtime }
+    }
+}
+
+#[async_trait]
+impl RuntimeGate for RuntimeManagerGate {
+    async fn ensure_ready(&self) -> Result<(), CoreError> {
+        if self.runtime.current_state() == RuntimeProvisionState::Ready {
+            return Ok(());
+        }
+        self.runtime.ensure_runtime().await.map(|_| ())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cookie store seam (fixed WSL file operations)
+// ---------------------------------------------------------------------------
+
+/// Fixed cookie file operations inside the owned distro. Implementations must
+/// never log or return cookie values; paths are application constants or
+/// validated page-derived names.
+#[async_trait]
+pub trait CookieStore: Send + Sync {
+    async fn write(&self, path: &str, json: &str) -> Result<(), CoreError>;
+    /// Returns `None` when the file does not exist yet.
+    async fn read(&self, path: &str) -> Result<Option<String>, CoreError>;
+}
+
+/// Production cookie store: fixed `cat`/`tee` execs as the unprivileged
+/// runtime user inside the owned distro. The distro name is resolved from the
+/// provisioner's persisted identity at call time, never from user input.
+pub struct WslCookieStore {
+    adapter: Arc<WslHostAdapter<Arc<dyn WslCommandRunner>>>,
+    runtime: Arc<BrowserRuntimeManager>,
+}
+
+impl WslCookieStore {
+    pub fn new(
+        adapter: Arc<WslHostAdapter<Arc<dyn WslCommandRunner>>>,
+        runtime: Arc<BrowserRuntimeManager>,
+    ) -> Self {
+        Self { adapter, runtime }
+    }
+
+    fn distro_name(&self) -> Result<String, CoreError> {
+        self.runtime
+            .distro_identity()
+            .map(|identity| identity.distro_name)
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserRuntimeNotReady,
+                    "browser runtime is not provisioned yet",
+                )
+            })
+    }
+}
+
+#[async_trait]
+impl CookieStore for WslCookieStore {
+    async fn write(&self, path: &str, json: &str) -> Result<(), CoreError> {
+        let distro = self.distro_name()?;
+        let output = self
+            .adapter
+            .exec_fixed(
+                &distro,
+                WslUser::Runtime,
+                &["tee", "--", path],
+                Some(json.as_bytes().to_vec()),
+            )
+            .await?;
+        if output.exit_code != 0 {
+            return Err(CoreError::new(
+                ErrorCode::BrowserArtifactFailed,
+                "failed to persist browser cookie state",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn read(&self, path: &str) -> Result<Option<String>, CoreError> {
+        let distro = self.distro_name()?;
+        let output = self
+            .adapter
+            .exec_fixed(&distro, WslUser::Runtime, &["cat", "--", path], None)
+            .await?;
+        if output.exit_code != 0 {
+            return Ok(None);
+        }
+        Ok(Some(output.decoded_stdout()))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cookie merge (pure)
+// ---------------------------------------------------------------------------
+
+fn extract_cookies_array(doc: &Value) -> Option<&Vec<Value>> {
+    match doc {
+        Value::Array(items) => Some(items),
+        Value::Object(map) => map.get("cookies").and_then(Value::as_array),
+        _ => None,
+    }
+}
+
+fn cookie_key(cookie: &Value) -> Option<(String, String, String)> {
+    let name = cookie.get("name")?.as_str()?;
+    let domain = cookie
+        .get("domain")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let path = cookie.get("path").and_then(Value::as_str).unwrap_or("/");
+    Some((name.to_string(), domain, path.to_string()))
+}
+
+/// Merges a page exit jar into the canonical cookie snapshot. Accepts either
+/// a top-level array or an object with a `cookies` array on both sides; the
+/// output preserves the canonical document shape (or the jar shape when no
+/// canonical snapshot exists yet). Cookies are keyed by (name, domain, path);
+/// jar entries win on conflict, canonical order is preserved, and new jar
+/// cookies are appended in jar order. Returns `None` when neither side holds
+/// a parsable cookie document.
+pub(crate) fn merge_cookie_documents(canonical: Option<&str>, jar: Option<&str>) -> Option<String> {
+    let canonical_doc = canonical.and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let jar_doc = jar.and_then(|s| serde_json::from_str::<Value>(s).ok());
+    let canonical_items = canonical_doc
+        .as_ref()
+        .and_then(extract_cookies_array)
+        .cloned()
+        .unwrap_or_default();
+    let jar_items = jar_doc
+        .as_ref()
+        .and_then(extract_cookies_array)
+        .cloned()
+        .unwrap_or_default();
+    if canonical_items.is_empty() && jar_items.is_empty() {
+        return None;
+    }
+
+    let mut merged: Vec<Value> = Vec::with_capacity(canonical_items.len() + jar_items.len());
+    let mut index: HashMap<(String, String, String), usize> = HashMap::new();
+    for cookie in canonical_items {
+        if let Some(key) = cookie_key(&cookie) {
+            index.insert(key, merged.len());
+        }
+        merged.push(cookie);
+    }
+    for cookie in jar_items {
+        match cookie_key(&cookie) {
+            Some(key) => match index.get(&key) {
+                Some(position) => merged[*position] = cookie,
+                None => {
+                    index.insert(key, merged.len());
+                    merged.push(cookie);
+                }
+            },
+            None => merged.push(cookie),
+        }
+    }
+
+    let canonical_is_object =
+        matches!(&canonical_doc, Some(Value::Object(map)) if map.get("cookies").is_some());
+    let jar_is_object =
+        matches!(&jar_doc, Some(Value::Object(map)) if map.get("cookies").is_some());
+    let output = if canonical_is_object || jar_is_object || canonical_doc.is_some() {
+        serde_json::json!({ "cookies": merged })
+    } else {
+        Value::Array(merged)
+    };
+    serde_json::to_string(&output).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Manager state
+// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub(crate) struct PageBinding {
     pub page_id: String,
-    pub index: usize,
     pub title: String,
     pub url: String,
     pub active: bool,
 }
 
-/// Fixed internal launch identity for the bundled Playwright runtime. User
-/// engine/run-mode choice was removed with the v6 settings schema; the backend
-/// is pinned to the bundled Chromium in background mode until the Lightpanda
-/// page driver replaces this runtime entirely.
-const LEGACY_FIXED_ENGINE: BrowserEngine = BrowserEngine::BundledChromium;
-const LEGACY_FIXED_RUN_MODE: BrowserRunMode = BrowserRunMode::Background;
-
-#[derive(Debug, Clone)]
-struct ActiveSession {
-    session_id: String,
-    launch: BrowserLaunchSpec,
-    driver: BrowserDriverStatus,
-    pages: HashMap<String, PageBinding>,
-    active_page_id: Option<String>,
+struct ManagedPage {
+    page_id: String,
+    driver: Arc<dyn BrowserPageDriver>,
+    /// Ref generation counter (Task 7 increments it on navigation/mutations).
+    #[allow(dead_code)]
+    generation: u64,
+    url: Option<String>,
+    title: Option<String>,
+    lost: bool,
+    cookie_jar_path: String,
 }
 
-#[derive(Debug, Default)]
+struct ActiveSession {
+    session_id: String,
+    artifact_dir: PathBuf,
+    pages: Vec<ManagedPage>,
+    active_page_id: String,
+}
+
+#[derive(Default)]
 struct ManagerState {
     active: Option<ActiveSession>,
-    pending_emulation: Option<BrowserEmulation>,
     tracing: bool,
 }
 
@@ -68,7 +305,9 @@ pub struct BrowserManager {
     core: Arc<CoreServices>,
     app_data_dir: PathBuf,
     settings: RwLock<BrowserRuntimeSettings>,
-    driver: Arc<dyn BrowserDriver>,
+    page_factory: Arc<dyn BrowserPageDriverFactory>,
+    runtime_gate: Arc<dyn RuntimeGate>,
+    cookie_store: Arc<dyn CookieStore>,
     artifacts: ArtifactStore,
     state: Mutex<ManagerState>,
     next_session: AtomicU64,
@@ -80,16 +319,19 @@ impl BrowserManager {
         core: Arc<CoreServices>,
         app_data_dir: PathBuf,
         settings: &AppSettings,
-        driver: Arc<dyn BrowserDriver>,
+        page_factory: Arc<dyn BrowserPageDriverFactory>,
+        runtime_gate: Arc<dyn RuntimeGate>,
+        cookie_store: Arc<dyn CookieStore>,
     ) -> Result<Self, CoreError> {
         let browser_root = app_data_dir.join("browser");
         let artifacts = ArtifactStore::new(browser_root.join("artifacts"))?;
-        std::fs::create_dir_all(browser_root.join("profiles")).map_err(CoreError::io)?;
         Ok(Self {
             core,
             app_data_dir,
             settings: RwLock::new(BrowserRuntimeSettings::from(settings)),
-            driver,
+            page_factory,
+            runtime_gate,
+            cookie_store,
             artifacts,
             state: Mutex::new(ManagerState::default()),
             next_session: AtomicU64::new(1),
@@ -97,18 +339,42 @@ impl BrowserManager {
         })
     }
 
-    pub fn with_playwright(
+    /// Production wiring: one Lightpanda page child per logical page inside
+    /// the managed WSL distro. Lazy — nothing is provisioned until a page
+    /// operation passes the runtime gate.
+    #[cfg(windows)]
+    pub fn with_lightpanda(
         core: Arc<CoreServices>,
         app_data_dir: PathBuf,
-        runtime_root: PathBuf,
         settings: &AppSettings,
+        runtime: Arc<BrowserRuntimeManager>,
     ) -> Result<Self, CoreError> {
+        use super::lightpanda::{LightpandaPageDriverFactory, RuntimeResolvedSpawner};
+        let cookie_store = Arc::new(WslCookieStore::new(runtime.wsl_adapter(), runtime.clone()));
+        let spawner = Arc::new(RuntimeResolvedSpawner::new(runtime.clone()));
+        let page_factory = Arc::new(LightpandaPageDriverFactory::new(spawner));
+        let runtime_gate = Arc::new(RuntimeManagerGate::new(runtime));
         Self::new(
             core,
             app_data_dir,
             settings,
-            Arc::new(PlaywrightMcpDriver::new(runtime_root)),
+            page_factory,
+            runtime_gate,
+            cookie_store,
         )
+    }
+
+    #[cfg(not(windows))]
+    pub fn with_lightpanda(
+        _core: Arc<CoreServices>,
+        _app_data_dir: PathBuf,
+        _settings: &AppSettings,
+        _runtime: Arc<BrowserRuntimeManager>,
+    ) -> Result<Self, CoreError> {
+        Err(CoreError::new(
+            ErrorCode::BrowserWslUnavailable,
+            "the lightpanda runtime requires a Windows host",
+        ))
     }
 
     pub fn core(&self) -> &Arc<CoreServices> {
@@ -123,6 +389,8 @@ impl BrowserManager {
         *self.settings.read().await
     }
 
+    /// Fixed guard order: Pause -> Browser Automation enabled -> runtime
+    /// ready. Session/page checks happen in the caller.
     pub(crate) async fn guard_page_operation(&self) -> Result<BrowserRuntimeSettings, CoreError> {
         if self.core.pause.is_paused() {
             return Err(CoreError::new(
@@ -137,7 +405,27 @@ impl BrowserManager {
                 "Browser Automation is disabled in desktop Settings",
             ));
         }
+        self.runtime_gate.ensure_ready().await?;
         Ok(settings)
+    }
+
+    /// Guard for structurally unsupported tools: applies the Pause and
+    /// enabled gates without the runtime gate, so an unsupported call never
+    /// triggers runtime provisioning.
+    pub(crate) async fn guard_unsupported(&self) -> Result<(), CoreError> {
+        if self.core.pause.is_paused() {
+            return Err(CoreError::new(
+                ErrorCode::AccessPaused,
+                "access is paused by the user",
+            ));
+        }
+        if !self.settings.read().await.enabled {
+            return Err(CoreError::new(
+                ErrorCode::BrowserAutomationDisabled,
+                "Browser Automation is disabled in desktop Settings",
+            ));
+        }
+        Ok(())
     }
 
     pub(crate) fn engine_slug(engine: BrowserEngine) -> &'static str {
@@ -169,45 +457,191 @@ impl BrowserManager {
         format!("p-{}", self.next_page.fetch_add(1, Ordering::Relaxed))
     }
 
-    async fn start_new_session(
-        &self,
-        _settings: BrowserRuntimeSettings,
-        emulation: Option<BrowserEmulation>,
-    ) -> Result<BrowserSessionStatus, CoreError> {
+    async fn start_new_session(&self) -> Result<(), CoreError> {
         let session_id = self.new_session_id();
         let artifact_dir = self.artifacts.create_session(&session_id)?;
-        let profile_dir = self.profile_dir_for(LEGACY_FIXED_ENGINE);
-        std::fs::create_dir_all(&profile_dir).map_err(CoreError::io)?;
-        let launch = BrowserLaunchSpec {
-            session_id: session_id.clone(),
-            engine: LEGACY_FIXED_ENGINE,
-            run_mode: LEGACY_FIXED_RUN_MODE,
-            profile_dir,
-            artifact_dir,
-            action_timeout_ms: DEFAULT_ACTION_TIMEOUT_MS,
-            navigation_timeout_ms: DEFAULT_NAVIGATION_TIMEOUT_MS,
-            emulation: emulation.clone(),
-        };
-        let driver_status = match self.driver.start(launch.clone()).await {
-            Ok(status) => status,
-            Err(error) => {
-                let _ = self
-                    .artifacts
-                    .mark_completed(&session_id, SystemTime::now());
-                return Err(error);
-            }
-        };
         let mut state = self.state.lock().await;
         state.active = Some(ActiveSession {
             session_id,
-            launch,
-            driver: driver_status,
-            pages: HashMap::new(),
-            active_page_id: None,
+            artifact_dir,
+            pages: Vec::new(),
+            active_page_id: String::new(),
         });
         state.tracing = false;
-        drop(state);
-        Ok(self.status().await)
+        Ok(())
+    }
+
+    /// Refreshes the canonical cookie snapshot from the active page before a
+    /// new page starts, so newly opened tabs inherit current login cookies.
+    /// Best-effort by design: a lost active page must not block new tabs.
+    async fn refresh_canonical_from_active(&self) {
+        let page_id = {
+            let state = self.state.lock().await;
+            match state.active.as_ref() {
+                Some(session)
+                    if !session.active_page_id.is_empty()
+                        && session
+                            .pages
+                            .iter()
+                            .any(|p| p.page_id == session.active_page_id && !p.lost) =>
+                {
+                    Some(session.active_page_id.clone())
+                }
+                _ => None,
+            }
+        };
+        let Some(page_id) = page_id else { return };
+        let mut args = Map::new();
+        args.insert("all".into(), Value::Bool(true));
+        match self.route_to_page(&page_id, "getCookies", args).await {
+            Ok(result) => {
+                let json = call_result_text(&result);
+                if let Err(error) = self.cookie_store.write(CANONICAL_COOKIE_PATH, &json).await {
+                    eprintln!("canonical cookie refresh failed: {error}");
+                }
+            }
+            Err(error) => eprintln!("canonical cookie refresh skipped: {error}"),
+        }
+    }
+
+    /// Merges one page's exit jar into the canonical snapshot after the child
+    /// stopped. Missing jars (page never persisted cookies) are not an error.
+    async fn merge_exit_jar(&self, jar_path: &str) {
+        let jar = match self.cookie_store.read(jar_path).await {
+            Ok(jar) => jar,
+            Err(error) => {
+                eprintln!("cookie jar read failed: {error}");
+                return;
+            }
+        };
+        let Some(jar) = jar else { return };
+        let canonical = self
+            .cookie_store
+            .read(CANONICAL_COOKIE_PATH)
+            .await
+            .ok()
+            .flatten();
+        if let Some(merged) = merge_cookie_documents(canonical.as_deref(), Some(&jar)) {
+            if let Err(error) = self
+                .cookie_store
+                .write(CANONICAL_COOKIE_PATH, &merged)
+                .await
+            {
+                eprintln!("canonical cookie merge failed: {error}");
+            }
+        }
+    }
+
+    /// Spawns one Lightpanda child for a new logical page and makes it
+    /// active. Requires an existing session.
+    async fn spawn_page(&self, url: Option<&str>) -> Result<String, CoreError> {
+        self.refresh_canonical_from_active().await;
+        let page_id = self.new_page_id();
+        let cookie_jar_path = cookie_exit_jar_path(&page_id)?;
+        let spec = PageLaunchSpec {
+            page_id: page_id.clone(),
+            cookie_path: CANONICAL_COOKIE_PATH.to_string(),
+            cookie_jar_path: cookie_jar_path.clone(),
+            storage_sqlite_path: STORAGE_SQLITE_PATH.to_string(),
+            http_cache_dir: BROWSER_CACHE_DIR.to_string(),
+        };
+        let driver = self.page_factory.create();
+        if let Err(error) = driver.start(spec).await {
+            let _ = driver.stop().await;
+            return Err(error);
+        }
+        {
+            let mut state = self.state.lock().await;
+            let session = state.active.as_mut().ok_or_else(|| {
+                CoreError::new(ErrorCode::BrowserNotRunning, "browser session ended")
+            })?;
+            session.pages.push(ManagedPage {
+                page_id: page_id.clone(),
+                driver,
+                generation: 1,
+                url: None,
+                title: None,
+                lost: false,
+                cookie_jar_path,
+            });
+            session.active_page_id = page_id.clone();
+        }
+        if let Some(url) = url {
+            let mut args = Map::new();
+            args.insert("url".into(), Value::String(url.to_string()));
+            self.route_to_page(&page_id, "goto", args).await?;
+            let mut state = self.state.lock().await;
+            if let Some(page) = state
+                .active
+                .as_mut()
+                .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
+            {
+                page.url = Some(url.to_string());
+            }
+        }
+        Ok(page_id)
+    }
+
+    /// Routes one tool call to a specific page child, latching the page as
+    /// lost when its connection drops. Never replays; the caller decides.
+    async fn route_to_page(
+        &self,
+        page_id: &str,
+        tool: &'static str,
+        arguments: Map<String, Value>,
+    ) -> Result<CallToolResult, CoreError> {
+        let driver = {
+            let state = self.state.lock().await;
+            let session = state.active.as_ref().ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserNotRunning,
+                    "browser is not running; call browser_open first",
+                )
+            })?;
+            let page = session
+                .pages
+                .iter()
+                .find(|p| p.page_id == page_id)
+                .ok_or_else(|| {
+                    CoreError::new(
+                        ErrorCode::BrowserTargetNotFound,
+                        "browser page id is not valid for the current session",
+                    )
+                })?;
+            if page.lost {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserProcessLost,
+                    "browser page process was lost",
+                ));
+            }
+            page.driver.clone()
+        };
+        let result = driver.call(tool, arguments).await;
+        if matches!(&result, Err(error) if error.code == ErrorCode::BrowserProcessLost) {
+            let mut state = self.state.lock().await;
+            if let Some(page) = state
+                .active
+                .as_mut()
+                .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
+            {
+                page.lost = true;
+            }
+        }
+        result
+    }
+
+    fn active_page_id_or_err(state: &ManagerState) -> Result<String, CoreError> {
+        state
+            .active
+            .as_ref()
+            .filter(|s| !s.active_page_id.is_empty())
+            .map(|s| s.active_page_id.clone())
+            .ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserNotRunning,
+                    "browser is not running; call browser_open first",
+                )
+            })
     }
 
     pub async fn status(&self) -> BrowserSessionStatus {
@@ -215,53 +649,75 @@ impl BrowserManager {
         let state = self.state.lock().await;
         let active = state.active.as_ref();
         let active_page = active
-            .and_then(|s| s.active_page_id.as_ref().and_then(|id| s.pages.get(id)))
+            .and_then(|s| s.pages.iter().find(|p| p.page_id == s.active_page_id))
             .map(|p| BrowserPageStatus {
                 page_id: p.page_id.clone(),
-                url: p.url.clone(),
-                title: p.title.clone(),
-                viewport_width: active.and_then(|s| s.launch.emulation.as_ref().map(|e| e.width)),
-                viewport_height: active.and_then(|s| s.launch.emulation.as_ref().map(|e| e.height)),
+                url: p.url.clone().unwrap_or_default(),
+                title: p.title.clone().unwrap_or_default(),
+                viewport_width: None,
+                viewport_height: None,
             });
         BrowserSessionStatus {
             enabled: settings.enabled,
             paused: self.core.pause.is_paused(),
             configured_engine: LEGACY_FIXED_ENGINE,
-            actual_engine: active.map(|s| s.driver.actual_engine),
+            actual_engine: None,
             run_mode: LEGACY_FIXED_RUN_MODE,
             running: active.is_some(),
             session_id: active.map(|s| s.session_id.clone()),
             active_page,
-            emulation: active
-                .and_then(|s| s.launch.emulation.clone())
-                .or_else(|| state.pending_emulation.clone()),
-            runtime_version: active.and_then(|s| s.driver.sidecar_version.clone()),
-            browser_version: active.and_then(|s| s.driver.browser_version.clone()),
+            emulation: None,
+            runtime_version: None,
+            browser_version: None,
         }
     }
 
     pub async fn open(&self, url: Option<&str>) -> Result<BrowserSessionStatus, CoreError> {
-        let settings = self.guard_page_operation().await?;
+        self.guard_page_operation().await?;
         if let Some(url) = url {
             validate_navigation_url(url)?;
         }
-        let running = self.state.lock().await.active.is_some();
-        if !running {
-            let emulation = self.state.lock().await.pending_emulation.clone();
-            self.start_new_session(settings, emulation).await?;
+        let needs_session = self.state.lock().await.active.is_none();
+        if needs_session {
+            self.start_new_session().await?;
+        }
+        let needs_page = self
+            .state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .is_some_and(|s| s.pages.is_empty());
+        if needs_page {
+            self.spawn_page(None).await?;
         }
         if let Some(url) = url {
+            let page_id = {
+                let state = self.state.lock().await;
+                Self::active_page_id_or_err(&state)?
+            };
             let mut args = Map::new();
             args.insert("url".into(), Value::String(url.to_string()));
-            self.call_upstream("browser_navigate", args).await?;
+            self.route_to_page(&page_id, "goto", args).await?;
+            let mut state = self.state.lock().await;
+            if let Some(page) = state
+                .active
+                .as_mut()
+                .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
+            {
+                page.url = Some(url.to_string());
+            }
         }
         Ok(self.status().await)
     }
 
-    async fn stop_active_unchecked(&self) -> Result<(), CoreError> {
+    async fn stop_all_unchecked(&self) -> Result<(), CoreError> {
         let active = self.state.lock().await.active.take();
         if let Some(active) = active {
-            self.driver.stop().await?;
+            for page in &active.pages {
+                let _ = page.driver.stop().await;
+                self.merge_exit_jar(&page.cookie_jar_path).await;
+            }
             self.artifacts
                 .mark_completed(&active.session_id, SystemTime::now())?;
             let _ = self.artifacts.cleanup(SystemTime::now());
@@ -272,35 +728,144 @@ impl BrowserManager {
 
     pub async fn close(&self) -> Result<BrowserSessionStatus, CoreError> {
         self.guard_page_operation().await?;
-        self.stop_active_unchecked().await?;
+        self.stop_all_unchecked().await?;
         Ok(self.status().await)
     }
 
+    /// Forwards one tool call to the active page child. Transitional routing
+    /// surface: Tasks 9-12 replace the remaining Playwright-name callers with
+    /// typed native operations and remove this method.
     pub async fn call_upstream(
         &self,
         tool: &'static str,
         arguments: Map<String, Value>,
     ) -> Result<CallToolResult, CoreError> {
         self.guard_page_operation().await?;
-        if self.state.lock().await.active.is_none() {
-            return Err(CoreError::new(
-                ErrorCode::BrowserNotRunning,
-                "browser is not running; call browser_open first",
-            ));
-        }
-        self.driver.call(tool, arguments).await
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        self.route_to_page(&page_id, tool, arguments).await
     }
 
-    pub async fn chromium_performance_metrics(&self) -> Result<Value, CoreError> {
+    // -----------------------------------------------------------------------
+    // Logical tabs: manager-owned, one Lightpanda child each. There is no
+    // upstream tabs primitive.
+    // -----------------------------------------------------------------------
+
+    pub(crate) async fn page_summaries(&self) -> Vec<PageBinding> {
+        let state = self.state.lock().await;
+        state
+            .active
+            .as_ref()
+            .map(|s| {
+                s.pages
+                    .iter()
+                    .map(|page| PageBinding {
+                        page_id: page.page_id.clone(),
+                        title: page.title.clone().unwrap_or_default(),
+                        url: page.url.clone().unwrap_or_default(),
+                        active: page.page_id == s.active_page_id,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    pub(crate) async fn tabs_list(&self) -> Result<Vec<PageBinding>, CoreError> {
         self.guard_page_operation().await?;
-        if self.state.lock().await.active.is_none() {
-            return Err(CoreError::new(
+        Ok(self.page_summaries().await)
+    }
+
+    pub(crate) async fn tab_new(&self, url: Option<&str>) -> Result<Vec<PageBinding>, CoreError> {
+        self.guard_page_operation().await?;
+        if let Some(url) = url {
+            validate_navigation_url(url)?;
+        }
+        {
+            let state = self.state.lock().await;
+            if state.active.is_none() {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserNotRunning,
+                    "browser is not running; call browser_open first",
+                ));
+            }
+        }
+        self.spawn_page(url).await?;
+        Ok(self.page_summaries().await)
+    }
+
+    pub(crate) async fn tab_select(&self, page_id: &str) -> Result<Vec<PageBinding>, CoreError> {
+        self.guard_page_operation().await?;
+        let mut state = self.state.lock().await;
+        let session = state.active.as_mut().ok_or_else(|| {
+            CoreError::new(
                 ErrorCode::BrowserNotRunning,
                 "browser is not running; call browser_open first",
+            )
+        })?;
+        if !session.pages.iter().any(|p| p.page_id == page_id) {
+            return Err(CoreError::new(
+                ErrorCode::BrowserTargetNotFound,
+                "browser page id is not valid for the current session",
             ));
         }
-        self.driver.chromium_performance_metrics().await
+        session.active_page_id = page_id.to_string();
+        drop(state);
+        Ok(self.page_summaries().await)
     }
+
+    pub(crate) async fn tab_close(&self, page_id: &str) -> Result<Vec<PageBinding>, CoreError> {
+        self.guard_page_operation().await?;
+        let removed = {
+            let mut state = self.state.lock().await;
+            let session = state.active.as_mut().ok_or_else(|| {
+                CoreError::new(
+                    ErrorCode::BrowserNotRunning,
+                    "browser is not running; call browser_open first",
+                )
+            })?;
+            let position = session
+                .pages
+                .iter()
+                .position(|p| p.page_id == page_id)
+                .ok_or_else(|| {
+                    CoreError::new(
+                        ErrorCode::BrowserTargetNotFound,
+                        "browser page id is not valid for the current session",
+                    )
+                })?;
+            let page = session.pages.remove(position);
+            if session.active_page_id == page_id {
+                // Deterministic successor: the page that shifted into the
+                // closed slot, or the new last page when the tail was closed.
+                session.active_page_id = session
+                    .pages
+                    .get(position)
+                    .or_else(|| session.pages.last())
+                    .map(|p| p.page_id.clone())
+                    .unwrap_or_default();
+            }
+            page
+        };
+        let _ = removed.driver.stop().await;
+        self.merge_exit_jar(&removed.cookie_jar_path).await;
+        let empty = self
+            .state
+            .lock()
+            .await
+            .active
+            .as_ref()
+            .is_some_and(|s| s.pages.is_empty());
+        if empty {
+            self.stop_all_unchecked().await?;
+        }
+        Ok(self.page_summaries().await)
+    }
+
+    // -----------------------------------------------------------------------
+    // Settings / pause integration
+    // -----------------------------------------------------------------------
 
     pub async fn apply_settings(
         &self,
@@ -316,37 +881,23 @@ impl BrowserManager {
         if running && !settings.enabled && previous.enabled {
             // Settings were already committed in-memory above. Even if stop
             // fails, OFF governs every subsequent guard.
-            self.stop_active_unchecked().await?;
+            self.stop_all_unchecked().await?;
         }
         Ok(self.status().await)
     }
 
     pub async fn on_pause_changed(&self, paused: bool) -> Result<(), CoreError> {
         if paused {
-            self.stop_active_unchecked().await?;
+            self.stop_all_unchecked().await?;
         }
         Ok(())
     }
 
-    pub async fn restart_for_emulation(
-        &self,
-        emulation: BrowserEmulation,
-    ) -> Result<BrowserSessionStatus, CoreError> {
-        let settings = self.guard_page_operation().await?;
-        let was_running = self.state.lock().await.active.is_some();
-        self.state.lock().await.pending_emulation = Some(emulation.clone());
-        if was_running {
-            self.stop_active_unchecked().await?;
-            self.start_new_session(settings, Some(emulation)).await
-        } else {
-            Ok(self.status().await)
-        }
-    }
-
     pub async fn reset_profile(&self, engine: BrowserEngine) -> Result<(), CoreError> {
-        // Desktop-only caller handles confirmation. Stop first so profile files
-        // are not locked by Chromium/Firefox.
-        self.stop_active_unchecked().await?;
+        // Desktop-only caller handles confirmation. Legacy Windows profile
+        // reset retained until the desktop controls move to the WSL-owned
+        // browser data reset (Task 13).
+        self.stop_all_unchecked().await?;
         let profile = self.profile_dir_for(engine);
         let profiles_root = self.app_data_dir.join("browser").join("profiles");
         std::fs::create_dir_all(&profiles_root).map_err(CoreError::io)?;
@@ -364,151 +915,6 @@ impl BrowserManager {
         std::fs::create_dir_all(&profile).map_err(CoreError::io)
     }
 
-    pub(crate) async fn set_pages(&self, pages: Vec<PageBinding>) {
-        let mut state = self.state.lock().await;
-        if let Some(active) = state.active.as_mut() {
-            active.pages = pages.into_iter().map(|p| (p.page_id.clone(), p)).collect();
-            active.active_page_id = active
-                .pages
-                .values()
-                .find(|p| p.active)
-                .map(|p| p.page_id.clone());
-        }
-    }
-
-    pub(crate) async fn page_bindings(&self) -> Vec<PageBinding> {
-        let state = self.state.lock().await;
-        let mut pages: Vec<PageBinding> = state
-            .active
-            .as_ref()
-            .map(|s| s.pages.values().cloned().collect())
-            .unwrap_or_default();
-        pages.sort_by_key(|page| page.index);
-        pages
-    }
-
-    pub(crate) async fn forget_page(&self, page_id: &str) {
-        let mut state = self.state.lock().await;
-        if let Some(active) = state.active.as_mut() {
-            active.pages.remove(page_id);
-            if active.active_page_id.as_deref() == Some(page_id) {
-                active.active_page_id = None;
-            }
-        }
-    }
-
-    pub(crate) async fn reconcile_pages(
-        &self,
-        tabs: Vec<(usize, bool, String, String)>,
-    ) -> Vec<PageBinding> {
-        let previous = self.page_bindings().await;
-        let mut previous_keys: HashMap<(String, String), usize> = HashMap::new();
-        for page in &previous {
-            *previous_keys
-                .entry((page.url.clone(), page.title.clone()))
-                .or_default() += 1;
-        }
-        let mut incoming_keys: HashMap<(String, String), usize> = HashMap::new();
-        for (_, _, title, url) in &tabs {
-            *incoming_keys
-                .entry((url.clone(), title.clone()))
-                .or_default() += 1;
-        }
-        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut slots: Vec<Option<PageBinding>> = vec![None; tabs.len()];
-        // Pass 1: match on (url, title) only when that key is unique on both
-        // sides. Duplicate tabs are ambiguous, so they must never drive ID
-        // swapping; unique keys keep their ids across index shifts (e.g. an
-        // earlier tab was closed).
-        for (slot, (index, active, title, url)) in tabs.iter().enumerate() {
-            let key = (url.clone(), title.clone());
-            let unique = previous_keys.get(&key) == Some(&1) && incoming_keys.get(&key) == Some(&1);
-            if !unique {
-                continue;
-            }
-            if let Some(matched) = previous
-                .iter()
-                .find(|p| !used.contains(&p.page_id) && p.url == *url && p.title == *title)
-            {
-                used.insert(matched.page_id.clone());
-                slots[slot] = Some(PageBinding {
-                    page_id: matched.page_id.clone(),
-                    index: *index,
-                    title: title.clone(),
-                    url: url.clone(),
-                    active: *active,
-                });
-            }
-        }
-        // Pass 2: remaining tabs reconcile deterministically by upstream index.
-        for (slot, (index, active, title, url)) in tabs.iter().enumerate() {
-            if slots[slot].is_some() {
-                continue;
-            }
-            if let Some(matched) = previous
-                .iter()
-                .find(|p| !used.contains(&p.page_id) && p.index == *index)
-            {
-                used.insert(matched.page_id.clone());
-                slots[slot] = Some(PageBinding {
-                    page_id: matched.page_id.clone(),
-                    index: *index,
-                    title: title.clone(),
-                    url: url.clone(),
-                    active: *active,
-                });
-            }
-        }
-        // Pass 3: brand-new tabs get fresh opaque ids.
-        for (slot, (index, active, title, url)) in tabs.iter().enumerate() {
-            if slots[slot].is_none() {
-                slots[slot] = Some(PageBinding {
-                    page_id: self.new_page_id(),
-                    index: *index,
-                    title: title.clone(),
-                    url: url.clone(),
-                    active: *active,
-                });
-            }
-        }
-        let pages: Vec<PageBinding> = slots.into_iter().flatten().collect();
-        self.set_pages(pages.clone()).await;
-        pages
-    }
-
-    pub(crate) async fn page_index(&self, page_id: &str) -> Result<usize, CoreError> {
-        self.page_bindings()
-            .await
-            .into_iter()
-            .find(|p| p.page_id == page_id)
-            .map(|p| p.index)
-            .ok_or_else(|| {
-                CoreError::new(
-                    ErrorCode::BrowserTargetNotFound,
-                    "browser page id is not valid for the current session",
-                )
-            })
-    }
-
-    pub(crate) async fn active_launch(&self) -> Option<BrowserLaunchSpec> {
-        self.state
-            .lock()
-            .await
-            .active
-            .as_ref()
-            .map(|s| s.launch.clone())
-    }
-
-    /// Launch-time DevTools auto-open state for the active session, as reported
-    /// by the driver that actually performed the launch.
-    pub(crate) async fn devtools_auto_open(&self) -> Option<bool> {
-        let state = self.state.lock().await;
-        state
-            .active
-            .as_ref()
-            .map(|s| self.driver.launch_devtools_auto_open(&s.launch))
-    }
-
     pub(crate) async fn active_artifact_dir(&self) -> Result<PathBuf, CoreError> {
         self.guard_page_operation().await?;
         self.state
@@ -516,27 +922,13 @@ impl BrowserManager {
             .await
             .active
             .as_ref()
-            .map(|s| s.launch.artifact_dir.clone())
+            .map(|s| s.artifact_dir.clone())
             .ok_or_else(|| {
                 CoreError::new(
                     ErrorCode::BrowserNotRunning,
                     "browser is not running; call browser_open first",
                 )
             })
-    }
-
-    pub(crate) async fn active_engine(&self) -> Option<BrowserEngine> {
-        self.state
-            .lock()
-            .await
-            .active
-            .as_ref()
-            .map(|s| s.driver.actual_engine)
-    }
-
-    pub(crate) async fn device_descriptor(&self, name: &str) -> Result<Value, CoreError> {
-        self.guard_page_operation().await?;
-        self.driver.device_descriptor(name).await
     }
 
     pub(crate) async fn set_tracing(&self, tracing: bool) {
@@ -555,162 +947,454 @@ mod tests {
 
     use rmcp::model::{CallToolResult, ContentBlock};
 
+    use super::super::driver::PageDriverStatus;
+
+    /// (driver index, tool name, arguments) for every call across all pages.
+    type RecordedCall = (usize, String, Map<String, Value>);
+
     #[derive(Default)]
-    struct FakeDriver {
+    struct Recorder {
+        created: AtomicUsize,
         starts: AtomicUsize,
         stops: AtomicUsize,
+        calls: tokio::sync::Mutex<Vec<RecordedCall>>,
+        launch_specs: tokio::sync::Mutex<Vec<PageLaunchSpec>>,
+        /// The Nth created driver fails its first call with process lost.
+        crash_driver: tokio::sync::Mutex<Option<usize>>,
     }
 
-    #[async_trait::async_trait]
-    impl BrowserDriver for FakeDriver {
-        async fn start(&self, spec: BrowserLaunchSpec) -> Result<BrowserDriverStatus, CoreError> {
-            self.starts.fetch_add(1, Ordering::SeqCst);
-            Ok(BrowserDriverStatus {
+    struct FakePageDriver {
+        index: usize,
+        recorder: Arc<Recorder>,
+    }
+
+    #[async_trait]
+    impl BrowserPageDriver for FakePageDriver {
+        async fn start(&self, spec: PageLaunchSpec) -> Result<PageDriverStatus, CoreError> {
+            self.recorder.starts.fetch_add(1, Ordering::SeqCst);
+            self.recorder.launch_specs.lock().await.push(spec.clone());
+            Ok(PageDriverStatus {
                 running: true,
-                actual_engine: spec.engine,
-                sidecar_version: Some("test".into()),
-                browser_version: None,
+                page_id: spec.page_id,
                 child_pid: None,
             })
         }
 
-        async fn stop(&self) -> Result<(), CoreError> {
-            self.stops.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        }
-
         async fn call(
             &self,
-            _tool: &'static str,
-            _arguments: Map<String, Value>,
+            tool: &'static str,
+            arguments: Map<String, Value>,
         ) -> Result<CallToolResult, CoreError> {
+            let crash = {
+                let mut guard = self.recorder.crash_driver.lock().await;
+                match *guard {
+                    Some(n) if n == self.index => {
+                        *guard = None;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if crash {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserProcessLost,
+                    "page process was lost",
+                ));
+            }
+            self.recorder
+                .calls
+                .lock()
+                .await
+                .push((self.index, tool.to_string(), arguments));
+            if tool == "getCookies" {
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    "{\"cookies\":[{\"name\":\"sid\",\"domain\":\"a.test\",\"path\":\"/\",\"value\":\"v\"}]}",
+                )]));
+            }
             Ok(CallToolResult::success(vec![ContentBlock::text("ok")]))
         }
 
-        async fn chromium_performance_metrics(&self) -> Result<Value, CoreError> {
-            Ok(Value::Null)
+        async fn stop(&self) -> Result<(), CoreError> {
+            self.recorder.stops.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn is_alive(&self) -> bool {
+            true
         }
     }
 
-    fn core(dir: &Path) -> Arc<CoreServices> {
-        Arc::new(CoreServices::open(&dir.join("manager.db")).unwrap())
+    struct FakeFactory {
+        recorder: Arc<Recorder>,
+    }
+
+    impl BrowserPageDriverFactory for FakeFactory {
+        fn create(&self) -> Arc<dyn BrowserPageDriver> {
+            let index = self.recorder.created.fetch_add(1, Ordering::SeqCst);
+            Arc::new(FakePageDriver {
+                index,
+                recorder: self.recorder.clone(),
+            })
+        }
+    }
+
+    struct FakeGate {
+        result: tokio::sync::Mutex<Option<ErrorCode>>,
+    }
+
+    impl FakeGate {
+        fn ok() -> Arc<Self> {
+            Arc::new(Self {
+                result: tokio::sync::Mutex::new(None),
+            })
+        }
+
+        fn failing(code: ErrorCode) -> Arc<Self> {
+            Arc::new(Self {
+                result: tokio::sync::Mutex::new(Some(code)),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl RuntimeGate for FakeGate {
+        async fn ensure_ready(&self) -> Result<(), CoreError> {
+            match *self.result.lock().await {
+                Some(code) => Err(CoreError::new(code, "runtime not ready")),
+                None => Ok(()),
+            }
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeCookieStore {
+        files: tokio::sync::Mutex<HashMap<String, String>>,
+        writes: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl CookieStore for FakeCookieStore {
+        async fn write(&self, path: &str, json: &str) -> Result<(), CoreError> {
+            self.files
+                .lock()
+                .await
+                .insert(path.to_string(), json.to_string());
+            self.writes.lock().await.push(path.to_string());
+            Ok(())
+        }
+
+        async fn read(&self, path: &str) -> Result<Option<String>, CoreError> {
+            Ok(self.files.lock().await.get(path).cloned())
+        }
+    }
+
+    fn harness(
+        gate: Arc<FakeGate>,
+    ) -> (
+        BrowserManager,
+        Arc<Recorder>,
+        Arc<FakeCookieStore>,
+        Arc<CoreServices>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let core = Arc::new(CoreServices::open(&dir.path().join("manager.db")).unwrap());
+        let recorder = Arc::new(Recorder::default());
+        let factory = Arc::new(FakeFactory {
+            recorder: recorder.clone(),
+        });
+        let cookies = Arc::new(FakeCookieStore::default());
+        let manager = BrowserManager::new(
+            core.clone(),
+            dir.path().into(),
+            &AppSettings::default(),
+            factory,
+            gate,
+            cookies.clone(),
+        )
+        .unwrap();
+        (manager, recorder, cookies, core, dir)
+    }
+
+    async fn recorded_calls(recorder: &Recorder) -> Vec<(usize, String)> {
+        recorder
+            .calls
+            .lock()
+            .await
+            .iter()
+            .map(|(index, tool, _)| (*index, tool.clone()))
+            .collect()
     }
 
     #[tokio::test]
-    async fn disabled_and_pause_guards_have_deterministic_priority() {
+    async fn guard_order_is_pause_then_enabled_then_runtime() {
+        let (manager, _, _, _core, _dir) =
+            harness(FakeGate::failing(ErrorCode::BrowserRuntimeNotReady));
+        // Runtime gate failure surfaces when pause/enabled pass.
+        assert_eq!(
+            manager.open(None).await.unwrap_err().code,
+            ErrorCode::BrowserRuntimeNotReady
+        );
+
         let dir = tempfile::tempdir().unwrap();
-        let core = core(dir.path());
-        let driver = Arc::new(FakeDriver::default());
+        let core = Arc::new(CoreServices::open(&dir.path().join("manager.db")).unwrap());
         let settings = AppSettings {
             browser_automation_enabled: false,
             ..Default::default()
         };
-        let manager =
-            BrowserManager::new(core.clone(), dir.path().into(), &settings, driver).unwrap();
-        assert!(!manager.status().await.enabled);
+        let recorder = Arc::new(Recorder::default());
+        let disabled = BrowserManager::new(
+            core.clone(),
+            dir.path().into(),
+            &settings,
+            Arc::new(FakeFactory {
+                recorder: recorder.clone(),
+            }),
+            FakeGate::failing(ErrorCode::BrowserRuntimeNotReady),
+            Arc::new(FakeCookieStore::default()),
+        )
+        .unwrap();
+        // Disabled wins over the runtime gate.
         assert_eq!(
-            manager.open(None).await.unwrap_err().code,
+            disabled.open(None).await.unwrap_err().code,
             ErrorCode::BrowserAutomationDisabled
         );
+        // Pause wins over disabled.
         core.pause.set(true);
         assert_eq!(
-            manager.open(None).await.unwrap_err().code,
+            disabled.open(None).await.unwrap_err().code,
             ErrorCode::AccessPaused
         );
     }
 
     #[tokio::test]
-    async fn disabling_stops_session_and_next_open_is_new() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = core(dir.path());
-        let driver = Arc::new(FakeDriver::default());
-        let settings = AppSettings::default();
-        let manager =
-            BrowserManager::new(core, dir.path().into(), &settings, driver.clone()).unwrap();
+    async fn open_creates_exactly_one_page_child_and_navigates_with_goto() {
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
+        manager.open(Some("https://a.test/")).await.unwrap();
+        assert_eq!(recorder.created.load(Ordering::SeqCst), 1);
+        assert_eq!(recorder.starts.load(Ordering::SeqCst), 1);
+        let calls = recorded_calls(&recorder).await;
+        assert_eq!(calls, vec![(0, "goto".to_string())]);
+        let status = manager.status().await;
+        assert!(status.running);
+        assert_eq!(
+            status.active_page.as_ref().map(|p| p.url.as_str()),
+            Some("https://a.test/")
+        );
+    }
 
-        let first = manager.open(None).await.unwrap();
-        let first_id = first.session_id.unwrap();
+    #[tokio::test]
+    async fn tab_new_creates_second_child_after_refreshing_canonical_cookies() {
+        let (manager, recorder, cookies, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        manager.tab_new(Some("https://b.test/")).await.unwrap();
+
+        assert_eq!(recorder.created.load(Ordering::SeqCst), 2);
+        let calls = recorded_calls(&recorder).await;
+        // The active page is asked for its cookies before the new child
+        // starts; the new page is navigated with goto.
+        assert!(calls.contains(&(0, "getCookies".to_string())));
+        assert!(calls.contains(&(1, "goto".to_string())));
+        let get_cookies_index = calls.iter().position(|c| c.1 == "getCookies").unwrap();
+        let goto_index = calls.iter().position(|c| c.1 == "goto").unwrap();
+        assert!(get_cookies_index < goto_index);
+        // Canonical snapshot was written from the active page's cookies.
+        let files = cookies.files.lock().await;
+        assert!(files.get(CANONICAL_COOKIE_PATH).unwrap().contains("sid"));
+        // The new page launched with the canonical cookie path and its own
+        // exit jar.
+        let specs = recorder.launch_specs.lock().await;
+        assert_eq!(specs.len(), 2);
+        assert_eq!(specs[1].cookie_path, CANONICAL_COOKIE_PATH);
+        assert!(specs[1].cookie_jar_path.ends_with(".exit.json"));
+        assert_ne!(specs[0].cookie_jar_path, specs[1].cookie_jar_path);
+        assert_eq!(specs[1].storage_sqlite_path, STORAGE_SQLITE_PATH);
+    }
+
+    #[tokio::test]
+    async fn tab_select_changes_active_without_spawning_or_restarting() {
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        let pages = manager.tab_new(None).await.unwrap();
+        let first = pages[0].page_id.clone();
+
+        let selected = manager.tab_select(&first).await.unwrap();
+        assert!(selected.iter().find(|p| p.page_id == first).unwrap().active);
+        assert_eq!(recorder.created.load(Ordering::SeqCst), 2);
+        assert_eq!(recorder.starts.load(Ordering::SeqCst), 2);
+        assert_eq!(recorder.stops.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn tab_close_stops_only_that_child_and_merges_its_jar() {
+        let (manager, recorder, cookies, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        let pages = manager.tab_new(None).await.unwrap();
+        let first = pages[0].page_id.clone();
+        let second = pages[1].page_id.clone();
+
+        // Seed the closed page's exit jar.
+        let jar_path = cookie_exit_jar_path(&first).unwrap();
+        cookies.files.lock().await.insert(
+            jar_path.clone(),
+            "[{\"name\":\"jar-cookie\",\"domain\":\"b.test\",\"path\":\"/\"}]".into(),
+        );
+
+        let remaining = manager.tab_close(&first).await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].page_id, second);
+        assert!(remaining[0].active, "successor page becomes active");
+        assert_eq!(recorder.stops.load(Ordering::SeqCst), 1);
+        // Jar contents were merged into the canonical snapshot.
+        let files = cookies.files.lock().await;
+        let canonical = files.get(CANONICAL_COOKIE_PATH).unwrap();
+        assert!(canonical.contains("jar-cookie"));
+    }
+
+    #[tokio::test]
+    async fn closing_the_last_page_ends_the_session() {
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        let pages = manager.tabs_list().await.unwrap();
+        manager.tab_close(&pages[0].page_id).await.unwrap();
+        assert!(!manager.status().await.running);
+        assert_eq!(recorder.stops.load(Ordering::SeqCst), 1);
+        assert!(manager.tabs_list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn one_crashed_page_is_lost_but_siblings_keep_working() {
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        let pages = manager.tab_new(None).await.unwrap();
+        let first = pages[0].page_id.clone();
+        let second = pages[1].page_id.clone();
+
+        // Crash page 0 while it is active.
+        manager.tab_select(&first).await.unwrap();
+        *recorder.crash_driver.lock().await = Some(0);
+        let err = manager.call_upstream("tree", Map::new()).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserProcessLost);
+        // The lost page fails fast on subsequent calls.
+        assert_eq!(
+            manager
+                .call_upstream("tree", Map::new())
+                .await
+                .unwrap_err()
+                .code,
+            ErrorCode::BrowserProcessLost
+        );
+
+        // The sibling page still works.
+        manager.tab_select(&second).await.unwrap();
+        assert!(manager.call_upstream("tree", Map::new()).await.is_ok());
+        let pages = manager.tabs_list().await.unwrap();
+        assert_eq!(pages.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn pause_disable_and_close_stop_every_child() {
+        // Pause path.
+        let (manager, recorder, _, core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        manager.tab_new(None).await.unwrap();
+        core.pause.set(true);
+        manager.on_pause_changed(true).await.unwrap();
+        assert_eq!(recorder.stops.load(Ordering::SeqCst), 2);
+        assert!(!manager.status().await.running);
+
+        // Disable path.
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        manager.tab_new(None).await.unwrap();
         manager
             .apply_settings(BrowserRuntimeSettings { enabled: false })
             .await
             .unwrap();
-        assert_eq!(driver.stops.load(Ordering::SeqCst), 1);
-        assert!(!manager.status().await.enabled);
+        assert_eq!(recorder.stops.load(Ordering::SeqCst), 2);
 
-        manager
-            .apply_settings(BrowserRuntimeSettings { enabled: true })
-            .await
-            .unwrap();
-        let second = manager.open(None).await.unwrap();
-        assert_ne!(second.session_id.as_deref(), Some(first_id.as_str()));
+        // Close path.
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
+        manager.open(None).await.unwrap();
+        manager.tab_new(None).await.unwrap();
+        manager.close().await.unwrap();
+        assert_eq!(recorder.stops.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
-    async fn pause_shutdown_stops_running_browser() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = core(dir.path());
-        let driver = Arc::new(FakeDriver::default());
-        let manager = BrowserManager::new(
-            core.clone(),
-            dir.path().into(),
-            &AppSettings::default(),
-            driver.clone(),
-        )
-        .unwrap();
+    async fn tabs_never_call_an_upstream_tabs_primitive() {
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
         manager.open(None).await.unwrap();
-        core.pause.set(true);
-        manager.on_pause_changed(true).await.unwrap();
-        assert_eq!(driver.stops.load(Ordering::SeqCst), 1);
-        assert!(!manager.status().await.running);
+        let pages = manager.tab_new(None).await.unwrap();
+        let first = pages[0].page_id.clone();
+        manager.tab_select(&first).await.unwrap();
+        manager.tabs_list().await.unwrap();
+        manager.tab_close(&pages[1].page_id).await.unwrap();
+
+        for (_, tool) in recorded_calls(&recorder).await {
+            assert!(
+                tool != "browser_tabs" && tool != "tabs",
+                "logical tabs must not call an upstream tabs primitive, got {tool}"
+            );
+        }
     }
 
     #[tokio::test]
-    async fn duplicate_tab_reconciliation_is_deterministic_and_never_swaps_ids() {
-        let dir = tempfile::tempdir().unwrap();
-        let core = core(dir.path());
-        let driver = Arc::new(FakeDriver::default());
-        let manager =
-            BrowserManager::new(core, dir.path().into(), &AppSettings::default(), driver).unwrap();
+    async fn sibling_pages_do_not_receive_live_cookie_updates() {
+        // Documented v0.2.0 limitation: refreshing the canonical snapshot for
+        // a new tab must not restart or re-launch already-running siblings;
+        // only newly launched pages see the refreshed cookies.
+        let (manager, recorder, _, _core, _dir) = harness(FakeGate::ok());
         manager.open(None).await.unwrap();
+        manager.tab_new(None).await.unwrap();
+        manager.tab_new(None).await.unwrap();
 
-        let first = manager
-            .reconcile_pages(vec![(0, true, "Dup".into(), "https://a.test/".into())])
-            .await;
-        assert_eq!(first.len(), 1);
+        assert_eq!(recorder.created.load(Ordering::SeqCst), 3);
+        assert_eq!(recorder.starts.load(Ordering::SeqCst), 3);
+        // No page driver was started twice.
+        let specs = recorder.launch_specs.lock().await;
+        let mut ids: Vec<&str> = specs.iter().map(|s| s.page_id.as_str()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3);
+    }
 
-        // Two identical tabs: matching by non-unique url/title is ambiguous,
-        // so ids must follow the deterministic index rule instead.
-        let both = manager
-            .reconcile_pages(vec![
-                (0, false, "Dup".into(), "https://a.test/".into()),
-                (1, true, "Dup".into(), "https://a.test/".into()),
-            ])
-            .await;
-        assert_eq!(both.len(), 2);
-        assert_eq!(both[0].page_id, first[0].page_id, "index 0 keeps its id");
-        assert_ne!(both[0].page_id, both[1].page_id);
+    #[tokio::test]
+    async fn cookie_merge_is_keyed_deterministic_and_jar_wins() {
+        let canonical = r#"{"cookies":[
+            {"name":"sid","domain":"A.test","path":"/","value":"old"},
+            {"name":"keep","domain":"a.test","path":"/","value":"k"}
+        ]}"#;
+        let jar = r#"[
+            {"name":"sid","domain":"a.test","path":"/","value":"new"},
+            {"name":"fresh","domain":"b.test","path":"/x","value":"f"}
+        ]"#;
+        let merged = merge_cookie_documents(Some(canonical), Some(jar)).unwrap();
+        let doc: Value = serde_json::from_str(&merged).unwrap();
+        let items = doc.get("cookies").and_then(Value::as_array).unwrap();
+        assert_eq!(items.len(), 3);
+        // Canonical order preserved; jar wins the (name,domain,path) conflict
+        // case-insensitively on domain; new jar cookies append.
+        assert_eq!(items[0]["name"], "sid");
+        assert_eq!(items[0]["value"], "new");
+        assert_eq!(items[1]["name"], "keep");
+        assert_eq!(items[2]["name"], "fresh");
 
-        // Repeating the identical tab list never swaps the ids.
-        let again = manager
-            .reconcile_pages(vec![
-                (0, false, "Dup".into(), "https://a.test/".into()),
-                (1, true, "Dup".into(), "https://a.test/".into()),
-            ])
-            .await;
-        assert_eq!(again[0].page_id, both[0].page_id);
-        assert_eq!(again[1].page_id, both[1].page_id);
+        // Jar-only merge yields an array document.
+        let only_jar = merge_cookie_documents(None, Some(jar)).unwrap();
+        assert!(only_jar.starts_with('['));
+        // Nothing parsable on either side merges to nothing.
+        assert!(merge_cookie_documents(None, None).is_none());
+        assert!(merge_cookie_documents(Some("not json"), None).is_none());
+    }
 
-        // A unique url/title keeps its id across an index shift (earlier tab
-        // closed upstream).
-        let shifted = manager
-            .reconcile_pages(vec![
-                (0, false, "Dup".into(), "https://a.test/".into()),
-                (1, true, "Other".into(), "https://b.test/".into()),
-            ])
-            .await;
-        let other = manager
-            .reconcile_pages(vec![(0, true, "Other".into(), "https://b.test/".into())])
-            .await;
-        assert_eq!(other[0].page_id, shifted[1].page_id);
+    #[tokio::test]
+    async fn status_is_readable_without_runtime_provisioning() {
+        let (manager, _, _, _core, _dir) =
+            harness(FakeGate::failing(ErrorCode::BrowserRuntimeNotReady));
+        let status = manager.status().await;
+        assert!(status.enabled);
+        assert!(!status.running);
+        assert!(status.session_id.is_none());
     }
 }

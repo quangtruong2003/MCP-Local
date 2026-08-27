@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     io::Cursor,
     path::PathBuf,
     sync::{
@@ -13,9 +14,8 @@ use image::{DynamicImage, ImageFormat};
 use lc_core::error::{CoreError, ErrorCode};
 use local_workspace_mcp_manager::{
     browser::{
-        driver::{BrowserDriver, BrowserDriverStatus},
-        manager::BrowserManager,
-        types::{BrowserEngine, BrowserLaunchSpec, BrowserRunMode},
+        driver::{BrowserPageDriver, BrowserPageDriverFactory, PageDriverStatus, PageLaunchSpec},
+        manager::{BrowserManager, CookieStore, RuntimeGate},
     },
     screen_capture::{CaptureTarget, CapturedImage, ScreenCaptureProvider},
     settings::{AgentPolicyState, AgentSettingsController, AppSettings},
@@ -28,42 +28,23 @@ struct RecordedCall {
     arguments: serde_json::Value,
 }
 
-#[derive(Debug)]
-struct FakeTab {
-    title: String,
-    url: String,
-    active: bool,
-}
-
+/// Shared fake state for all page children of one test session. One logical
+/// page = one FakePageDriver, but recording/injection is shared so tests can
+/// observe every child through one handle.
 #[derive(Debug, Default)]
-struct FakeBrowserDriver {
+struct FakeBrowser {
     calls: std::sync::Mutex<Vec<RecordedCall>>,
-    tabs: std::sync::Mutex<Vec<FakeTab>>,
-    artifact_dir: std::sync::Mutex<Option<PathBuf>>,
-    launches: std::sync::Mutex<Vec<BrowserLaunchSpec>>,
     failures: std::sync::Mutex<Vec<(String, lc_core::error::CoreError)>>,
     responses: std::sync::Mutex<Vec<(String, String)>>,
     screenshot_block: std::sync::Mutex<Option<rmcp::model::ContentBlock>>,
+    artifacts_root: std::sync::Mutex<Option<PathBuf>>,
     starts: AtomicUsize,
     stops: AtomicUsize,
-    cdp_calls: AtomicUsize,
 }
 
-impl FakeBrowserDriver {
+impl FakeBrowser {
     fn calls(&self) -> Vec<RecordedCall> {
         self.calls.lock().unwrap().clone()
-    }
-
-    fn artifact_dir(&self) -> PathBuf {
-        self.artifact_dir
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("browser must be started")
-    }
-
-    fn launches(&self) -> Vec<BrowserLaunchSpec> {
-        self.launches.lock().unwrap().clone()
     }
 
     /// Injects a one-shot driver error for the next call of `tool`.
@@ -94,155 +75,84 @@ impl FakeBrowserDriver {
         )
     }
 
-    fn tabs_text(&self) -> String {
-        self.tabs
-            .lock()
-            .unwrap()
-            .iter()
-            .enumerate()
-            .map(|(index, tab)| {
-                let current = if tab.active { " (current)" } else { "" };
-                format!("- {index}:{current} [{}]({})", tab.title, tab.url)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    /// Writes a trace file into the newest session artifact dir, mirroring a
+    /// tracing runtime that flushes on stop.
+    fn write_trace_artifact(&self) {
+        let Some(root) = self.artifacts_root.lock().unwrap().clone() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            return;
+        };
+        let newest = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .max();
+        let Some(session_dir) = newest else { return };
+        std::fs::create_dir_all(session_dir.join("traces")).unwrap();
+        std::fs::write(session_dir.join("traces").join("trace.zip"), b"trace").unwrap();
     }
 }
 
+struct FakePageDriver {
+    shared: Arc<FakeBrowser>,
+}
+
 #[async_trait::async_trait]
-impl BrowserDriver for FakeBrowserDriver {
-    async fn start(
-        &self,
-        spec: BrowserLaunchSpec,
-    ) -> Result<BrowserDriverStatus, lc_core::error::CoreError> {
-        self.starts.fetch_add(1, Ordering::SeqCst);
-        *self.artifact_dir.lock().unwrap() = Some(spec.artifact_dir.clone());
-        self.launches.lock().unwrap().push(spec.clone());
-        let mut tabs = self.tabs.lock().unwrap();
-        if tabs.is_empty() {
-            tabs.push(FakeTab {
-                title: "Blank".into(),
-                url: "about:blank".into(),
-                active: true,
-            });
-        }
-        Ok(BrowserDriverStatus {
+impl BrowserPageDriver for FakePageDriver {
+    async fn start(&self, spec: PageLaunchSpec) -> Result<PageDriverStatus, CoreError> {
+        self.shared.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(PageDriverStatus {
             running: true,
-            actual_engine: spec.engine,
-            sidecar_version: Some("test".into()),
-            browser_version: Some("test-browser".into()),
+            page_id: spec.page_id,
             child_pid: None,
         })
-    }
-
-    async fn stop(&self) -> Result<(), lc_core::error::CoreError> {
-        self.stops.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 
     async fn call(
         &self,
         tool: &'static str,
         arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<rmcp::model::CallToolResult, lc_core::error::CoreError> {
-        self.calls.lock().unwrap().push(RecordedCall {
+    ) -> Result<rmcp::model::CallToolResult, CoreError> {
+        self.shared.calls.lock().unwrap().push(RecordedCall {
             tool: tool.to_string(),
             arguments: serde_json::Value::Object(arguments.clone()),
         });
 
         let failure_pos = {
-            self.failures
+            self.shared
+                .failures
                 .lock()
                 .unwrap()
                 .iter()
                 .position(|(name, _)| name == tool)
         };
         if let Some(position) = failure_pos {
-            let (_, error) = self.failures.lock().unwrap().remove(position);
+            let (_, error) = self.shared.failures.lock().unwrap().remove(position);
             return Err(error);
         }
         let response_pos = {
-            self.responses
+            self.shared
+                .responses
                 .lock()
                 .unwrap()
                 .iter()
                 .position(|(name, _)| name == tool)
         };
         if let Some(position) = response_pos {
-            let (_, text) = self.responses.lock().unwrap().remove(position);
+            let (_, text) = self.shared.responses.lock().unwrap().remove(position);
             return Ok(rmcp::model::CallToolResult::success(vec![
                 rmcp::model::ContentBlock::text(text),
-            ]));
-        }
-
-        if tool == "browser_navigate" {
-            if let Some(url) = arguments.get("url").and_then(|value| value.as_str()) {
-                let mut tabs = self.tabs.lock().unwrap();
-                if let Some(active) = tabs.iter_mut().find(|tab| tab.active) {
-                    active.url = url.to_string();
-                    active.title = "Navigated".into();
-                }
-            }
-        }
-
-        if tool == "browser_tabs" {
-            let action = arguments
-                .get("action")
-                .and_then(|value| value.as_str())
-                .unwrap_or("list");
-            match action {
-                "new" => {
-                    let mut tabs = self.tabs.lock().unwrap();
-                    for tab in tabs.iter_mut() {
-                        tab.active = false;
-                    }
-                    tabs.push(FakeTab {
-                        title: "New".into(),
-                        url: arguments
-                            .get("url")
-                            .and_then(|value| value.as_str())
-                            .unwrap_or("about:blank")
-                            .to_string(),
-                        active: true,
-                    });
-                }
-                "select" => {
-                    let index = arguments
-                        .get("index")
-                        .and_then(|value| value.as_u64())
-                        .unwrap() as usize;
-                    let mut tabs = self.tabs.lock().unwrap();
-                    for (i, tab) in tabs.iter_mut().enumerate() {
-                        tab.active = i == index;
-                    }
-                }
-                "close" => {
-                    let index = arguments
-                        .get("index")
-                        .and_then(|value| value.as_u64())
-                        .unwrap() as usize;
-                    let mut tabs = self.tabs.lock().unwrap();
-                    if index < tabs.len() {
-                        let was_active = tabs[index].active;
-                        tabs.remove(index);
-                        if was_active && !tabs.is_empty() {
-                            tabs[0].active = true;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            return Ok(rmcp::model::CallToolResult::success(vec![
-                rmcp::model::ContentBlock::text(self.tabs_text()),
             ]));
         }
 
         match tool {
             "browser_snapshot" => return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("- button 'Save' [target=e1]\n- textbox 'Name' [target=e2]")])),
             "browser_take_screenshot" => {
-                let block = self.screenshot_block.lock().unwrap().take();
+                let block = self.shared.screenshot_block.lock().unwrap().take();
                 return Ok(rmcp::model::CallToolResult::success(vec![
-                    block.unwrap_or_else(Self::png_block),
+                    block.unwrap_or_else(FakeBrowser::png_block),
                 ]));
             }
             // Mirrors pinned @playwright/mcp 0.0.79 output: a `Total messages:`
@@ -264,9 +174,12 @@ impl BrowserDriver for FakeBrowserDriver {
                 return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(text)]));
             }
             "browser_stop_tracing" => {
-                let dir = self.artifact_dir();
-                std::fs::create_dir_all(dir.join("traces")).unwrap();
-                std::fs::write(dir.join("traces").join("trace.zip"), b"trace").unwrap();
+                self.shared.write_trace_artifact();
+            }
+            "getCookies" => {
+                return Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text("{\"cookies\":[]}"),
+                ]));
             }
             _ => {}
         }
@@ -276,37 +189,54 @@ impl BrowserDriver for FakeBrowserDriver {
         ]))
     }
 
-    async fn chromium_performance_metrics(
-        &self,
-    ) -> Result<serde_json::Value, lc_core::error::CoreError> {
-        self.cdp_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(serde_json::json!({"metrics": []}))
+    async fn stop(&self) -> Result<(), CoreError> {
+        self.shared.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
-    fn launch_devtools_auto_open(&self, spec: &BrowserLaunchSpec) -> bool {
-        // Mirrors the real Playwright driver: headed Chromium-family launches
-        // carry --auto-open-devtools-for-tabs.
-        spec.run_mode == BrowserRunMode::VisibleDebug
-            && matches!(
-                spec.engine,
-                BrowserEngine::BundledChromium | BrowserEngine::Chrome | BrowserEngine::Edge
-            )
+    async fn is_alive(&self) -> bool {
+        true
+    }
+}
+
+struct FakePageFactory {
+    shared: Arc<FakeBrowser>,
+}
+
+impl BrowserPageDriverFactory for FakePageFactory {
+    fn create(&self) -> Arc<dyn BrowserPageDriver> {
+        Arc::new(FakePageDriver {
+            shared: self.shared.clone(),
+        })
+    }
+}
+
+struct OkRuntimeGate;
+
+#[async_trait::async_trait]
+impl RuntimeGate for OkRuntimeGate {
+    async fn ensure_ready(&self) -> Result<(), CoreError> {
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct MemoryCookieStore {
+    files: std::sync::Mutex<HashMap<String, String>>,
+}
+
+#[async_trait::async_trait]
+impl CookieStore for MemoryCookieStore {
+    async fn write(&self, path: &str, json: &str) -> Result<(), CoreError> {
+        self.files
+            .lock()
+            .unwrap()
+            .insert(path.to_string(), json.to_string());
+        Ok(())
     }
 
-    async fn device_descriptor(
-        &self,
-        name: &str,
-    ) -> Result<serde_json::Value, lc_core::error::CoreError> {
-        if name == "Test Phone" {
-            Ok(
-                serde_json::json!({"viewport":{"width":390,"height":844},"deviceScaleFactor":3.0,"isMobile":true,"hasTouch":true,"userAgent":"TestPhone/1.0"}),
-            )
-        } else {
-            Err(lc_core::error::CoreError::new(
-                lc_core::error::ErrorCode::BrowserFeatureUnsupported,
-                "preset not found",
-            ))
-        }
+    async fn read(&self, path: &str) -> Result<Option<String>, CoreError> {
+        Ok(self.files.lock().unwrap().get(path).cloned())
     }
 }
 
@@ -331,7 +261,8 @@ async fn spawn(
     u16,
     tempfile::TempDir,
     Arc<lc_core::CoreServices>,
-    Arc<FakeBrowserDriver>,
+    Arc<FakeBrowser>,
+    Arc<BrowserManager>,
 ) {
     let dir = tempfile::tempdir().unwrap();
     local_workspace_mcp_manager::settings::save_app_settings(dir.path(), &settings).unwrap();
@@ -341,13 +272,18 @@ async fn spawn(
         dir.path().to_path_buf(),
         policy.clone(),
     ));
-    let driver = Arc::new(FakeBrowserDriver::default());
+    let fake = Arc::new(FakeBrowser::default());
+    *fake.artifacts_root.lock().unwrap() = Some(dir.path().join("browser").join("artifacts"));
     let browser = Arc::new(
         BrowserManager::new(
             core.clone(),
             dir.path().to_path_buf(),
             &settings,
-            driver.clone(),
+            Arc::new(FakePageFactory {
+                shared: fake.clone(),
+            }),
+            Arc::new(OkRuntimeGate),
+            Arc::new(MemoryCookieStore::default()),
         )
         .unwrap(),
     );
@@ -355,13 +291,14 @@ async fn spawn(
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let core_for_server = core.clone();
+    let browser_for_server = browser.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
             Ok(local_workspace_mcp_manager::server::WorkspaceServer::new(
                 core_for_server.clone(),
                 policy.clone(),
                 controller.clone(),
-                browser.clone(),
+                browser_for_server.clone(),
                 capture.clone(),
             ))
         },
@@ -372,7 +309,7 @@ async fn spawn(
     );
     let app = axum::Router::new().nest_service("/mcp", service);
     tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    (port, dir, core, driver)
+    (port, dir, core, fake, browser)
 }
 
 async fn client(port: u16) -> rmcp::service::RunningService<rmcp::service::RoleClient, ()> {
@@ -387,6 +324,19 @@ fn arguments(value: serde_json::Value) -> serde_json::Map<String, serde_json::Va
     value.as_object().unwrap().clone()
 }
 
+/// The newest session artifact dir under the temp app-data root. Sessions are
+/// created one per test, so the newest dir is the active session's.
+fn active_artifact_dir(dir: &tempfile::TempDir) -> PathBuf {
+    let root = dir.path().join("browser").join("artifacts");
+    std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .max()
+        .expect("session artifact dir must exist")
+}
+
 fn matching_audit(core: &lc_core::CoreServices, op: &str) -> Vec<lc_core::models::AuditEvent> {
     lc_core::audit::list_recent(&core.db, 100)
         .unwrap()
@@ -397,7 +347,7 @@ fn matching_audit(core: &lc_core::CoreServices, op: &str) -> Vec<lc_core::models
 
 #[tokio::test]
 async fn browser_discovery_exposes_exactly_29_public_browser_tools() {
-    let (port, _dir, _core, _driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, _core, _driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     let tools = client.list_all_tools().await.unwrap();
     let missing_output_schema: Vec<String> = tools
@@ -455,7 +405,7 @@ async fn browser_discovery_exposes_exactly_29_public_browser_tools() {
 
 #[tokio::test]
 async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
-    let (port, dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let workspace_root = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
     std::fs::write(workspace_root.join("upload.txt"), b"upload-body").unwrap();
@@ -499,10 +449,6 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
             "browser_dialog",
             serde_json::json!({"accept":true,"prompt_text":"private prompt"}),
         ),
-        (
-            "browser_set_viewport",
-            serde_json::json!({"width":375,"height":812}),
-        ),
         ("browser_console", serde_json::json!({"limit":100})),
         ("browser_network", serde_json::json!({"limit":100})),
         ("browser_dom", serde_json::json!({"ref":"e2"})),
@@ -524,6 +470,24 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
             serde_json::to_string(&result).unwrap()
         );
     }
+
+    // Viewport resizing is structurally unsupported under the lightpanda
+    // runtime and must fail closed without any upstream side effect.
+    let calls_before = driver.calls().len();
+    let viewport = client
+        .call_tool(
+            CallToolRequestParams::new("browser_set_viewport")
+                .with_arguments(arguments(serde_json::json!({"width":375,"height":812}))),
+        )
+        .await
+        .unwrap();
+    let viewport_text = serde_json::to_string(&viewport).unwrap();
+    assert!(viewport.is_error.unwrap_or(false), "{viewport_text}");
+    assert!(
+        viewport_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{viewport_text}"
+    );
+    assert_eq!(driver.calls().len(), calls_before);
 
     let network = client
         .call_tool(
@@ -580,16 +544,25 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         .unwrap()
         .to_string();
     let emulate = client.call_tool(CallToolRequestParams::new("browser_emulate_device").with_arguments(arguments(serde_json::json!({"emulation":{"source":"explicit","width":390,"height":844,"device_scale_factor":3.0,"is_mobile":true,"has_touch":true,"user_agent":"TestPhone/1.0","orientation":"portrait"}})))).await.unwrap();
+    let emulate_text = serde_json::to_string(&emulate).unwrap();
+    assert!(emulate.is_error.unwrap_or(false), "{emulate_text}");
     assert!(
-        !emulate.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&emulate).unwrap()
+        emulate_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{emulate_text}"
     );
-    let after_session = emulate.structured_content.as_ref().unwrap()["session_id"]
+    let after_session = client
+        .call_tool(CallToolRequestParams::new("browser_get_status"))
+        .await
+        .unwrap()
+        .structured_content
+        .unwrap()["session_id"]
         .as_str()
-        .unwrap();
-    assert_ne!(before_session, after_session);
-    assert!(driver.starts.load(Ordering::SeqCst) >= 2);
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        before_session, after_session,
+        "unsupported emulation must not restart the session"
+    );
 
     let upload = client
         .call_tool(
@@ -628,7 +601,11 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
 
     // Real Playwright writes completed downloads into the session outputDir
     // root; discovery must stage them into downloads/ without test help.
-    std::fs::write(driver.artifact_dir().join("result.txt"), b"download-body").unwrap();
+    std::fs::write(
+        active_artifact_dir(&dir).join("result.txt"),
+        b"download-body",
+    )
+    .unwrap();
     let downloads = client
         .call_tool(CallToolRequestParams::new("browser_downloads"))
         .await
@@ -648,7 +625,7 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         b"download-body"
     );
 
-    let steps = client.call_tool(CallToolRequestParams::new("browser_run_steps").with_arguments(arguments(serde_json::json!({"steps":[{"type":"navigate","url":"https://example.test/flow"},{"type":"snapshot"},{"type":"set_viewport","width":320,"height":568}]})))).await.unwrap();
+    let steps = client.call_tool(CallToolRequestParams::new("browser_run_steps").with_arguments(arguments(serde_json::json!({"steps":[{"type":"navigate","url":"https://example.test/flow"},{"type":"snapshot"}]})))).await.unwrap();
     assert!(
         !steps.is_error.unwrap_or(false),
         "{}",
@@ -663,7 +640,7 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
     assert!(devtools.is_error.unwrap_or(false));
     assert!(serde_json::to_string(&devtools)
         .unwrap()
-        .contains("BROWSER_FEATURE_UNSUPPORTED_IN_MODE"));
+        .contains("BROWSER_FEATURE_UNSUPPORTED"));
 
     let fill_audit = matching_audit(&core, "browser_fill");
     assert_eq!(fill_audit.len(), 1);
@@ -680,7 +657,7 @@ async fn disabled_allows_only_browser_get_status() {
         browser_automation_enabled: false,
         ..AppSettings::default()
     };
-    let (port, _dir, core, driver) = spawn(settings).await;
+    let (port, _dir, core, driver, _browser) = spawn(settings).await;
     let client = client(port).await;
     let calls = [
         ("browser_open", serde_json::json!({})),
@@ -769,7 +746,7 @@ async fn lifecycle_disabled_status_is_readable_but_mutations_are_denied_once_and
         browser_automation_enabled: false,
         ..AppSettings::default()
     };
-    let (port, _dir, core, _driver) = spawn(settings).await;
+    let (port, _dir, core, _driver, _browser) = spawn(settings).await;
     let client = client(port).await;
 
     let status = client
@@ -820,7 +797,7 @@ async fn lifecycle_disabled_status_is_readable_but_mutations_are_denied_once_and
 
 #[tokio::test]
 async fn lifecycle_pause_wins_for_status_open_and_tabs() {
-    let (port, _dir, core, _driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, _driver, _browser) = spawn(AppSettings::default()).await;
     core.pause.set(true);
     let client = client(port).await;
 
@@ -846,7 +823,7 @@ async fn lifecycle_pause_wins_for_status_open_and_tabs() {
 
 #[tokio::test]
 async fn navigation_url_is_validated_forwarded_and_audited_by_origin_only() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     client
         .call_tool(CallToolRequestParams::new("browser_open"))
@@ -884,7 +861,7 @@ async fn navigation_url_is_validated_forwarded_and_audited_by_origin_only() {
 
 #[tokio::test]
 async fn navigation_rejects_file_url_before_driver_call() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     let before = driver.calls().len();
     let result = client
@@ -908,7 +885,7 @@ async fn navigation_rejects_file_url_before_driver_call() {
 
 #[tokio::test]
 async fn navigation_search_encodes_query_without_auditing_query_text() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     client
         .call_tool(CallToolRequestParams::new("browser_open"))
@@ -948,19 +925,19 @@ async fn navigation_search_encodes_query_without_auditing_query_text() {
 }
 
 #[tokio::test]
-async fn lifecycle_tabs_use_opaque_page_ids_and_reconcile_indices_after_close() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+async fn lifecycle_tabs_are_manager_owned_with_one_child_per_page() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     let opened = client
         .call_tool(CallToolRequestParams::new("browser_open"))
         .await
         .unwrap();
     assert!(!opened.is_error.unwrap_or(false));
-    {
-        let mut tabs = driver.tabs.lock().unwrap();
-        tabs[0].title = "New".into();
-        tabs[0].url = "https://example.org/new".into();
-    }
+    assert_eq!(
+        driver.starts.load(Ordering::SeqCst),
+        1,
+        "open spawns one child"
+    );
 
     let new_tab = client
         .call_tool(
@@ -970,6 +947,11 @@ async fn lifecycle_tabs_use_opaque_page_ids_and_reconcile_indices_after_close() 
         )
         .await
         .unwrap();
+    assert_eq!(
+        driver.starts.load(Ordering::SeqCst),
+        2,
+        "tabs new spawns a second child"
+    );
     let pages = new_tab
         .structured_content
         .unwrap()
@@ -982,6 +964,37 @@ async fn lifecycle_tabs_use_opaque_page_ids_and_reconcile_indices_after_close() 
     assert!(first_id.starts_with("p-"));
     assert!(second_id.starts_with("p-"));
     assert_ne!(first_id, second_id);
+    assert!(
+        pages[1]["active"].as_bool().unwrap(),
+        "new page becomes active"
+    );
+
+    // The new page was navigated with the native goto primitive.
+    let goto = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|call| call.tool == "goto")
+        .expect("tabs new must navigate via goto");
+    assert_eq!(goto.arguments["url"], "https://example.org/new");
+
+    // Logical tabs never call an upstream tabs primitive.
+    for call in driver.calls() {
+        assert_ne!(call.tool, "browser_tabs", "tabs must be manager-owned");
+    }
+
+    // Select does not spawn or restart.
+    let select = client
+        .call_tool(
+            CallToolRequestParams::new("browser_tabs").with_arguments(arguments(
+                serde_json::json!({"action":"select","page_id":first_id.clone()}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!select.is_error.unwrap_or(false));
+    assert_eq!(driver.starts.load(Ordering::SeqCst), 2);
+    assert_eq!(driver.stops.load(Ordering::SeqCst), 0);
 
     let close = client
         .call_tool(
@@ -992,13 +1005,11 @@ async fn lifecycle_tabs_use_opaque_page_ids_and_reconcile_indices_after_close() 
         .await
         .unwrap();
     assert!(!close.is_error.unwrap_or(false));
-    let close_call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|call| call.tool == "browser_tabs" && call.arguments["action"] == "close")
-        .expect("close must reach browser_tabs");
-    assert_eq!(close_call.arguments["index"], 0);
+    assert_eq!(
+        driver.stops.load(Ordering::SeqCst),
+        1,
+        "close stops only that child"
+    );
 
     let pages = close
         .structured_content
@@ -1008,6 +1019,7 @@ async fn lifecycle_tabs_use_opaque_page_ids_and_reconcile_indices_after_close() 
         .clone();
     assert_eq!(pages.len(), 1);
     assert_eq!(pages[0]["page_id"], second_id);
+    assert!(pages[0]["active"].as_bool().unwrap());
 
     let stale = client
         .call_tool(
@@ -1039,7 +1051,7 @@ async fn open_browser(client: &rmcp::service::RunningService<rmcp::service::Role
 
 #[tokio::test]
 async fn interaction_tools_map_exactly_to_upstream_primitives() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1148,7 +1160,7 @@ async fn interaction_tools_map_exactly_to_upstream_primitives() {
 
 #[tokio::test]
 async fn interaction_stale_ref_surfaces_stable_code_and_audits_error() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     driver.fail(
@@ -1178,7 +1190,7 @@ async fn interaction_stale_ref_surfaces_stable_code_and_audits_error() {
 
 #[tokio::test]
 async fn snapshot_300kib_is_truncated_to_256kib_with_byte_only_audit() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     driver.respond("browser_snapshot", "x".repeat(300 * 1024));
@@ -1211,7 +1223,7 @@ async fn snapshot_300kib_is_truncated_to_256kib_with_byte_only_audit() {
 
 #[tokio::test]
 async fn wait_conditions_map_to_upstream_primitives() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1326,10 +1338,11 @@ async fn wait_conditions_map_to_upstream_primitives() {
 }
 
 #[tokio::test]
-async fn viewport_table_maps_to_browser_resize_and_invalid_is_rejected_before_driver() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+async fn viewport_is_unsupported_and_invalid_sizes_are_rejected_before_any_effect() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
+    let calls_before = driver.calls().len();
 
     for (width, height) in [(320u32, 568u32), (375, 812), (768, 1024), (1440, 900)] {
         let result = client
@@ -1340,28 +1353,15 @@ async fn viewport_table_maps_to_browser_resize_and_invalid_is_rejected_before_dr
             )
             .await
             .unwrap();
-        assert!(
-            !result.is_error.unwrap_or(false),
-            "{width}x{height}: {}",
-            serde_json::to_string(&result).unwrap()
-        );
-        let call = driver
-            .calls()
-            .into_iter()
-            .rev()
-            .find(|c| c.tool == "browser_resize")
-            .expect("viewport must map to browser_resize");
-        assert_eq!(
-            call.arguments,
-            serde_json::json!({"width": width, "height": height})
-        );
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{width}x{height}: {text}");
+        assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
     }
-    let resize_calls = driver
-        .calls()
-        .iter()
-        .filter(|c| c.tool == "browser_resize")
-        .count();
-    assert_eq!(resize_calls, 4);
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "unsupported viewport must have zero upstream side effects"
+    );
 
     for (width, height) in [(0u32, 600u32), (9000, 600)] {
         let result = client
@@ -1377,44 +1377,20 @@ async fn viewport_table_maps_to_browser_resize_and_invalid_is_rejected_before_dr
         assert!(text.contains("BROWSER_INVALID_VIEWPORT"), "{text}");
     }
     assert_eq!(
-        driver
-            .calls()
-            .iter()
-            .filter(|c| c.tool == "browser_resize")
-            .count(),
-        4,
+        driver.calls().len(),
+        calls_before,
         "invalid viewport reached the driver"
     );
 }
 
 #[tokio::test]
-async fn device_restart_reuses_profile_starts_once_and_never_replays() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+async fn emulate_device_fails_closed_with_zero_side_effects() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-    let before_session = client
-        .call_tool(CallToolRequestParams::new("browser_get_status"))
-        .await
-        .unwrap()
-        .structured_content
-        .unwrap()["session_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    client
-        .call_tool(
-            CallToolRequestParams::new("browser_navigate").with_arguments(arguments(
-                serde_json::json!({"action":"url","url":"https://example.test/before"}),
-            )),
-        )
-        .await
-        .unwrap();
-    let navigates_before = driver
-        .calls()
-        .iter()
-        .filter(|c| c.tool == "browser_navigate")
-        .count();
+    let starts_before = driver.starts.load(Ordering::SeqCst);
+    let stops_before = driver.stops.load(Ordering::SeqCst);
+    let calls_before = driver.calls().len();
 
     let emulate = client
         .call_tool(
@@ -1424,49 +1400,24 @@ async fn device_restart_reuses_profile_starts_once_and_never_replays() {
         )
         .await
         .unwrap();
-    assert!(
-        !emulate.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&emulate).unwrap()
-    );
-    let after_session = emulate.structured_content.as_ref().unwrap()["session_id"]
-        .as_str()
-        .unwrap();
-    assert_ne!(
-        before_session, after_session,
-        "emulation must start a new session"
-    );
-    assert_eq!(driver.stops.load(Ordering::SeqCst), 1, "exactly one stop");
+    let text = serde_json::to_string(&emulate).unwrap();
+    assert!(emulate.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
+
     assert_eq!(
         driver.starts.load(Ordering::SeqCst),
-        2,
-        "exactly one restart"
+        starts_before,
+        "unsupported emulation must not restart anything"
     );
-
-    let launches = driver.launches();
-    assert_eq!(launches.len(), 2);
     assert_eq!(
-        launches[0].profile_dir, launches[1].profile_dir,
-        "the same engine profile must be reused"
+        driver.stops.load(Ordering::SeqCst),
+        stops_before,
+        "unsupported emulation must not stop anything"
     );
-    let emulation = launches[1]
-        .emulation
-        .as_ref()
-        .expect("restart launch must carry emulation");
-    assert_eq!((emulation.width, emulation.height), (390, 844));
-    assert_eq!(emulation.device_scale_factor, 3.0);
-    assert!(emulation.is_mobile);
-    assert!(emulation.has_touch);
-    assert_eq!(emulation.user_agent.as_deref(), Some("TestPhone/1.0"));
-
     assert_eq!(
-        driver
-            .calls()
-            .iter()
-            .filter(|c| c.tool == "browser_navigate")
-            .count(),
-        navigates_before,
-        "old interactions were replayed after restart"
+        driver.calls().len(),
+        calls_before,
+        "unsupported emulation must have zero upstream side effects"
     );
 }
 
@@ -1476,7 +1427,7 @@ async fn screenshot_modes_metadata_and_os_capture_independence() {
         screen_capture_enabled: false,
         ..AppSettings::default()
     };
-    let (port, _dir, _core, driver) = spawn(settings).await;
+    let (port, _dir, _core, driver, _browser) = spawn(settings).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1545,7 +1496,7 @@ async fn screenshot_modes_metadata_and_os_capture_independence() {
 
 #[tokio::test]
 async fn screenshot_ref_validation_rejects_wrong_mode_combinations() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1596,7 +1547,7 @@ fn png_header_block(width: u32, height: u32) -> rmcp::model::ContentBlock {
 
 #[tokio::test]
 async fn screenshot_resource_bounds_reject_pathological_images() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1634,7 +1585,7 @@ async fn screenshot_resource_bounds_reject_pathological_images() {
 
 #[tokio::test]
 async fn console_cursor_levels_and_audit_metadata() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     // Pinned @playwright/mcp 0.0.79 console shape: header line, blank line,
@@ -1769,7 +1720,7 @@ async fn console_cursor_levels_and_audit_metadata() {
 
 #[tokio::test]
 async fn network_cursor_filter_and_redaction() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     // Pinned @playwright/mcp 0.0.79 network shape: numbered
@@ -1869,7 +1820,7 @@ async fn network_cursor_filter_and_redaction() {
 
 #[tokio::test]
 async fn dom_inspection_uses_fixed_function_with_exact_ref() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1912,7 +1863,7 @@ async fn dom_inspection_uses_fixed_function_with_exact_ref() {
 
 #[tokio::test]
 async fn evaluate_maps_to_page_context_and_never_process_code() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1955,8 +1906,8 @@ async fn evaluate_maps_to_page_context_and_never_process_code() {
 }
 
 #[tokio::test]
-async fn performance_reports_cdp_for_fixed_chromium_backend() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+async fn performance_reports_no_cdp_under_lightpanda_runtime() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -1966,9 +1917,8 @@ async fn performance_reports_cdp_for_fixed_chromium_backend() {
         .unwrap();
     assert!(!result.is_error.unwrap_or(false));
     let structured = result.structured_content.as_ref().unwrap().clone();
-    assert_eq!(structured["cdp_supported"], true);
-    assert_eq!(structured["cdp"], serde_json::json!({"metrics": []}));
-    assert_eq!(driver.cdp_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(structured["cdp_supported"], false);
+    assert!(structured["cdp"].is_null(), "cdp metrics must be absent");
     assert!(driver.calls().iter().any(|c| {
         c.tool == "browser_evaluate"
             && c.arguments["function"]
@@ -1979,7 +1929,7 @@ async fn performance_reports_cdp_for_fixed_chromium_backend() {
 
 #[tokio::test]
 async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let (port, dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 
@@ -2041,7 +1991,7 @@ async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
         !text.contains("trace.zip"),
         "trace response leaks file names"
     );
-    let artifact_dir = driver.artifact_dir();
+    let artifact_dir = active_artifact_dir(&dir);
     let dir_string = artifact_dir.to_string_lossy().to_string();
     assert!(
         !text.contains(&dir_string),
@@ -2069,7 +2019,7 @@ async fn devtools_is_unsupported_under_fixed_background_backend() {
     // Visible Debug is no longer a user-selectable run mode (v6 settings), so
     // the fixed background backend can never report DevTools support. The tool
     // must fail closed and never launch a second browser.
-    let (port, _dir, _core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     let result = client
@@ -2088,7 +2038,7 @@ async fn devtools_is_unsupported_under_fixed_background_backend() {
 
 #[tokio::test]
 async fn upload_deny_allow_table() {
-    let (port, dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let workspace_root = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
     std::fs::write(workspace_root.join("upload.txt"), b"upload-body").unwrap();
@@ -2173,7 +2123,7 @@ async fn upload_deny_allow_table() {
 
     // Allowed: artifact id resolving inside the active session sandbox.
     std::fs::write(
-        driver.artifact_dir().join("artifact-src.txt"),
+        active_artifact_dir(&dir).join("artifact-src.txt"),
         b"artifact-body",
     )
     .unwrap();
@@ -2244,7 +2194,7 @@ async fn upload_deny_allow_table() {
 
 #[tokio::test]
 async fn download_discovery_export_deny_allow_table() {
-    let (port, dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, dir, core, _driver, _browser) = spawn(AppSettings::default()).await;
     let workspace_root = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
     let ws = lc_core::workspace_repo::insert_workspace(
@@ -2269,11 +2219,14 @@ async fn download_discovery_export_deny_allow_table() {
 
     // Real Playwright writes completed downloads into the outputDir root and
     // in-flight downloads as .part files under downloads/.
-    std::fs::write(driver.artifact_dir().join("result.txt"), b"download-body").unwrap();
-    std::fs::create_dir_all(driver.artifact_dir().join("downloads")).unwrap();
     std::fs::write(
-        driver
-            .artifact_dir()
+        active_artifact_dir(&dir).join("result.txt"),
+        b"download-body",
+    )
+    .unwrap();
+    std::fs::create_dir_all(active_artifact_dir(&dir).join("downloads")).unwrap();
+    std::fs::write(
+        active_artifact_dir(&dir)
             .join("downloads")
             .join("busy.txt.part"),
         b"partial",
@@ -2304,7 +2257,7 @@ async fn download_discovery_export_deny_allow_table() {
         busy["sha256"].is_null(),
         "incomplete downloads must have no hash"
     );
-    let artifact_dir = driver.artifact_dir();
+    let artifact_dir = active_artifact_dir(&dir);
     let dir_string = artifact_dir.to_string_lossy().to_string();
     assert!(!text.contains(&dir_string), "downloads leak absolute paths");
 
@@ -2355,7 +2308,7 @@ async fn download_discovery_export_deny_allow_table() {
 
 #[tokio::test]
 async fn run_steps_rejects_over_limit_before_driver() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     let before = driver.calls().len();
@@ -2385,7 +2338,7 @@ async fn run_steps_rejects_over_limit_before_driver() {
 
 #[tokio::test]
 async fn run_steps_stops_on_first_failure_and_audits_failure() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     driver.fail(
@@ -2444,7 +2397,7 @@ async fn run_steps_stops_on_first_failure_and_audits_failure() {
 
 #[tokio::test]
 async fn run_steps_process_loss_is_not_replayed() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
     driver.fail(
@@ -2480,7 +2433,7 @@ async fn run_steps_process_loss_is_not_replayed() {
 
 #[tokio::test]
 async fn run_steps_rejects_disallowed_step_types() {
-    let (port, _dir, core, driver) = spawn(AppSettings::default()).await;
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
 

@@ -10,13 +10,12 @@ use crate::{
     browser::{
         files::{BrowserDownloadInfo, BrowserSavedDownloadOutput},
         mcp::{
-            call_result_text, parse_tabs_markdown, truncate_utf8, BrowserConsoleArgs,
-            BrowserConsoleOutput, BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs,
-            BrowserDomOutput, BrowserDragArgs, BrowserEmulateArgs, BrowserEmulationRequest,
-            BrowserEvaluateArgs, BrowserEvaluateOutput, BrowserFillArgs, BrowserLoadState,
-            BrowserNavigateArgs, BrowserNavigationAction, BrowserNavigationOutput,
-            BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput, BrowserOpenArgs,
-            BrowserOpenOutput, BrowserOrientation, BrowserPageSummary, BrowserPerformanceOutput,
+            call_result_text, truncate_utf8, BrowserConsoleArgs, BrowserConsoleOutput,
+            BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs, BrowserDomOutput,
+            BrowserDragArgs, BrowserEmulateArgs, BrowserEvaluateArgs, BrowserEvaluateOutput,
+            BrowserFillArgs, BrowserLoadState, BrowserNavigateArgs, BrowserNavigationAction,
+            BrowserNavigationOutput, BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput,
+            BrowserOpenArgs, BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput,
             BrowserPressArgs, BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
             BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScreenshotMode,
             BrowserSearchArgs, BrowserSelectArgs, BrowserSnapshotOutput, BrowserStep,
@@ -298,13 +297,11 @@ fn execution_error(e: crate::execution::policy::PolicyError) -> CoreError {
     }
 }
 
-async fn pages_from_tab_result(
+async fn page_summaries(
     browser: &crate::browser::manager::BrowserManager,
-    result: &CallToolResult,
 ) -> Vec<BrowserPageSummary> {
-    let parsed = parse_tabs_markdown(&call_result_text(result));
     browser
-        .reconcile_pages(parsed)
+        .page_summaries()
         .await
         .into_iter()
         .map(|page| BrowserPageSummary {
@@ -314,15 +311,6 @@ async fn pages_from_tab_result(
             active: page.active,
         })
         .collect()
-}
-
-async fn refresh_browser_tabs(
-    browser: &crate::browser::manager::BrowserManager,
-) -> Result<Vec<BrowserPageSummary>, CoreError> {
-    let mut args = serde_json::Map::new();
-    args.insert("action".into(), serde_json::Value::String("list".into()));
-    let result = browser.call_upstream("browser_tabs", args).await?;
-    Ok(pages_from_tab_result(browser, &result).await)
 }
 
 fn browser_outcome<T: serde::Serialize>(
@@ -719,17 +707,8 @@ impl WorkspaceServer {
     async fn browser_open(&self, Parameters(a): Parameters<BrowserOpenArgs>) -> CallToolResult {
         let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
         let result = async {
-            let url = a.url.as_deref();
-            if let Some(url) = url {
-                validate_navigation_url(url)?;
-            }
-            let status = self.browser.open(None).await?;
-            let pages = refresh_browser_tabs(&self.browser).await?;
-            if let Some(url) = url {
-                let mut args = serde_json::Map::new();
-                args.insert("url".into(), serde_json::Value::String(url.to_string()));
-                self.browser.call_upstream("browser_navigate", args).await?;
-            }
+            let status = self.browser.open(a.url.as_deref()).await?;
+            let pages = page_summaries(&self.browser).await;
             Ok::<_, CoreError>(BrowserOpenOutput { status, pages })
         }
         .await;
@@ -765,41 +744,41 @@ impl WorkspaceServer {
         };
         let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
         let result = async {
-            self.browser.guard_page_operation().await?;
+            // Logical tabs are manager-owned: one Lightpanda child per page.
+            // There is no upstream tabs primitive.
             match a.action {
-                BrowserTabAction::List => refresh_browser_tabs(&self.browser).await,
-                BrowserTabAction::New => {
-                    let mut args = serde_json::Map::new();
-                    args.insert("action".into(), serde_json::Value::String("new".into()));
-                    if let Some(url) = a.url.as_deref() {
-                        validate_navigation_url(url)?;
-                        args.insert("url".into(), serde_json::Value::String(url.to_string()));
-                    }
-                    let response = self.browser.call_upstream("browser_tabs", args).await?;
-                    Ok(pages_from_tab_result(&self.browser, &response).await)
-                }
-                BrowserTabAction::Select | BrowserTabAction::Close => {
-                    refresh_browser_tabs(&self.browser).await?;
+                BrowserTabAction::List => self.browser.tabs_list().await,
+                BrowserTabAction::New => self.browser.tab_new(a.url.as_deref()).await,
+                BrowserTabAction::Select => {
                     let page_id = a.page_id.as_deref().ok_or_else(|| {
                         CoreError::new(
                             ErrorCode::InvalidArgument,
                             "browser_tabs select/close requires page_id",
                         )
                     })?;
-                    let index = self.browser.page_index(page_id).await?;
-                    let mut args = serde_json::Map::new();
-                    args.insert(
-                        "action".into(),
-                        serde_json::Value::String(action_name.into()),
-                    );
-                    args.insert("index".into(), serde_json::json!(index));
-                    let response = self.browser.call_upstream("browser_tabs", args).await?;
-                    if matches!(a.action, BrowserTabAction::Close) {
-                        self.browser.forget_page(page_id).await;
-                    }
-                    Ok(pages_from_tab_result(&self.browser, &response).await)
+                    self.browser.tab_select(page_id).await
+                }
+                BrowserTabAction::Close => {
+                    let page_id = a.page_id.as_deref().ok_or_else(|| {
+                        CoreError::new(
+                            ErrorCode::InvalidArgument,
+                            "browser_tabs select/close requires page_id",
+                        )
+                    })?;
+                    self.browser.tab_close(page_id).await
                 }
             }
+            .map(|pages| {
+                pages
+                    .into_iter()
+                    .map(|page| BrowserPageSummary {
+                        page_id: page.page_id,
+                        title: page.title,
+                        url: page.url,
+                        active: page.active,
+                    })
+                    .collect::<Vec<BrowserPageSummary>>()
+            })
         }
         .await;
         browser_outcome(
@@ -850,7 +829,7 @@ impl WorkspaceServer {
             };
             let response = self.browser.call_upstream(upstream, args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
-            let pages = refresh_browser_tabs(&self.browser).await?;
+            let pages = page_summaries(&self.browser).await;
             Ok::<_, CoreError>(BrowserNavigationOutput {
                 text,
                 truncated,
@@ -885,7 +864,7 @@ impl WorkspaceServer {
             args.insert("url".into(), serde_json::Value::String(url.to_string()));
             let response = self.browser.call_upstream("browser_navigate", args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
-            let pages = refresh_browser_tabs(&self.browser).await?;
+            let pages = page_summaries(&self.browser).await;
             Ok::<_, CoreError>(BrowserNavigationOutput {
                 text,
                 truncated,
@@ -1148,7 +1127,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Resize the active browser viewport to exact CSS pixel dimensions, bounded to 1..8192 on each edge.",
+        description = "Viewport resizing is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserViewportOutput>()
     )]
@@ -1157,15 +1136,12 @@ impl WorkspaceServer {
         Parameters(a): Parameters<BrowserViewportArgs>,
     ) -> CallToolResult {
         let result = async {
+            self.browser.guard_unsupported().await?;
             validate_viewport(a.width, a.height)?;
-            let mut args = serde_json::Map::new();
-            args.insert("width".into(), serde_json::json!(a.width));
-            args.insert("height".into(), serde_json::json!(a.height));
-            self.browser.call_upstream("browser_resize", args).await?;
-            Ok::<_, CoreError>(BrowserViewportOutput {
-                width: a.width,
-                height: a.height,
-            })
+            Err::<BrowserViewportOutput, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "viewport resizing is not supported by the lightpanda runtime",
+            ))
         }
         .await;
         browser_outcome(
@@ -1177,85 +1153,23 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Apply a Playwright device preset or explicit mobile/touch emulation. A running browser is restarted into a new session while reusing its dedicated engine profile.",
+        description = "Device emulation is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserSessionStatus>()
     )]
     async fn browser_emulate_device(
         &self,
-        Parameters(a): Parameters<BrowserEmulateArgs>,
+        Parameters(_a): Parameters<BrowserEmulateArgs>,
     ) -> CallToolResult {
         let result = async {
-            let emulation = match a.emulation {
-                BrowserEmulationRequest::Preset { name, orientation } => {
-                    let d = self.browser.device_descriptor(&name).await?;
-                    let vp = d
-                        .get("viewport")
-                        .and_then(|v| v.as_object())
-                        .ok_or_else(|| {
-                            CoreError::new(
-                                ErrorCode::BrowserFeatureUnsupported,
-                                "device preset has no viewport",
-                            )
-                        })?;
-                    let mut width = vp.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let mut height = vp.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
-                    let landscape = matches!(orientation, Some(BrowserOrientation::Landscape));
-                    if landscape && height > width {
-                        std::mem::swap(&mut width, &mut height);
-                    }
-                    if matches!(orientation, Some(BrowserOrientation::Portrait)) && width > height {
-                        std::mem::swap(&mut width, &mut height);
-                    }
-                    validate_viewport(width, height)?;
-                    crate::browser::types::BrowserEmulation {
-                        width,
-                        height,
-                        device_scale_factor: d
-                            .get("deviceScaleFactor")
-                            .and_then(|v| v.as_f64())
-                            .unwrap_or(1.0),
-                        is_mobile: d.get("isMobile").and_then(|v| v.as_bool()).unwrap_or(false),
-                        has_touch: d.get("hasTouch").and_then(|v| v.as_bool()).unwrap_or(false),
-                        user_agent: d
-                            .get("userAgent")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string),
-                        landscape,
-                    }
-                }
-                BrowserEmulationRequest::Explicit {
-                    width,
-                    height,
-                    device_scale_factor,
-                    is_mobile,
-                    has_touch,
-                    user_agent,
-                    orientation,
-                } => {
-                    validate_viewport(width, height)?;
-                    if !(0.1..=10.0).contains(&device_scale_factor) || user_agent.len() > 4096 {
-                        return Err(CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "invalid browser emulation scale or user-agent",
-                        ));
-                    }
-                    crate::browser::types::BrowserEmulation {
-                        width,
-                        height,
-                        device_scale_factor,
-                        is_mobile,
-                        has_touch,
-                        user_agent: Some(user_agent),
-                        landscape: matches!(orientation, BrowserOrientation::Landscape),
-                    }
-                }
-            };
-            self.browser.restart_for_emulation(emulation).await
+            self.browser.guard_unsupported().await?;
+            Err::<BrowserSessionStatus, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "device emulation is not supported by the lightpanda runtime",
+            ))
         }
         .await;
-        let detail=result.as_ref().ok().and_then(|s|s.emulation.as_ref()).map(|e|serde_json::json!({"width":e.width,"height":e.height,"device_scale_factor":e.device_scale_factor,"is_mobile":e.is_mobile,"has_touch":e.has_touch}));
-        browser_outcome(&self.core, "browser_emulate_device", result, detail)
+        browser_outcome(&self.core, "browser_emulate_device", result, None)
     }
 
     #[tool(
@@ -1480,7 +1394,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Read browser performance timing/resource data. Chromium-family engines additionally merge app-owned CDP Performance.getMetrics output; Firefox returns page metrics without CDP.",
+        description = "Read browser performance timing/resource data from the active page. The Lightpanda runtime exposes no CDP, so cdp_supported is always false.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserPerformanceOutput>()
     )]
@@ -1493,22 +1407,11 @@ impl WorkspaceServer {
             );
             let page = self.browser.call_upstream("browser_evaluate", args).await?;
             let (page_text, page_truncated) = truncate_utf8(call_result_text(&page), 256 * 1024);
-            let engine = self.browser.active_engine().await.ok_or_else(|| {
-                CoreError::new(ErrorCode::BrowserNotRunning, "browser is not running")
-            })?;
-            let (cdp_supported, cdp) = if engine.is_chromium_family() {
-                (
-                    true,
-                    Some(self.browser.chromium_performance_metrics().await?),
-                )
-            } else {
-                (false, None)
-            };
             Ok::<_, CoreError>(BrowserPerformanceOutput {
                 page: page_text,
                 page_truncated,
-                cdp_supported,
-                cdp,
+                cdp_supported: false,
+                cdp: None,
             })
         }
         .await;
@@ -1621,41 +1524,17 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Report Visible Debug DevTools support for the current browser. DevTools UI is available only when configured Visible Debug on Chromium/Chrome/Edge; this tool never launches a second browser.",
+        description = "Report Visible Debug DevTools support. The fixed Lightpanda background backend has no visible DevTools; this tool fails closed and never launches a second browser.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserDevtoolsOutput>()
     )]
     async fn browser_devtools(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = async {
             self.browser.guard_page_operation().await?;
-            let launch = self.browser.active_launch().await.ok_or_else(|| {
-                CoreError::new(ErrorCode::BrowserNotRunning, "browser is not running")
-            })?;
-            if launch.run_mode != crate::browser::types::BrowserRunMode::VisibleDebug {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserFeatureUnsupportedInMode,
-                    "visible DevTools requires Visible Debug run mode",
-                ));
-            }
-            if !launch.engine.is_chromium_family() {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserFeatureUnsupported,
-                    "visible DevTools is supported only by Chromium-family engines",
-                ));
-            }
-            let auto_open = self.browser.devtools_auto_open().await.unwrap_or(false);
-            if !auto_open {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserFeatureUnsupported,
-                    "DevTools auto-open was not part of the browser launch",
-                ));
-            }
-            Ok::<_, CoreError>(BrowserDevtoolsOutput {
-                supported: true,
-                mode: "visible_debug".to_string(),
-                engine: launch.engine,
-                auto_open,
-            })
+            Err::<BrowserDevtoolsOutput, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "visible DevTools is not supported by the lightpanda runtime",
+            ))
         }
         .await;
         browser_outcome(&self.core, "browser_devtools", result, None)

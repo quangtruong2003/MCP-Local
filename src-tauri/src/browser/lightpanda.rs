@@ -386,6 +386,39 @@ impl BrowserPageDriverFactory for LightpandaPageDriverFactory {
     }
 }
 
+/// Production spawner that resolves the owned distro from the runtime
+/// provisioner's persisted identity at spawn time. The runtime gate has
+/// already ensured readiness before any page spawn, so a missing identity
+/// here is a fail-closed invariant violation, not a provisioning trigger.
+pub struct RuntimeResolvedSpawner {
+    runtime: Arc<crate::browser::runtime::BrowserRuntimeManager>,
+    wsl_exe: PathBuf,
+}
+
+impl RuntimeResolvedSpawner {
+    pub fn new(runtime: Arc<crate::browser::runtime::BrowserRuntimeManager>) -> Self {
+        Self {
+            runtime,
+            wsl_exe: PathBuf::from("wsl.exe"),
+        }
+    }
+}
+
+#[async_trait]
+impl PageChildSpawner for RuntimeResolvedSpawner {
+    async fn spawn(&self, extra_args: &[String]) -> Result<SpawnedPageChild, CoreError> {
+        let identity = self.runtime.distro_identity().ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserRuntimeNotReady,
+                "browser runtime is not provisioned yet",
+            )
+        })?;
+        WslPageChildSpawner::new(self.wsl_exe.clone(), identity.distro_name)
+            .spawn(extra_args)
+            .await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
