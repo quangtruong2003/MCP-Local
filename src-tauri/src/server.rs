@@ -10,8 +10,8 @@ use crate::{
     browser::{
         files::{BrowserDownloadInfo, BrowserSavedDownloadOutput},
         mcp::{
-            call_result_text, is_static_initiator, redact_sensitive_url, truncate_utf8,
-            validate_extract_schema, validate_find_element, validate_scroll_offsets,
+            call_result_text, is_static_initiator, is_valid_ref, redact_sensitive_url,
+            truncate_utf8, validate_extract_schema, validate_find_element, validate_scroll_offsets,
             validated_content_cap, BrowserConsoleArgs, BrowserConsoleOutput, BrowserDevtoolsOutput,
             BrowserDialogArgs, BrowserDomArgs, BrowserDomOutput, BrowserDragArgs,
             BrowserEmulateArgs, BrowserEvaluateArgs, BrowserEvaluateOutput, BrowserExtractArgs,
@@ -20,22 +20,18 @@ use crate::{
             BrowserNavigationOutput, BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput,
             BrowserOpenArgs, BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput,
             BrowserPressArgs, BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
-            BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScreenshotMode,
-            BrowserScrollArgs, BrowserSearchArgs, BrowserSelectArgs, BrowserSetCheckedArgs,
-            BrowserSnapshotOutput, BrowserStep, BrowserStepError, BrowserTabAction,
-            BrowserTabsArgs, BrowserTargetArgs, BrowserTextOutput, BrowserTextTruncatedOutput,
-            BrowserTraceAction, BrowserTraceArgs, BrowserTraceOutput, BrowserUploadArgs,
-            BrowserUploadOutput, BrowserUploadSource, BrowserViewportArgs, BrowserViewportOutput,
-            BrowserWaitArgs, BrowserWaitCondition,
+            BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScrollArgs, BrowserSearchArgs,
+            BrowserSelectArgs, BrowserSetCheckedArgs, BrowserSnapshotOutput, BrowserStep,
+            BrowserStepError, BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs,
+            BrowserTextOutput, BrowserTextTruncatedOutput, BrowserTraceAction, BrowserTraceArgs,
+            BrowserTraceOutput, BrowserUploadArgs, BrowserUploadOutput, BrowserUploadSource,
+            BrowserViewportArgs, BrowserViewportOutput, BrowserWaitArgs, BrowserWaitCondition,
         },
         policy::{
-            bounded_event_limit, redacted_origin, validate_batch_step_count, validate_timeout,
-            validate_viewport,
+            bounded_event_limit, redacted_origin, validate_batch_step_count,
+            validate_navigation_url, validate_timeout, validate_viewport,
         },
-        types::{
-            BrowserSessionStatus, DEFAULT_SCREENSHOT_MAX_EDGE, MAX_SCREENSHOT_ENCODED_BYTES,
-            MAX_SCREENSHOT_PIXELS,
-        },
+        types::BrowserSessionStatus,
     },
     screen_capture::{
         filter_targets_for_scope, CaptureTarget, CapturedImage, ScreenCaptureProvider,
@@ -44,7 +40,6 @@ use crate::{
 };
 use axum::Router;
 use base64::Engine as _;
-use image::{imageops::FilterType, GenericImageView, ImageFormat};
 use lc_core::error::ErrorCode;
 use lc_core::pipeline::{Audited, RequiredCapability};
 use lc_core::{error::CoreError, CoreServices};
@@ -59,7 +54,7 @@ use rmcp::{
     },
     ServerHandler,
 };
-use std::{io::Cursor, sync::Arc};
+use std::sync::Arc;
 
 /// Builds a success result carrying both the pretty-printed text (for
 /// clients that ignore schemas) and the typed `structuredContent` payload
@@ -421,112 +416,83 @@ async fn browser_wait_internal(
     Ok(BrowserOkOutput { ok: true })
 }
 
-/// Reads width/height from the PNG IHDR chunk so the pixel budget can be
-/// enforced before any full decode allocates memory.
-fn png_header_dimensions(bytes: &[u8]) -> Result<(u32, u32), CoreError> {
-    const SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    if bytes.len() < 24 || bytes[..8] != SIGNATURE || &bytes[12..16] != b"IHDR" {
-        return Err(CoreError::new(
-            ErrorCode::BrowserProtocolError,
-            "Playwright screenshot contained invalid PNG data",
-        ));
+/// Full preflight for one `browser_run_steps` batch. Every step validates
+/// before step 0 executes: allowed types, required fields, URL validity,
+/// ref/key/text/value bounds, delay/timeout bounds, and unsupported types.
+/// An invalid later step can never ride on an earlier step's side effects.
+fn preflight_run_steps(steps: &[BrowserStep]) -> Result<(), CoreError> {
+    for step in steps {
+        match step {
+            BrowserStep::Navigate { url } => {
+                validate_navigation_url(url)?;
+            }
+            BrowserStep::Snapshot => {}
+            BrowserStep::Click { ref_id } => preflight_step_ref(ref_id)?,
+            BrowserStep::Fill { ref_id, text } => {
+                preflight_step_ref(ref_id)?;
+                if text.is_empty() {
+                    return Err(CoreError::new(
+                        ErrorCode::InvalidArgument,
+                        "fill step text must not be empty",
+                    ));
+                }
+            }
+            BrowserStep::Press { key } => {
+                if key.trim().is_empty() {
+                    return Err(CoreError::new(
+                        ErrorCode::InvalidArgument,
+                        "press step key must not be empty",
+                    ));
+                }
+            }
+            BrowserStep::Select { ref_id, values } => {
+                preflight_step_ref(ref_id)?;
+                if values.is_empty() {
+                    return Err(CoreError::new(
+                        ErrorCode::InvalidArgument,
+                        "select step requires at least one value",
+                    ));
+                }
+            }
+            BrowserStep::Wait {
+                condition,
+                timeout_ms,
+            } => {
+                let resolved = validate_timeout(*timeout_ms, false)?;
+                if let BrowserWaitCondition::Delay { milliseconds } = condition {
+                    if *milliseconds == 0 || *milliseconds > resolved {
+                        return Err(CoreError::new(
+                            ErrorCode::InvalidArgument,
+                            "browser wait delay must be within timeout",
+                        ));
+                    }
+                }
+            }
+            BrowserStep::SetViewport { .. } => {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserFeatureUnsupported,
+                    "set_viewport steps are not supported by the lightpanda runtime",
+                ));
+            }
+            BrowserStep::Screenshot { .. } => {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserFeatureUnsupported,
+                    "screenshot steps are not supported by the lightpanda runtime",
+                ));
+            }
+        }
     }
-    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap());
-    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap());
-    Ok((width, height))
+    Ok(())
 }
 
-fn browser_screenshot_payload(
-    result: &CallToolResult,
-    mode: BrowserScreenshotMode,
-    max_edge: Option<u32>,
-) -> Result<(Vec<u8>, BrowserScreenshotMetadata), CoreError> {
-    if max_edge == Some(0) {
+fn preflight_step_ref(ref_id: &str) -> Result<(), CoreError> {
+    if !is_valid_ref(ref_id) {
         return Err(CoreError::new(
             ErrorCode::InvalidArgument,
-            "max_edge must be greater than zero",
+            "browser ref must look like e1, e2, ...",
         ));
     }
-    let max_edge = max_edge.unwrap_or(DEFAULT_SCREENSHOT_MAX_EDGE);
-    let image = result
-        .content
-        .iter()
-        .find_map(|block| block.as_image())
-        .ok_or_else(|| {
-            CoreError::new(
-                ErrorCode::BrowserProtocolError,
-                "Playwright screenshot did not return an image",
-            )
-        })?;
-    if image.mime_type != "image/png" {
-        return Err(CoreError::new(
-            ErrorCode::BrowserProtocolError,
-            "Playwright screenshot returned a non-PNG image",
-        ));
-    }
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(&image.data)
-        .map_err(|_| {
-            CoreError::new(
-                ErrorCode::BrowserProtocolError,
-                "Playwright screenshot contained invalid base64",
-            )
-        })?;
-    if bytes.len() > MAX_SCREENSHOT_ENCODED_BYTES {
-        return Err(CoreError::new(
-            ErrorCode::BrowserProtocolError,
-            "Playwright screenshot exceeded the encoded byte budget",
-        ));
-    }
-    let (header_width, header_height) = png_header_dimensions(&bytes)?;
-    if u64::from(header_width) * u64::from(header_height) > MAX_SCREENSHOT_PIXELS {
-        return Err(CoreError::new(
-            ErrorCode::BrowserProtocolError,
-            "Playwright screenshot exceeded the pixel budget",
-        ));
-    }
-    let decoded = image::load_from_memory_with_format(&bytes, ImageFormat::Png).map_err(|_| {
-        CoreError::new(
-            ErrorCode::BrowserProtocolError,
-            "Playwright screenshot contained invalid PNG data",
-        )
-    })?;
-    let (ow, oh) = decoded.dimensions();
-    let (rw, rh) = crate::screen_capture::scaled_dimensions(ow, oh, Some(max_edge));
-    let returned = if (rw, rh) == (ow, oh) {
-        decoded
-    } else {
-        decoded.resize_exact(rw, rh, FilterType::Lanczos3)
-    };
-    let mut output = Vec::new();
-    returned
-        .write_to(&mut Cursor::new(&mut output), ImageFormat::Png)
-        .map_err(|_| {
-            CoreError::new(
-                ErrorCode::BrowserArtifactFailed,
-                "failed to encode browser screenshot",
-            )
-        })?;
-    let metadata = BrowserScreenshotMetadata {
-        mode,
-        original_width: ow,
-        original_height: oh,
-        returned_width: rw,
-        returned_height: rh,
-        encoded_bytes: output.len(),
-        sha256: lc_core::ops::sha256_hex(&output),
-    };
-    Ok((output, metadata))
-}
-
-fn screenshot_tool_result(bytes: Vec<u8>, metadata: &BrowserScreenshotMetadata) -> CallToolResult {
-    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
-    let mut result = CallToolResult::success(vec![
-        ContentBlock::image(encoded, "image/png"),
-        ContentBlock::text(serde_json::to_string_pretty(metadata).unwrap_or_default()),
-    ]);
-    result.structured_content = serde_json::to_value(metadata).ok();
-    result
+    Ok(())
 }
 
 // The #[tool_router] macro generates an associated `Self::tool_router()`
@@ -1159,21 +1125,17 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Accept or dismiss the active browser dialog; optional prompt text is never written to audit.",
+        description = "Dialog handling is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserOkOutput>()
     )]
     async fn browser_dialog(&self, Parameters(a): Parameters<BrowserDialogArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert("accept".into(), serde_json::Value::Bool(a.accept));
-            if let Some(text) = a.prompt_text.clone() {
-                args.insert("promptText".into(), serde_json::Value::String(text));
-            }
-            self.browser
-                .call_upstream("browser_handle_dialog", args)
-                .await?;
-            Ok::<_, CoreError>(BrowserOkOutput { ok: true })
+            self.browser.guard_unsupported().await?;
+            Err::<BrowserOkOutput, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "browser dialogs are not supported by the lightpanda runtime",
+            ))
         }
         .await;
         browser_outcome(
@@ -1233,60 +1195,23 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Capture the active page as PNG (viewport, full page, or element). Returns an MCP image block and safe metadata; independent of desktop Screen Capture permission.",
+        description = "Screenshots are not supported by the Lightpanda runtime and fail closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserScreenshotMetadata>()
     )]
     async fn browser_screenshot(
         &self,
-        Parameters(a): Parameters<BrowserScreenshotArgs>,
+        Parameters(_a): Parameters<BrowserScreenshotArgs>,
     ) -> CallToolResult {
-        let mode = a.mode;
-        let captured = async {
-            if matches!(mode, BrowserScreenshotMode::Element) && a.ref_id.is_none() {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "element screenshot requires ref",
-                ));
-            }
-            if !matches!(mode, BrowserScreenshotMode::Element) && a.ref_id.is_some() {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "ref is only valid for element screenshots",
-                ));
-            }
-            let mut args = serde_json::Map::new();
-            args.insert("type".into(), serde_json::Value::String("png".into()));
-            args.insert("scale".into(), serde_json::Value::String("css".into()));
-            args.insert(
-                "fullPage".into(),
-                serde_json::Value::Bool(matches!(mode, BrowserScreenshotMode::FullPage)),
-            );
-            if matches!(mode, BrowserScreenshotMode::Element) {
-                if let Some(target) = a.ref_id.clone() {
-                    args.insert("target".into(), serde_json::Value::String(target));
-                }
-            }
-            let response = self
-                .browser
-                .call_upstream("browser_take_screenshot", args)
-                .await?;
-            browser_screenshot_payload(&response, mode, a.max_edge)
+        let result = async {
+            self.browser.guard_unsupported().await?;
+            Err::<BrowserScreenshotMetadata, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "screenshots are not supported by the lightpanda runtime",
+            ))
         }
         .await;
-        let audit_detail=captured.as_ref().ok().map(|(_,m)|serde_json::json!({"mode":m.mode,"returned_width":m.returned_width,"returned_height":m.returned_height,"encoded_bytes":m.encoded_bytes,"sha256":m.sha256}));
-        if let Err(audit_error) = crate::browser::audit::record_browser_call(
-            &self.core,
-            "browser_screenshot",
-            captured.as_ref().err(),
-            audit_detail,
-        ) {
-            return err_result(&audit_error);
-        }
-        match captured {
-            Ok((bytes, metadata)) => screenshot_tool_result(bytes, &metadata),
-            Err(e) => err_result(&e),
-        }
+        browser_outcome(&self.core, "browser_screenshot", result, None)
     }
 
     #[tool(
@@ -1631,7 +1556,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Stage approved workspace files into the active browser sandbox and upload them through Playwright. Upstream never receives original workspace paths.",
+        description = "File upload is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserUploadOutput>()
     )]
@@ -1647,76 +1572,40 @@ impl WorkspaceServer {
             })
             .collect();
         let result = async {
-            let artifact = self.browser.active_artifact_dir().await?;
-            let staged = crate::browser::files::stage_uploads(
-                &self.core,
-                &artifact,
-                a.workspace_id.as_deref(),
-                &a.sources,
-            )?;
-            let total = staged
-                .iter()
-                .filter_map(|p| std::fs::metadata(p).ok().map(|m| m.len()))
-                .sum::<u64>();
-            let mut args = serde_json::Map::new();
-            args.insert(
-                "paths".into(),
-                serde_json::Value::Array(
-                    staged
-                        .iter()
-                        .map(|p| serde_json::Value::String(p.to_string_lossy().to_string()))
-                        .collect(),
-                ),
-            );
-            let upload = self
-                .browser
-                .call_upstream("browser_file_upload", args)
-                .await;
-            // Best-effort: the staged copies have served their purpose once the
-            // upstream call returns (success or failure); remove them so the
-            // session sandbox does not accumulate duplicate upload bytes
-            // (final-review Minor 5).
-            for path in &staged {
-                let _ = std::fs::remove_file(path);
-            }
-            upload?;
-            Ok::<_, CoreError>(BrowserUploadOutput {
-                file_count: staged.len(),
-                bytes: total,
-            })
+            self.browser.guard_unsupported().await?;
+            Err::<BrowserUploadOutput, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "file upload is not supported by the lightpanda runtime",
+            ))
         }
         .await;
-        let mut detail = serde_json::json!({
+        let detail = serde_json::json!({
             "workspace_id": a.workspace_id,
             "sources": sources,
             "file_count": a.sources.len(),
         });
-        if let Ok(value) = &result {
-            detail["bytes"] = serde_json::json!(value.bytes);
-        }
         browser_outcome(&self.core, "browser_upload", result, Some(detail))
     }
 
     #[tool(
-        description = "List completed downloads in the active browser session sandbox using opaque download ids; absolute filesystem paths are never returned.",
+        description = "Downloads are not supported by the Lightpanda runtime and fail closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<Vec<BrowserDownloadInfo>>()
     )]
     async fn browser_downloads(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = async {
-            let artifact = self.browser.active_artifact_dir().await?;
-            crate::browser::files::list_downloads(&artifact)
+            self.browser.guard_unsupported().await?;
+            Err::<Vec<BrowserDownloadInfo>, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "downloads are not supported by the lightpanda runtime",
+            ))
         }
         .await;
-        let detail = result
-            .as_ref()
-            .ok()
-            .map(|v| serde_json::json!({"count":v.len()}));
-        browser_outcome(&self.core, "browser_downloads", result, detail)
+        browser_outcome(&self.core, "browser_downloads", result, None)
     }
 
     #[tool(
-        description = "Copy one opaque browser download into an approved workspace-relative destination. Requires workspace Write permission and canonical path confinement.",
+        description = "Saving downloads is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserSavedDownloadOutput>()
     )]
@@ -1725,21 +1614,14 @@ impl WorkspaceServer {
         Parameters(a): Parameters<BrowserSaveDownloadArgs>,
     ) -> CallToolResult {
         let result = async {
-            let artifact = self.browser.active_artifact_dir().await?;
-            crate::browser::files::save_download_to_workspace(
-                &self.core,
-                &artifact,
-                &a.workspace_id,
-                &a.download_id,
-                &a.path,
-            )
+            self.browser.guard_unsupported().await?;
+            Err::<BrowserSavedDownloadOutput, CoreError>(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "saving downloads is not supported by the lightpanda runtime",
+            ))
         }
         .await;
-        let mut detail = serde_json::json!({"workspace_id":a.workspace_id,"download_id":a.download_id,"path":a.path});
-        if let Ok(value) = &result {
-            detail["bytes"] = serde_json::json!(value.bytes);
-            detail["sha256"] = serde_json::json!(value.sha256);
-        }
+        let detail = serde_json::json!({"workspace_id":a.workspace_id,"download_id":a.download_id,"path":a.path});
         browser_outcome(
             &self.core,
             "browser_save_download_to_workspace",
@@ -1749,7 +1631,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Run up to 20 safe browser steps sequentially using the same Local Workspaces validation/policy paths. Stops on first failure and never replays a side-effecting step after process loss.",
+        description = "Run up to 20 safe browser steps sequentially using the same Local Workspaces validation/policy paths. Every step is validated before step 0 runs; unsupported step types (set_viewport, screenshot) are rejected up front. Stops on first failure and never replays a side-effecting step after process loss.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserRunStepsOutput>()
     )]
@@ -1777,6 +1659,9 @@ impl WorkspaceServer {
         let result = async {
             validate_batch_step_count(step_count)?;
             self.browser.guard_page_operation().await?;
+            // Full preflight: every step must validate before step 0 runs, so
+            // an invalid later step can never ride on earlier side effects.
+            preflight_run_steps(&a.steps)?;
             let mut results = Vec::with_capacity(step_count);
             for (index, step) in a.steps.into_iter().enumerate() {
                 let one: Result<serde_json::Value, CoreError> = async {
@@ -1792,35 +1677,19 @@ impl WorkspaceServer {
                             Ok(serde_json::json!({"snapshot":text,"truncated":truncated}))
                         }
                         BrowserStep::Click { ref_id } => {
-                            let mut args = serde_json::Map::new();
-                            args.insert("target".into(), serde_json::Value::String(ref_id));
-                            self.browser.call_upstream("browser_click", args).await?;
+                            self.browser.click_ref(&ref_id).await?;
                             Ok(serde_json::json!({"ok":true}))
                         }
                         BrowserStep::Fill { ref_id, text } => {
-                            let mut args = serde_json::Map::new();
-                            args.insert("target".into(), serde_json::Value::String(ref_id));
-                            args.insert("text".into(), serde_json::Value::String(text));
-                            args.insert("submit".into(), serde_json::Value::Bool(false));
-                            args.insert("slowly".into(), serde_json::Value::Bool(false));
-                            self.browser.call_upstream("browser_type", args).await?;
+                            self.browser.fill_ref(&ref_id, &text, false).await?;
                             Ok(serde_json::json!({"ok":true}))
                         }
                         BrowserStep::Press { key } => {
-                            let mut args = serde_json::Map::new();
-                            args.insert("key".into(), serde_json::Value::String(key));
-                            self.browser
-                                .call_upstream("browser_press_key", args)
-                                .await?;
+                            self.browser.press_key(&key).await?;
                             Ok(serde_json::json!({"ok":true}))
                         }
                         BrowserStep::Select { ref_id, values } => {
-                            let mut args = serde_json::Map::new();
-                            args.insert("target".into(), serde_json::Value::String(ref_id));
-                            args.insert("values".into(), serde_json::json!(values));
-                            self.browser
-                                .call_upstream("browser_select_option", args)
-                                .await?;
+                            self.browser.select_ref(&ref_id, &values).await?;
                             Ok(serde_json::json!({"ok":true}))
                         }
                         BrowserStep::Wait {
@@ -1831,54 +1700,19 @@ impl WorkspaceServer {
                                 browser_wait_internal(&self.browser, condition, timeout_ms).await?;
                             Ok(serde_json::to_value(ok).unwrap_or_default())
                         }
-                        BrowserStep::SetViewport { width, height } => {
-                            validate_viewport(width, height)?;
-                            let mut args = serde_json::Map::new();
-                            args.insert("width".into(), serde_json::json!(width));
-                            args.insert("height".into(), serde_json::json!(height));
-                            self.browser.call_upstream("browser_resize", args).await?;
-                            Ok(serde_json::json!({"width":width,"height":height}))
+                        // Rejected by preflight already; this is the fail-closed
+                        // backstop that never reaches a driver.
+                        BrowserStep::SetViewport { .. } => {
+                            Err::<serde_json::Value, CoreError>(CoreError::new(
+                                ErrorCode::BrowserFeatureUnsupported,
+                                "set_viewport steps are not supported by the lightpanda runtime",
+                            ))
                         }
-                        BrowserStep::Screenshot {
-                            mode,
-                            ref_id,
-                            max_edge,
-                        } => {
-                            if matches!(mode, BrowserScreenshotMode::Element) && ref_id.is_none() {
-                                return Err(CoreError::new(
-                                    ErrorCode::InvalidArgument,
-                                    "element screenshot requires ref",
-                                ));
-                            } else if !matches!(mode, BrowserScreenshotMode::Element)
-                                && ref_id.is_some()
-                            {
-                                return Err(CoreError::new(
-                                    ErrorCode::InvalidArgument,
-                                    "ref is only valid for element screenshots",
-                                ));
-                            }
-                            let mut args = serde_json::Map::new();
-                            args.insert("type".into(), serde_json::Value::String("png".into()));
-                            args.insert("scale".into(), serde_json::Value::String("css".into()));
-                            args.insert(
-                                "fullPage".into(),
-                                serde_json::Value::Bool(matches!(
-                                    mode,
-                                    BrowserScreenshotMode::FullPage
-                                )),
-                            );
-                            if matches!(mode, BrowserScreenshotMode::Element) {
-                                if let Some(t) = ref_id {
-                                    args.insert("target".into(), serde_json::Value::String(t));
-                                }
-                            }
-                            let r = self
-                                .browser
-                                .call_upstream("browser_take_screenshot", args)
-                                .await?;
-                            let (_bytes, metadata) =
-                                browser_screenshot_payload(&r, mode, max_edge)?;
-                            Ok(serde_json::json!({"metadata":metadata}))
+                        BrowserStep::Screenshot { .. } => {
+                            Err::<serde_json::Value, CoreError>(CoreError::new(
+                                ErrorCode::BrowserFeatureUnsupported,
+                                "screenshot steps are not supported by the lightpanda runtime",
+                            ))
                         }
                     }
                 }

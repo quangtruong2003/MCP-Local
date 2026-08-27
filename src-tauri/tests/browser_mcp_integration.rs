@@ -485,10 +485,6 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
             "browser_wait",
             serde_json::json!({"condition":{"kind":"delay","milliseconds":1},"timeout_ms":1000}),
         ),
-        (
-            "browser_dialog",
-            serde_json::json!({"accept":true,"prompt_text":"private prompt"}),
-        ),
         ("browser_console", serde_json::json!({"limit":100})),
         ("browser_network", serde_json::json!({"limit":100})),
         ("browser_dom", serde_json::json!({"ref":"e2"})),
@@ -564,6 +560,10 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         .unwrap()
         .contains("artifact_id"));
 
+    // Screenshot, upload, downloads, and save-download are structurally
+    // unsupported under the lightpanda runtime and must fail closed without
+    // any driver call, staging copy, or workspace write.
+    let unsupported_calls_before = driver.calls().len();
     let screenshot = client
         .call_tool(
             CallToolRequestParams::new("browser_screenshot").with_arguments(arguments(
@@ -572,18 +572,11 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         )
         .await
         .unwrap();
+    let screenshot_text = serde_json::to_string(&screenshot).unwrap();
+    assert!(screenshot.is_error.unwrap_or(false), "{screenshot_text}");
     assert!(
-        !screenshot.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&screenshot).unwrap()
-    );
-    assert!(screenshot
-        .content
-        .iter()
-        .any(|block| block.as_image().is_some()));
-    assert_eq!(
-        screenshot.structured_content.as_ref().unwrap()["returned_width"],
-        2
+        screenshot_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{screenshot_text}"
     );
 
     let before_session = client
@@ -616,6 +609,20 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         "unsupported emulation must not restart the session"
     );
 
+    let dialog = client
+        .call_tool(
+            CallToolRequestParams::new("browser_dialog")
+                .with_arguments(arguments(serde_json::json!({"accept":true}))),
+        )
+        .await
+        .unwrap();
+    let dialog_text = serde_json::to_string(&dialog).unwrap();
+    assert!(dialog.is_error.unwrap_or(false), "{dialog_text}");
+    assert!(
+        dialog_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{dialog_text}"
+    );
+
     let upload = client
         .call_tool(
             CallToolRequestParams::new("browser_upload").with_arguments(arguments(
@@ -624,35 +631,17 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         )
         .await
         .unwrap();
+    let upload_text = serde_json::to_string(&upload).unwrap();
+    assert!(upload.is_error.unwrap_or(false), "{upload_text}");
     assert!(
-        !upload.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&upload).unwrap()
-    );
-    let upload_call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_file_upload")
-        .unwrap();
-    let staged = upload_call.arguments["paths"][0].as_str().unwrap();
-    assert!(staged.contains("upload-staging"));
-    let staged_name = std::path::Path::new(staged)
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
-    assert!(
-        staged_name.starts_with("u-"),
-        "staged upload must use an opaque id: {staged_name}"
+        upload_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{upload_text}"
     );
     assert!(
-        !staged_name.contains("upload"),
-        "staged upload leaks the original filename: {staged_name}"
+        !active_artifact_dir(&dir).join("upload-staging").exists(),
+        "unsupported upload created a staging directory"
     );
 
-    // Real Playwright writes completed downloads into the session outputDir
-    // root; discovery must stage them into downloads/ without test help.
     std::fs::write(
         active_artifact_dir(&dir).join("result.txt"),
         b"download-body",
@@ -662,19 +651,27 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         .call_tool(CallToolRequestParams::new("browser_downloads"))
         .await
         .unwrap();
-    let download_id = downloads.structured_content.as_ref().unwrap()[0]["download_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let save = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":download_id,"path":"saved/result.txt"})))).await.unwrap();
+    let downloads_text = serde_json::to_string(&downloads).unwrap();
+    assert!(downloads.is_error.unwrap_or(false), "{downloads_text}");
     assert!(
-        !save.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&save).unwrap()
+        downloads_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{downloads_text}"
+    );
+    let save = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":"d-0000000000000000-1","path":"saved/result.txt"})))).await.unwrap();
+    let save_text = serde_json::to_string(&save).unwrap();
+    assert!(save.is_error.unwrap_or(false), "{save_text}");
+    assert!(
+        save_text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+        "{save_text}"
+    );
+    assert!(
+        !workspace_root.join("saved/result.txt").exists(),
+        "unsupported save wrote into the workspace"
     );
     assert_eq!(
-        std::fs::read(workspace_root.join("saved/result.txt")).unwrap(),
-        b"download-body"
+        driver.calls().len(),
+        unsupported_calls_before,
+        "unsupported tools reached the driver"
     );
 
     let steps = client.call_tool(CallToolRequestParams::new("browser_run_steps").with_arguments(arguments(serde_json::json!({"steps":[{"type":"navigate","url":"https://example.test/flow"},{"type":"snapshot"}]})))).await.unwrap();
@@ -2199,165 +2196,47 @@ async fn emulate_device_fails_closed_with_zero_side_effects() {
 }
 
 #[tokio::test]
-async fn screenshot_modes_metadata_and_os_capture_independence() {
+async fn unsupported_screenshot_fails_closed_with_zero_driver_calls() {
+    // OS Screen Capture state is irrelevant: the Lightpanda runtime has no
+    // screenshot primitive, so every mode fails closed before any driver call.
     let settings = AppSettings {
         screen_capture_enabled: false,
         ..AppSettings::default()
     };
-    let (port, _dir, _core, driver, _browser) = spawn(settings).await;
+    let (port, _dir, core, driver, _browser) = spawn(settings).await;
     let client = client(port).await;
     open_browser(&client).await;
 
-    // OS Screen Capture is explicitly off; browser screenshots still succeed.
-    let result = client
-        .call_tool(
-            CallToolRequestParams::new("browser_screenshot").with_arguments(arguments(
-                serde_json::json!({"mode":"viewport","max_edge":2}),
-            )),
-        )
-        .await
-        .unwrap();
-    assert!(
-        !result.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&result).unwrap()
-    );
-    assert!(result
-        .content
-        .iter()
-        .any(|block| block.as_image().is_some()));
-    let metadata = result.structured_content.as_ref().unwrap().clone();
-    assert_eq!(metadata["mode"], "viewport");
-    assert_eq!(metadata["original_width"], 4);
-    assert_eq!(metadata["original_height"], 3);
-    assert_eq!(metadata["returned_width"], 2);
-    assert!(metadata["encoded_bytes"].as_u64().unwrap() > 0);
-    assert!(metadata["sha256"].as_str().unwrap().len() == 64);
-
-    // Element mode forwards the ref as the upstream target.
-    let element = client
-        .call_tool(
-            CallToolRequestParams::new("browser_screenshot")
-                .with_arguments(arguments(serde_json::json!({"mode":"element","ref":"e5"}))),
-        )
-        .await
-        .unwrap();
-    assert!(!element.is_error.unwrap_or(false));
-    let call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_take_screenshot")
-        .unwrap();
-    assert_eq!(call.arguments["target"], "e5");
-    assert_eq!(call.arguments["type"], "png");
-    assert_eq!(call.arguments["fullPage"], false);
-
-    let full = client
-        .call_tool(
-            CallToolRequestParams::new("browser_screenshot")
-                .with_arguments(arguments(serde_json::json!({"mode":"full_page"}))),
-        )
-        .await
-        .unwrap();
-    assert!(!full.is_error.unwrap_or(false));
-    let call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_take_screenshot")
-        .unwrap();
-    assert_eq!(call.arguments["fullPage"], true);
-    assert!(call.arguments.get("target").is_none());
-}
-
-#[tokio::test]
-async fn screenshot_ref_validation_rejects_wrong_mode_combinations() {
-    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
-    let client = client(port).await;
-    open_browser(&client).await;
-
-    let missing = client
-        .call_tool(
-            CallToolRequestParams::new("browser_screenshot")
-                .with_arguments(arguments(serde_json::json!({"mode":"element"}))),
-        )
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&missing).unwrap();
-    assert!(missing.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("INVALID_ARGUMENT"), "{text}");
-
-    for mode in ["viewport", "full_page"] {
-        let extra = client
+    for args in [
+        serde_json::json!({"mode":"viewport"}),
+        serde_json::json!({"mode":"full_page"}),
+        serde_json::json!({"mode":"element","ref":"e1"}),
+        serde_json::json!({"mode":"element"}),
+    ] {
+        let result = client
             .call_tool(
                 CallToolRequestParams::new("browser_screenshot")
-                    .with_arguments(arguments(serde_json::json!({"mode": mode, "ref":"e1"}))),
+                    .with_arguments(arguments(args.clone())),
             )
             .await
             .unwrap();
-        let text = serde_json::to_string(&extra).unwrap();
-        assert!(extra.is_error.unwrap_or(false), "{mode}: {text}");
-        assert!(text.contains("INVALID_ARGUMENT"), "{mode}: {text}");
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{args}: {text}");
+        assert!(
+            text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+            "{args}: {text}"
+        );
     }
     assert!(
-        driver
-            .calls()
-            .iter()
-            .all(|c| c.tool != "browser_take_screenshot"),
-        "invalid screenshot mode/ref reached the driver"
+        driver.calls().is_empty(),
+        "unsupported screenshot must not reach the driver: {:?}",
+        driver.calls()
     );
-}
-
-fn png_header_block(width: u32, height: u32) -> rmcp::model::ContentBlock {
-    let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    bytes.extend_from_slice(&13u32.to_be_bytes());
-    bytes.extend_from_slice(b"IHDR");
-    bytes.extend_from_slice(&width.to_be_bytes());
-    bytes.extend_from_slice(&height.to_be_bytes());
-    bytes.extend_from_slice(&[8u8, 6, 0, 0, 0]);
-    rmcp::model::ContentBlock::image(
-        base64::engine::general_purpose::STANDARD.encode(bytes),
-        "image/png",
-    )
-}
-
-#[tokio::test]
-async fn screenshot_resource_bounds_reject_pathological_images() {
-    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
-    let client = client(port).await;
-    open_browser(&client).await;
-
-    // 10^10 pixels exceeds the pixel budget and must be rejected from the PNG
-    // header before any decode allocates memory.
-    *driver.screenshot_block.lock().unwrap() = Some(png_header_block(100_000, 100_000));
-    let pixels = client
-        .call_tool(
-            CallToolRequestParams::new("browser_screenshot")
-                .with_arguments(arguments(serde_json::json!({"mode":"viewport"}))),
-        )
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&pixels).unwrap();
-    assert!(pixels.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("pixel budget"), "{text}");
-
-    // A 33 MiB encoded payload exceeds the encoded-byte budget.
-    let big = vec![0u8; 33 * 1024 * 1024];
-    *driver.screenshot_block.lock().unwrap() = Some(rmcp::model::ContentBlock::image(
-        base64::engine::general_purpose::STANDARD.encode(big),
-        "image/png",
-    ));
-    let encoded = client
-        .call_tool(
-            CallToolRequestParams::new("browser_screenshot")
-                .with_arguments(arguments(serde_json::json!({"mode":"viewport"}))),
-        )
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&encoded).unwrap();
-    assert!(encoded.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("encoded byte budget"), "{text}");
+    let rows = matching_audit(&core, "browser_screenshot");
+    assert_eq!(rows.len(), 4);
+    for row in &rows {
+        assert_eq!(row.decision, "error");
+    }
 }
 
 #[tokio::test]
@@ -2921,14 +2800,11 @@ async fn devtools_is_unsupported_under_fixed_background_backend() {
 }
 
 #[tokio::test]
-async fn upload_deny_allow_table() {
+async fn unsupported_upload_fails_closed_without_staging() {
     let (port, dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let workspace_root = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
     std::fs::write(workspace_root.join("upload.txt"), b"upload-body").unwrap();
-    let locked_root = dir.path().join("locked");
-    std::fs::create_dir_all(&locked_root).unwrap();
-    std::fs::write(locked_root.join("locked.txt"), b"locked-body").unwrap();
     let ws = lc_core::workspace_repo::insert_workspace(
         &core.db,
         "Web",
@@ -2936,149 +2812,42 @@ async fn upload_deny_allow_table() {
     )
     .unwrap();
     lc_core::workspace_repo::update_capabilities(&core.db, &ws.id, true, true).unwrap();
-    let locked = lc_core::workspace_repo::insert_workspace(
-        &core.db,
-        "Locked",
-        &locked_root.to_string_lossy(),
-    )
-    .unwrap();
-    lc_core::workspace_repo::update_capabilities(&core.db, &locked.id, false, false).unwrap();
 
     let client = client(port).await;
     open_browser(&client).await;
 
-    // Allowed: workspace source with Read permission.
-    let ok = client
+    // Even a fully authorized workspace source fails closed: the Lightpanda
+    // runtime has no upload primitive.
+    let result = client
         .call_tool(CallToolRequestParams::new("browser_upload").with_arguments(arguments(
             serde_json::json!({"workspace_id":ws.id,"sources":[{"kind":"workspace","path":"upload.txt"}]}),
         )))
         .await
         .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
+
+    // No staging side effect may happen before the unsupported return.
+    let artifact_dir = active_artifact_dir(&dir);
+    let staging = artifact_dir.join("upload-staging");
     assert!(
-        !ok.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&ok).unwrap()
+        !staging.exists(),
+        "unsupported upload created a staging directory"
     );
-    let call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_file_upload")
-        .unwrap();
-    let staged = call.arguments["paths"][0].as_str().unwrap();
-    assert!(staged.contains("upload-staging"));
-
-    // Denied: workspace without Read permission.
-    let denied = client
-        .call_tool(CallToolRequestParams::new("browser_upload").with_arguments(arguments(
-            serde_json::json!({"workspace_id":locked.id,"sources":[{"kind":"workspace","path":"locked.txt"}]}),
-        )))
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&denied).unwrap();
-    assert!(denied.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("BROWSER_UPLOAD_DENIED"), "{text}");
-
-    // Denied: traversal and absolute paths.
-    for path in ["../outside.txt", "C:/evil.txt"] {
-        let denied = client
-            .call_tool(CallToolRequestParams::new("browser_upload").with_arguments(arguments(
-                serde_json::json!({"workspace_id":ws.id,"sources":[{"kind":"workspace","path":path}]}),
-            )))
-            .await
-            .unwrap();
-        let text = serde_json::to_string(&denied).unwrap();
-        assert!(denied.is_error.unwrap_or(false), "{path}: {text}");
-        assert!(text.contains("BROWSER_UPLOAD_DENIED"), "{path}: {text}");
-    }
-
-    // Denied: workspace source without workspace_id.
-    let missing_ws = client
-        .call_tool(
-            CallToolRequestParams::new("browser_upload").with_arguments(arguments(
-                serde_json::json!({"sources":[{"kind":"workspace","path":"upload.txt"}]}),
-            )),
-        )
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&missing_ws).unwrap();
-    assert!(missing_ws.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("INVALID_ARGUMENT"), "{text}");
-
-    // Allowed: artifact id resolving inside the active session sandbox.
-    std::fs::write(
-        active_artifact_dir(&dir).join("artifact-src.txt"),
-        b"artifact-body",
-    )
-    .unwrap();
-    let downloads = client
-        .call_tool(CallToolRequestParams::new("browser_downloads"))
-        .await
-        .unwrap();
-    let artifact_id = downloads.structured_content.as_ref().unwrap()[0]["download_id"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    let from_artifact = client
-        .call_tool(
-            CallToolRequestParams::new("browser_upload").with_arguments(arguments(
-                serde_json::json!({"sources":[{"kind":"artifact","artifact_id":artifact_id}]}),
-            )),
-        )
-        .await
-        .unwrap();
     assert!(
-        !from_artifact.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&from_artifact).unwrap()
+        driver.calls().is_empty(),
+        "unsupported upload reached the driver: {:?}",
+        driver.calls()
     );
-
-    // Denied: unknown artifact id.
-    let bogus = client
-        .call_tool(CallToolRequestParams::new("browser_upload").with_arguments(arguments(
-            serde_json::json!({"sources":[{"kind":"artifact","artifact_id":"d-0000000000000000-4"}]}),
-        )))
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&bogus).unwrap();
-    assert!(bogus.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("BROWSER_UPLOAD_DENIED"), "{text}");
-
-    // Audit records source kinds and never file content.
     let rows = matching_audit(&core, "browser_upload");
-    let allowed = rows
-        .iter()
-        .find(|r| {
-            r.decision == "allow"
-                && r.detail
-                    .as_ref()
-                    .is_some_and(|d| d["sources"][0]["kind"] == "workspace")
-        })
-        .expect("workspace upload must audit as allow");
-    let detail = allowed.detail.as_ref().unwrap();
-    assert_eq!(detail["sources"][0]["kind"], "workspace");
-    assert_eq!(detail["sources"][0]["path"], "upload.txt");
-    assert!(
-        !serde_json::to_string(detail)
-            .unwrap()
-            .contains("upload-body"),
-        "upload audit leaks file content"
-    );
-    assert!(
-        rows.iter().any(|r| {
-            r.decision == "allow"
-                && r.detail
-                    .as_ref()
-                    .is_some_and(|d| d["sources"][0]["kind"] == "artifact")
-        }),
-        "artifact upload must audit as allow"
-    );
-    assert!(rows.iter().any(|r| r.decision == "deny"));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, "error");
 }
 
 #[tokio::test]
-async fn download_discovery_export_deny_allow_table() {
-    let (port, dir, core, _driver, _browser) = spawn(AppSettings::default()).await;
+async fn unsupported_downloads_and_save_fail_closed_without_touching_workspace() {
+    let (port, dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let workspace_root = dir.path().join("workspace");
     std::fs::create_dir_all(&workspace_root).unwrap();
     let ws = lc_core::workspace_repo::insert_workspace(
@@ -3088,32 +2857,13 @@ async fn download_discovery_export_deny_allow_table() {
     )
     .unwrap();
     lc_core::workspace_repo::update_capabilities(&core.db, &ws.id, true, true).unwrap();
-    let readonly_root = dir.path().join("readonly");
-    std::fs::create_dir_all(&readonly_root).unwrap();
-    let readonly = lc_core::workspace_repo::insert_workspace(
-        &core.db,
-        "ReadOnly",
-        &readonly_root.to_string_lossy(),
-    )
-    .unwrap();
-    lc_core::workspace_repo::update_capabilities(&core.db, &readonly.id, true, false).unwrap();
 
     let client = client(port).await;
     open_browser(&client).await;
-
-    // Real Playwright writes completed downloads into the outputDir root and
-    // in-flight downloads as .part files under downloads/.
+    // A file that a Playwright runtime would have reported as a download.
     std::fs::write(
         active_artifact_dir(&dir).join("result.txt"),
         b"download-body",
-    )
-    .unwrap();
-    std::fs::create_dir_all(active_artifact_dir(&dir).join("downloads")).unwrap();
-    std::fs::write(
-        active_artifact_dir(&dir)
-            .join("downloads")
-            .join("busy.txt.part"),
-        b"partial",
     )
     .unwrap();
 
@@ -3122,71 +2872,28 @@ async fn download_discovery_export_deny_allow_table() {
         .await
         .unwrap();
     let text = serde_json::to_string(&downloads).unwrap();
-    assert!(!downloads.is_error.unwrap_or(false), "{text}");
-    let list = downloads
-        .structured_content
-        .as_ref()
-        .unwrap()
-        .as_array()
-        .unwrap()
-        .clone();
-    assert_eq!(list.len(), 2);
-    let done = list.iter().find(|d| d["filename"] == "result.txt").unwrap();
-    let busy = list.iter().find(|d| d["filename"] == "busy.txt").unwrap();
-    assert!(done["download_id"].as_str().unwrap().starts_with("d-"));
-    assert_eq!(done["completed"], true);
-    assert!(done["sha256"].as_str().unwrap().len() == 64);
-    assert_eq!(busy["completed"], false);
+    assert!(downloads.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
+
+    let save = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":"d-0000000000000000-1","path":"saved/result.txt"})))).await.unwrap();
+    let text = serde_json::to_string(&save).unwrap();
+    assert!(save.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
+
+    // The destination must stay untouched and no driver call may happen.
     assert!(
-        busy["sha256"].is_null(),
-        "incomplete downloads must have no hash"
+        !workspace_root.join("saved/result.txt").exists(),
+        "unsupported save wrote into the workspace"
     );
-    let artifact_dir = active_artifact_dir(&dir);
-    let dir_string = artifact_dir.to_string_lossy().to_string();
-    assert!(!text.contains(&dir_string), "downloads leak absolute paths");
-
-    let done_id = done["download_id"].as_str().unwrap().to_string();
-    let busy_id = busy["download_id"].as_str().unwrap().to_string();
-
-    // Denied: exporting an incomplete download.
-    let incomplete = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":busy_id,"path":"busy.txt"})))).await.unwrap();
-    let text = serde_json::to_string(&incomplete).unwrap();
-    assert!(incomplete.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("BROWSER_DOWNLOAD_DENIED"), "{text}");
-
-    // Denied: unknown id.
-    let missing = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":"d-0000000000000000-1","path":"x.txt"})))).await.unwrap();
-    let text = serde_json::to_string(&missing).unwrap();
-    assert!(missing.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("BROWSER_DOWNLOAD_NOT_FOUND"), "{text}");
-
-    // Denied: traversal destination.
-    let traversal = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":done_id,"path":"../evil.txt"})))).await.unwrap();
-    let text = serde_json::to_string(&traversal).unwrap();
-    assert!(traversal.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("BROWSER_DOWNLOAD_DENIED"), "{text}");
-
-    // Denied: read-only workspace.
-    let no_write = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":readonly.id,"download_id":done_id,"path":"result.txt"})))).await.unwrap();
-    let text = serde_json::to_string(&no_write).unwrap();
-    assert!(no_write.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("BROWSER_DOWNLOAD_DENIED"), "{text}");
-
-    // Allowed: confined export with Write permission.
-    let save = client.call_tool(CallToolRequestParams::new("browser_save_download_to_workspace").with_arguments(arguments(serde_json::json!({"workspace_id":ws.id,"download_id":done_id,"path":"saved/result.txt"})))).await.unwrap();
     assert!(
-        !save.is_error.unwrap_or(false),
-        "{}",
-        serde_json::to_string(&save).unwrap()
+        driver.calls().is_empty(),
+        "unsupported downloads reached the driver: {:?}",
+        driver.calls()
     );
-    let structured = save.structured_content.as_ref().unwrap().clone();
-    assert_eq!(structured["workspace_id"], ws.id);
-    assert_eq!(structured["path"], "saved/result.txt");
-    assert_eq!(structured["bytes"], 13);
-    assert!(structured["sha256"].as_str().unwrap().len() == 64);
+    assert_eq!(matching_audit(&core, "browser_downloads").len(), 1);
     assert_eq!(
-        std::fs::read(workspace_root.join("saved/result.txt")).unwrap(),
-        b"download-body"
+        matching_audit(&core, "browser_save_download_to_workspace").len(),
+        1
     );
 }
 
@@ -3225,16 +2932,15 @@ async fn run_steps_stops_on_first_failure_and_audits_failure() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-    driver.fail(
-        "browser_click",
-        CoreError::new(ErrorCode::BrowserStaleRef, "stale reference"),
-    );
 
+    // fill invalidates snapshot refs, so the following click on a pre-fill ref
+    // must fail closed with BROWSER_STALE_REF and stop the batch.
     let result = client
         .call_tool(
             CallToolRequestParams::new("browser_run_steps").with_arguments(arguments(
                 serde_json::json!({"steps":[
                     {"type":"navigate","url":"https://example.test/flow"},
+                    {"type":"snapshot"},
                     {"type":"fill","ref_id":"e2","text":"batch-secret"},
                     {"type":"click","ref_id":"e1"},
                     {"type":"snapshot"}
@@ -3247,12 +2953,13 @@ async fn run_steps_stops_on_first_failure_and_audits_failure() {
     assert!(!result.is_error.unwrap_or(false), "{text}");
     let structured = result.structured_content.as_ref().unwrap().clone();
     assert_eq!(structured["ok"], false);
-    assert_eq!(structured["failed_index"], 2);
+    assert_eq!(structured["failed_index"], 3);
     assert_eq!(structured["status"], "failed");
     assert_eq!(structured["error"]["code"], "BROWSER_STALE_REF");
-    assert_eq!(structured["results"].as_array().unwrap().len(), 2);
-    assert!(
-        driver.calls().iter().all(|c| c.tool != "browser_snapshot"),
+    assert_eq!(structured["results"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        driver.calls().iter().filter(|c| c.tool == "tree").count(),
+        2,
         "steps after the failure were executed"
     );
 
@@ -3264,12 +2971,12 @@ async fn run_steps_stops_on_first_failure_and_audits_failure() {
     );
     assert_eq!(rows[0].error_code.as_deref(), Some("BROWSER_STALE_REF"));
     let detail = rows[0].detail.as_ref().unwrap();
-    assert_eq!(detail["step_count"], 4);
-    assert_eq!(detail["failed_index"], 2);
+    assert_eq!(detail["step_count"], 5);
+    assert_eq!(detail["failed_index"], 3);
     assert_eq!(detail["status"], "failed");
     assert_eq!(
         detail["step_types"],
-        serde_json::json!(["navigate", "fill", "click", "snapshot"])
+        serde_json::json!(["navigate", "snapshot", "fill", "click", "snapshot"])
     );
     assert!(
         !serde_json::to_string(detail)
@@ -3285,28 +2992,24 @@ async fn run_steps_process_loss_is_not_replayed() {
     let client = client(port).await;
     open_browser(&client).await;
     driver.fail(
-        "browser_click",
+        "click",
         CoreError::new(ErrorCode::BrowserProcessLost, "browser process was lost"),
     );
 
     let result = client
         .call_tool(
             CallToolRequestParams::new("browser_run_steps").with_arguments(arguments(
-                serde_json::json!({"steps":[{"type":"click","ref_id":"e1"}]}),
+                serde_json::json!({"steps":[{"type":"snapshot"},{"type":"click","ref_id":"e1"}]}),
             )),
         )
         .await
         .unwrap();
     let structured = result.structured_content.as_ref().unwrap().clone();
     assert_eq!(structured["ok"], false);
-    assert_eq!(structured["failed_index"], 0);
+    assert_eq!(structured["failed_index"], 1);
     assert_eq!(structured["error"]["code"], "BROWSER_PROCESS_LOST");
     assert_eq!(
-        driver
-            .calls()
-            .iter()
-            .filter(|c| c.tool == "browser_click")
-            .count(),
+        driver.calls().iter().filter(|c| c.tool == "click").count(),
         1,
         "failed step was replayed"
     );
@@ -3346,14 +3049,61 @@ async fn run_steps_rejects_disallowed_step_types() {
         }
     }
     assert!(
-        driver.calls().iter().all(|c| c.tool != "browser_evaluate"
-            && c.tool != "browser_file_upload"
-            && c.tool != "browser_handle_dialog"
-            && c.tool != "browser_start_tracing"),
-        "disallowed step reached the driver"
+        driver.calls().is_empty(),
+        "disallowed step reached the driver: {:?}",
+        driver.calls()
     );
     // Protocol-level rejections happen before the handler: no audit rows.
     assert!(matching_audit(&core, "browser_run_steps").is_empty());
+}
+
+#[tokio::test]
+async fn run_steps_preflight_validates_every_step_before_step_zero() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    // A side-effecting step 0 plus one invalid later step must reject the
+    // whole batch before step 0 runs.
+    for invalid_step in [
+        serde_json::json!({"type":"navigate","url":"not a url"}),
+        serde_json::json!({"type":"click","ref_id":"not-a-ref"}),
+        serde_json::json!({"type":"fill","ref_id":"e1","text":""}),
+        serde_json::json!({"type":"press","key":"  "}),
+        serde_json::json!({"type":"select","ref_id":"e1","values":[]}),
+        serde_json::json!({"type":"wait","condition":{"kind":"delay","milliseconds":0},"timeout_ms":1000}),
+        serde_json::json!({"type":"wait","condition":{"kind":"delay","milliseconds":5000},"timeout_ms":1000}),
+        serde_json::json!({"type":"set_viewport","width":320,"height":568}),
+        serde_json::json!({"type":"screenshot","mode":"viewport"}),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("browser_run_steps").with_arguments(arguments(
+                    serde_json::json!({"steps":[
+                        {"type":"navigate","url":"https://example.test/first"},
+                        invalid_step.clone()
+                    ]}),
+                )),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{invalid_step}: {text}");
+        assert!(
+            text.contains("INVALID_ARGUMENT") || text.contains("BROWSER_FEATURE_UNSUPPORTED"),
+            "{invalid_step}: {text}"
+        );
+    }
+    assert!(
+        driver.calls().is_empty(),
+        "preflight-rejected batch ran step 0: {:?}",
+        driver.calls()
+    );
+    let rows = matching_audit(&core, "browser_run_steps");
+    assert_eq!(rows.len(), 9);
+    for row in &rows {
+        assert_eq!(row.decision, "error");
+    }
 }
 
 // ---------------------------------------------------------------------------
