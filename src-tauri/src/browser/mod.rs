@@ -5,7 +5,6 @@ pub mod files;
 pub mod lightpanda;
 pub mod manager;
 pub mod mcp;
-pub mod playwright;
 pub mod policy;
 pub mod runtime;
 pub mod types;

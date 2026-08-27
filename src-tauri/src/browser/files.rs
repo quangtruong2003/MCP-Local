@@ -32,7 +32,7 @@ pub struct BrowserSavedDownloadOutput {
 
 /// Files Local Workspaces itself places in the session artifact root. These are
 /// never downloads and must not be staged into `downloads/` or exposed as such.
-const INTERNAL_ROOT_FILES: &[&str] = &["playwright-mcp-config.json"];
+const INTERNAL_ROOT_FILES: &[&str] = &[];
 const COMPLETED_MARKER: &str = ".completed.json";
 const INCOMPLETE_SUFFIX: &str = ".part";
 
@@ -108,12 +108,11 @@ fn safe_extension(path: &Path) -> String {
     }
 }
 
-/// Real Playwright MCP writes completed downloads to the session outputDir root
-/// (`path.resolve(outputDir, suggestedFilename)`), not into `downloads/`. Stage
-/// any such root-level files into `downloads/` so discovery and export have one
-/// well-defined, sandbox-confined location. The move is atomic (same-volume
-/// rename); the copy fallback writes a `.part` file and renames it so a reader
-/// never observes a partially staged download.
+/// Completed downloads may land in the session outputDir root rather than in
+/// `downloads/`. Stage any such root-level files into `downloads/` so discovery
+/// and export have one well-defined, sandbox-confined location. The move is
+/// atomic (same-volume rename); the copy fallback writes a `.part` file and
+/// renames it so a reader never observes a partially staged download.
 pub fn stage_completed_downloads(artifact_dir: &Path) -> Result<(), CoreError> {
     let downloads = artifact_dir.join("downloads");
     fs::create_dir_all(&downloads).map_err(CoreError::io)?;
@@ -218,7 +217,7 @@ fn resolve_artifact_source(artifact_dir: &Path, artifact_id: &str) -> Result<Pat
 }
 
 /// Stage upload sources into the active session sandbox and return the staged
-/// absolute paths that are safe to hand to upstream Playwright. Workspace
+/// absolute paths that are safe to hand to the browser runtime. Workspace
 /// sources require Read permission and canonical confinement; artifact sources
 /// must resolve inside the active session artifact root. The original workspace
 /// filename is never forwarded.
@@ -368,18 +367,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let artifact = dir.path();
         fs::create_dir_all(artifact.join("downloads")).unwrap();
-        // Real Playwright writes downloads into the outputDir root.
+        // Completed downloads may land in the outputDir root.
         fs::write(artifact.join("report.pdf"), b"pdf-bytes").unwrap();
-        // Internal files must never be treated as downloads.
-        fs::write(artifact.join("playwright-mcp-config.json"), b"{}").unwrap();
+        // Internal/hidden files must never be treated as downloads.
         fs::write(artifact.join(".completed.json"), b"{}").unwrap();
 
         stage_completed_downloads(artifact).unwrap();
 
         assert!(artifact.join("downloads/report.pdf").exists());
-        assert!(!artifact
-            .join("downloads/playwright-mcp-config.json")
-            .exists());
         assert!(!artifact.join("downloads/.completed.json").exists());
 
         let list = list_downloads(artifact).unwrap();

@@ -7,8 +7,6 @@
     "test": "vitest run",
     "build": "tsc && vite build",
     "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build-tailscale-sidecar.ps1",
-    "build:browser-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-browser-runtime.ps1",
-    "verify:browser-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-browser-runtime.ps1",
     "verify:lightpanda-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-lightpanda-runtime-manifest.ps1",
     "validate:skill": "python scripts/validate-agent-skill.py",
     "package:skill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-agent-skill.ps1",
@@ -27,7 +25,6 @@
     "sonner": "^2.0.8"
   },
   "devDependencies": {
-    "@playwright/mcp": "0.0.79",
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2.11.4",
     "@types/node": "^26.3.0",

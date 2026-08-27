@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_ACTION_TIMEOUT_MS: u64 = 10_000;
@@ -95,18 +93,6 @@ pub struct BrowserEmulation {
     pub has_touch: bool,
     pub user_agent: Option<String>,
     pub landscape: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct BrowserLaunchSpec {
-    pub session_id: String,
-    pub engine: BrowserEngine,
-    pub run_mode: BrowserRunMode,
-    pub profile_dir: PathBuf,
-    pub artifact_dir: PathBuf,
-    pub action_timeout_ms: u64,
-    pub navigation_timeout_ms: u64,
-    pub emulation: Option<BrowserEmulation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
