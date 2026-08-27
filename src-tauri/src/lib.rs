@@ -20,6 +20,9 @@ pub struct AppState {
     pub agent_policy: Arc<settings::AgentPolicyState>,
     pub agent_settings: Arc<settings::AgentSettingsController>,
     pub browser: Arc<browser::manager::BrowserManager>,
+    /// Root of the bundled Playwright runtime (resource dir, falling back to
+    /// the development checkout). Used for read-only runtime diagnostics.
+    pub browser_runtime: std::path::PathBuf,
 }
 
 /// Runtime UI behavior flags mirrored from [`settings::AppSettings`] so the
@@ -101,7 +104,7 @@ pub fn run() {
                 browser::manager::BrowserManager::with_playwright(
                     core.clone(),
                     dir.clone(),
-                    browser_runtime,
+                    browser_runtime.clone(),
                     &app_settings,
                 )
                 .map_err(|e| e.to_string())?,
@@ -119,6 +122,7 @@ pub fn run() {
                 agent_policy: agent_policy.clone(),
                 agent_settings,
                 browser,
+                browser_runtime,
             });
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 
@@ -185,6 +189,8 @@ pub fn run() {
             commands::connection_diagnostics,
             commands::get_app_settings,
             commands::update_app_settings,
+            commands::browser_runtime_status,
+            commands::reset_browser_profile,
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")

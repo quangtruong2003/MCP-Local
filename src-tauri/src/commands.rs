@@ -380,7 +380,9 @@ pub async fn update_app_settings(
         .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e.message))?;
     state
         .browser
-        .apply_settings(crate::browser::types::BrowserRuntimeSettings::from(&settings))
+        .apply_settings(crate::browser::types::BrowserRuntimeSettings::from(
+            &settings,
+        ))
         .await
         .map_err(err_string)?;
 
@@ -411,6 +413,170 @@ fn sync_launch_on_startup(app: &tauri::AppHandle, want: bool) -> Result<(), Stri
     } else {
         Ok(())
     }
+}
+
+/// Redacted browser runtime diagnostics for the Settings page (mirrors the
+/// `BrowserRuntimeStatus` TypeScript type). Security invariants: never
+/// contains an active page URL/title, history, cookies, or download
+/// filenames; only availability flags and bundled runtime versions.
+#[derive(Serialize)]
+pub struct BrowserRuntimeStatus {
+    pub enabled: bool,
+    pub running: bool,
+    pub configured_engine: settings::BrowserEngine,
+    pub run_mode: settings::BrowserRunMode,
+    pub bundled_chromium_available: bool,
+    pub chrome_available: bool,
+    pub edge_available: bool,
+    pub firefox_available: bool,
+    pub node_version: Option<String>,
+    pub playwright_mcp_version: Option<String>,
+    pub playwright_version: Option<String>,
+}
+
+/// Subset of `runtime-manifest.json` written by scripts/build-browser-runtime.ps1.
+/// Fields are optional so a partial/older manifest degrades to "unknown".
+#[derive(Debug, Default, serde::Deserialize)]
+struct RuntimeManifest {
+    #[serde(default)]
+    node_version: Option<String>,
+    #[serde(default)]
+    playwright_mcp_version: Option<String>,
+    #[serde(default)]
+    playwright_version: Option<String>,
+    #[serde(default)]
+    browser_entries: Vec<RuntimeManifestBrowserEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct RuntimeManifestBrowserEntry {
+    name: String,
+}
+
+/// Reads the bundled runtime manifest; a missing or invalid file yields `None`
+/// so diagnostics degrade gracefully instead of failing.
+fn read_runtime_manifest(runtime_root: &std::path::Path) -> Option<RuntimeManifest> {
+    let bytes = std::fs::read(runtime_root.join("runtime-manifest.json")).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+/// A bundled browser is available only when the manifest lists an entry with
+/// the expected prefix AND the matching `browsers/<name>` directory exists.
+fn bundled_browser_available(
+    manifest: Option<&RuntimeManifest>,
+    runtime_root: &std::path::Path,
+    entry_prefix: &str,
+) -> bool {
+    manifest.is_some_and(|manifest| {
+        manifest.browser_entries.iter().any(|entry| {
+            entry.name.starts_with(entry_prefix)
+                && runtime_root
+                    .join("browsers")
+                    .join(&entry.name)
+                    .is_dir()
+        })
+    })
+}
+
+const CHROME_INSTALL_RELATIVE: &str = "Google/Chrome/Application/chrome.exe";
+const EDGE_INSTALL_RELATIVE: &str = "Microsoft/Edge/Application/msedge.exe";
+
+/// Candidate install locations for a system browser channel, derived from the
+/// standard Windows roots. Pure function so tests can pin the roots.
+fn channel_install_candidates(
+    program_files: Option<&std::path::Path>,
+    program_files_x86: Option<&std::path::Path>,
+    local_app_data: Option<&std::path::Path>,
+    relative: &str,
+) -> Vec<std::path::PathBuf> {
+    [program_files, program_files_x86, local_app_data]
+        .into_iter()
+        .flatten()
+        .map(|root| root.join(relative))
+        .collect()
+}
+
+/// Filesystem-only probe for a system browser channel. Never starts a page or
+/// a browser process.
+fn system_channel_available(relative: &str) -> bool {
+    let program_files = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from);
+    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from);
+    let local_app_data = std::env::var_os("LocalAppData").map(std::path::PathBuf::from);
+    channel_install_candidates(
+        program_files.as_deref(),
+        program_files_x86.as_deref(),
+        local_app_data.as_deref(),
+        relative,
+    )
+    .iter()
+    .any(|path| path.is_file())
+}
+
+/// Assembles the redacted runtime status from the manager session state and
+/// the bundled runtime manifest. The manager's richer session status (which
+/// includes the active page URL/title) is intentionally narrowed here.
+async fn build_browser_runtime_status(state: &AppState) -> BrowserRuntimeStatus {
+    let session = state.browser.status().await;
+    let manifest = read_runtime_manifest(&state.browser_runtime);
+    BrowserRuntimeStatus {
+        enabled: session.enabled,
+        running: session.running,
+        configured_engine: session.configured_engine,
+        run_mode: session.run_mode,
+        bundled_chromium_available: bundled_browser_available(
+            manifest.as_ref(),
+            &state.browser_runtime,
+            "chromium-",
+        ),
+        chrome_available: system_channel_available(CHROME_INSTALL_RELATIVE),
+        edge_available: system_channel_available(EDGE_INSTALL_RELATIVE),
+        firefox_available: bundled_browser_available(
+            manifest.as_ref(),
+            &state.browser_runtime,
+            "firefox-",
+        ),
+        node_version: manifest.as_ref().and_then(|m| m.node_version.clone()),
+        playwright_mcp_version: manifest
+            .as_ref()
+            .and_then(|m| m.playwright_mcp_version.clone()),
+        playwright_version: manifest.as_ref().and_then(|m| m.playwright_version.clone()),
+    }
+}
+
+/// Redacted browser runtime diagnostics: reads the runtime manifest and probes
+/// Chrome/Edge channel availability without starting a page.
+#[tauri::command]
+pub async fn browser_runtime_status(
+    state: State<'_, AppState>,
+) -> Result<BrowserRuntimeStatus, String> {
+    Ok(build_browser_runtime_status(&state).await)
+}
+
+/// Desktop-only profile reset. Accepts the engine enum (never a filesystem
+/// path), stops any active browser first, then wipes and recreates exactly
+/// `<app-data>/browser/profiles/<engine>/` via the manager's canonicalized
+/// confinement check. Records a `source=ui` audit row and returns fresh
+/// runtime status.
+#[tauri::command]
+pub async fn reset_browser_profile(
+    engine: settings::BrowserEngine,
+    state: State<'_, AppState>,
+) -> Result<BrowserRuntimeStatus, String> {
+    let profile = state.browser.profile_dir_for(engine);
+    state
+        .browser
+        .reset_profile(engine)
+        .await
+        .map_err(err_string)?;
+    audit_ui(
+        &state.core.db,
+        None,
+        "reset_browser_profile",
+        None,
+        Some(&profile.display().to_string()),
+        Some(serde_json::json!({ "engine": engine })),
+    );
+    Ok(build_browser_runtime_status(&state).await)
 }
 
 #[cfg(test)]
@@ -477,5 +643,115 @@ mod tests {
         assert_eq!(obj.len(), 2, "shape must be exactly {{code,message}}");
         assert_eq!(parsed["code"], "SIDECAR_NOT_FOUND");
         assert_eq!(parsed["message"], "sidecar binary missing");
+    }
+
+    fn write_manifest(dir: &std::path::Path, json: &str) {
+        std::fs::write(dir.join("runtime-manifest.json"), json).unwrap();
+    }
+
+    #[test]
+    fn runtime_manifest_versions_and_entries_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{
+                "node_version": "24.19.0",
+                "playwright_mcp_version": "0.0.79",
+                "playwright_version": "1.57.0",
+                "platform": "windows-x64",
+                "browser_entries": [{"name": "chromium-1200"}, {"name": "firefox-1475"}]
+            }"#,
+        );
+        let manifest = read_runtime_manifest(dir.path()).unwrap();
+        assert_eq!(manifest.node_version.as_deref(), Some("24.19.0"));
+        assert_eq!(manifest.playwright_mcp_version.as_deref(), Some("0.0.79"));
+        assert_eq!(manifest.playwright_version.as_deref(), Some("1.57.0"));
+        assert_eq!(manifest.browser_entries.len(), 2);
+    }
+
+    #[test]
+    fn missing_or_invalid_manifest_degrades_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_runtime_manifest(dir.path()).is_none());
+        write_manifest(dir.path(), "{not json");
+        assert!(read_runtime_manifest(dir.path()).is_none());
+    }
+
+    #[test]
+    fn bundled_availability_requires_manifest_entry_and_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(
+            dir.path(),
+            r#"{"browser_entries": [{"name": "chromium-1200"}]}"#,
+        );
+        let manifest = read_runtime_manifest(dir.path()).unwrap();
+        // Entry listed but the browser directory is missing -> not available.
+        assert!(!bundled_browser_available(
+            Some(&manifest),
+            dir.path(),
+            "chromium-"
+        ));
+        // No manifest at all -> not available.
+        assert!(!bundled_browser_available(None, dir.path(), "chromium-"));
+        // Entry plus matching directory -> available; other prefixes stay false.
+        std::fs::create_dir_all(dir.path().join("browsers").join("chromium-1200")).unwrap();
+        assert!(bundled_browser_available(
+            Some(&manifest),
+            dir.path(),
+            "chromium-"
+        ));
+        assert!(!bundled_browser_available(
+            Some(&manifest),
+            dir.path(),
+            "firefox-"
+        ));
+    }
+
+    #[test]
+    fn channel_candidates_cover_standard_windows_locations() {
+        use std::path::Path;
+        let candidates = channel_install_candidates(
+            Some(Path::new("C:/Program Files")),
+            Some(Path::new("C:/Program Files (x86)")),
+            Some(Path::new("C:/Users/u/AppData/Local")),
+            CHROME_INSTALL_RELATIVE,
+        );
+        assert!(candidates
+            .iter()
+            .any(|p| p.ends_with("Google/Chrome/Application/chrome.exe")));
+        assert_eq!(candidates.len(), 3);
+
+        let edge = channel_install_candidates(
+            Some(Path::new("C:/Program Files")),
+            None,
+            None,
+            EDGE_INSTALL_RELATIVE,
+        );
+        assert_eq!(edge.len(), 1);
+        assert!(edge[0].ends_with("Microsoft/Edge/Application/msedge.exe"));
+    }
+
+    #[test]
+    fn runtime_status_json_never_carries_page_or_file_fields() {
+        let status = BrowserRuntimeStatus {
+            enabled: true,
+            running: true,
+            configured_engine: settings::BrowserEngine::BundledChromium,
+            run_mode: settings::BrowserRunMode::Background,
+            bundled_chromium_available: true,
+            chrome_available: false,
+            edge_available: false,
+            firefox_available: true,
+            node_version: Some("24.19.0".into()),
+            playwright_mcp_version: Some("0.0.79".into()),
+            playwright_version: Some("1.57.0".into()),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        for forbidden in ["url", "title", "history", "cookie", "filename", "download"] {
+            assert!(
+                !json.to_ascii_lowercase().contains(forbidden),
+                "runtime status leaks '{forbidden}': {json}"
+            );
+        }
     }
 }

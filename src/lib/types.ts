@@ -26,6 +26,24 @@ export interface AppSettings {
   browser_run_mode: BrowserRunMode;
 }
 
+/**
+ * Redacted browser runtime diagnostics from `browser_runtime_status`.
+ * Never contains active URLs, history, cookies, or download filenames.
+ */
+export interface BrowserRuntimeStatus {
+  enabled: boolean;
+  running: boolean;
+  configured_engine: BrowserEngine;
+  run_mode: BrowserRunMode;
+  bundled_chromium_available: boolean;
+  chrome_available: boolean;
+  edge_available: boolean;
+  firefox_available: boolean;
+  node_version: string | null;
+  playwright_mcp_version: string | null;
+  playwright_version: string | null;
+}
+
 // --- Backend contracts (mirror crates/core/src/models.rs serde output) ---
 
 export type ExecutionMode = "approved_commands" | "full_powershell";

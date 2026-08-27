@@ -4,6 +4,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import type {
   AppError,
   AppSettings,
+  BrowserEngine,
+  BrowserRuntimeStatus,
   ConnectionStatus,
   DiagnosticsReport,
   ExecutionMode,
@@ -13,6 +15,9 @@ import type {
 export type {
   AppError,
   AppSettings,
+  BrowserEngine,
+  BrowserRunMode,
+  BrowserRuntimeStatus,
   ConnectionStatus,
   ConnectionState,
   DiagnosticsReport,
@@ -94,6 +99,11 @@ export const api = {
   getAppSettings: () => invoke<AppSettings>("get_app_settings"),
   updateAppSettings: (settings: AppSettings) =>
     invoke<AppSettings>("update_app_settings", { settings }),
+
+  // Browser automation diagnostics & maintenance
+  browserRuntimeStatus: () => invoke<BrowserRuntimeStatus>("browser_runtime_status"),
+  resetBrowserProfile: (engine: BrowserEngine) =>
+    invoke<BrowserRuntimeStatus>("reset_browser_profile", { engine }),
 
   /**
    * Opens a URL in the system browser. The Tauri opener capability restricts
