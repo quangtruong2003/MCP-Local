@@ -139,8 +139,13 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
     ));
     let driver = Arc::new(PlaywrightMcpDriver::new(runtime_root()));
     let browser = Arc::new(
-        BrowserManager::new(core.clone(), app_data_dir.clone(), &settings, driver.clone())
-            .expect("browser manager"),
+        BrowserManager::new(
+            core.clone(),
+            app_data_dir.clone(),
+            &settings,
+            driver.clone(),
+        )
+        .expect("browser manager"),
     );
     let capture: Arc<dyn ScreenCaptureProvider> = Arc::new(EmptyCapture);
 
@@ -169,11 +174,12 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
         axum::serve(listener, app).await.expect("serve mcp");
     });
 
-    let client = ().serve(StreamableHttpClientTransport::from_uri(format!(
-        "http://127.0.0.1:{port}/mcp"
-    )))
-    .await
-    .expect("mcp client");
+    let client = ()
+        .serve(StreamableHttpClientTransport::from_uri(format!(
+            "http://127.0.0.1:{port}/mcp"
+        )))
+        .await
+        .expect("mcp client");
 
     RealEnv {
         client,
@@ -308,9 +314,7 @@ async fn evaluate(client: &Client, expression: &str) -> Value {
     .await;
     assert_ok(&result, "browser_evaluate");
     let content = structured(&result);
-    let raw = content["result"]
-        .as_str()
-        .expect("evaluate result text");
+    let raw = content["result"].as_str().expect("evaluate result text");
     parse_evaluate_result(raw)
 }
 
@@ -498,8 +502,10 @@ mod win32 {
         let mut pairs: Vec<(u32, u32)> = Vec::new(); // (pid, parent_pid)
         unsafe {
             if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-                let mut entry = PROCESSENTRY32W::default();
-                entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+                let mut entry = PROCESSENTRY32W {
+                    dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+                    ..Default::default()
+                };
                 if Process32FirstW(snapshot, &mut entry).is_ok() {
                     loop {
                         pairs.push((entry.th32ProcessID, entry.th32ParentProcessID));
@@ -605,9 +611,17 @@ async fn real_background_lifecycle_navigation_interaction() {
     assert_eq!(result_text, "result:name=honey,color=green");
 
     // Assert known console messages (info level includes warning + error).
-    let console = call(client, "browser_console", json!({ "level": "info", "limit": 200 })).await;
+    let console = call(
+        client,
+        "browser_console",
+        json!({ "level": "info", "limit": 200 }),
+    )
+    .await;
     assert_ok(&console, "browser_console");
-    let messages = structured(&console)["messages"].as_str().unwrap_or_default().to_string();
+    let messages = structured(&console)["messages"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(
         messages.contains("api-ping-complete"),
         "missing api-ping-complete in console:\n{messages}"
@@ -624,7 +638,10 @@ async fn real_background_lifecycle_navigation_interaction() {
     // Assert network metadata for the successful and failing API routes.
     let network = call(client, "browser_network", json!({ "limit": 200 })).await;
     assert_ok(&network, "browser_network");
-    let requests = structured(&network)["requests"].as_str().unwrap_or_default().to_string();
+    let requests = structured(&network)["requests"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
     assert!(
         network_has(&requests, "/api/ping", "200"),
         "missing /api/ping 200 in network:\n{requests}"
@@ -761,8 +778,14 @@ async fn real_responsive_screenshot_trace() {
     assert_ok(&trace_stop, "browser_trace stop");
     let stop = structured(&trace_stop);
     assert_eq!(stop["tracing"], false);
-    let artifact_id = stop["artifact_id"].as_str().expect("artifact_id").to_string();
-    assert!(artifact_id.starts_with("a-"), "opaque artifact id: {artifact_id}");
+    let artifact_id = stop["artifact_id"]
+        .as_str()
+        .expect("artifact_id")
+        .to_string();
+    assert!(
+        artifact_id.starts_with("a-"),
+        "opaque artifact id: {artifact_id}"
+    );
     assert!(stop["files"].as_u64().unwrap() > 0, "trace files recorded");
     assert!(stop["bytes"].as_u64().unwrap() > 0, "trace bytes recorded");
 
@@ -978,7 +1001,7 @@ async fn real_background_no_visible_window() {
         "process tree must contain the root pid"
     );
     assert!(
-        tree.len() >= 1,
+        !tree.is_empty(),
         "process tree should include the browser child processes"
     );
 
@@ -1070,7 +1093,11 @@ async fn real_crash_ambiguous_click_no_replay() {
     while Instant::now() < deadline && fixture_count(&fixture).await < 1 {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert_eq!(fixture_count(&fixture).await, 1, "first click executed once");
+    assert_eq!(
+        fixture_count(&fixture).await,
+        1,
+        "first click executed once"
+    );
 
     // Crash the browser, then attempt an ambiguous second click.
     let killed = env.driver.test_terminate_child().await.expect("kill child");
@@ -1148,8 +1175,11 @@ async fn real_firefox_core_and_devtools_unsupported() {
         last_status = format!("fill_ok={fill_ok} click_ok={click_ok}");
         // Give the DOM a beat, then read the effect.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        if let Some(text) =
-            try_evaluate_str(client, "() => document.getElementById('result').textContent").await
+        if let Some(text) = try_evaluate_str(
+            client,
+            "() => document.getElementById('result').textContent",
+        )
+        .await
         {
             result_text = text.clone();
             if text == EXPECTED_RESULT {

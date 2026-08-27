@@ -35,7 +35,7 @@ npx tauri dev
 npx tauri build
 ```
 
-Artifacts land under `src-tauri/target/release/` (executable) and `src-tauri/target/release/bundle/nsis/` (installer).
+Artifacts land under `target/release/` (executable) and `target/release/bundle/nsis/` (installer).
 
 ### Sidecar binaries
 
@@ -58,15 +58,29 @@ The system tray mirrors the essentials: open the window, start/stop the tunnel, 
 
 ## MCP tool surface
 
-Thirteen tools are exposed. `get_agent_policy` reports live Agent/Privacy state; `list_workspaces` returns approved workspace ids without absolute paths. The nine workspace-scoped file/execution tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), `apply_patch`, `run_command` (approved basenames: git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet), and `run_powershell` (requires the workspace's Full PowerShell mode unless unrestricted access is enabled). `list_capture_targets` and `capture_screen` provide permission-gated visual evidence. Read tools return bounded results (`read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` (sha256) that `apply_patch` requires as `base_revision`.
+Forty-three tools are exposed. `get_agent_policy` reports live Agent/Privacy state; `list_workspaces` returns approved workspace ids without absolute paths. The nine workspace-scoped file/execution tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), `apply_patch`, `run_command` (approved basenames: git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet), and `run_powershell` (requires the workspace's Full PowerShell mode unless unrestricted access is enabled). `list_capture_targets` and `capture_screen` provide permission-gated visual evidence. Read tools return bounded results (`read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` (sha256) that `apply_patch` requires as `base_revision`.
 
 `capture_screen` returns one in-memory PNG image block plus dimensions, encoded byte count, and SHA-256 metadata. Screen capture is off by default, has its own permission independent of unrestricted filesystem/execution access, can be limited to windows only, and is always blocked by Pause.
+
+## Browser automation
+
+The app can drive a real browser on the agent's behalf — navigate, click, fill, read the accessibility snapshot/DOM, capture screenshots, collect console and network diagnostics, record traces, and upload/download files — through the same fail-closed policy pipeline as the file and command tools. A dedicated family of `browser_*` tools covers interaction, inspection, visual evidence, debugging, file transfer, and batched steps.
+
+- **On by default, one toggle**: Browser Automation defaults **ON** but can be disabled with a single Settings toggle. When off, every browser tool fails closed with a clear blocker.
+- **Bundled Chromium + dedicated profile**: the defaults are bundled Chromium and a dedicated **Local Workspaces** browser profile stored inside the app's own data folder — completely separate from your personal browser profile, bookmarks, passwords, and history.
+- **Background mode (default)**: runs in the background and does **not** open a normal browser window.
+- **Visible Debug (opt-in)**: can show a Chromium-family browser window plus DevTools for step-by-step debugging.
+- **Screenshots are page-renderer captures**: browser screenshots come from the page renderer and are independent of the OS Screen Capture permission.
+- **Files stay confined**: uploads and downloads remain sandbox/workspace-confined; downloads land in the session artifact store and reach a workspace only through an explicit, policy-checked export step.
+- **Pause wins**: Pause blocks browser automation immediately, just like every other MCP tool.
+
+**Installer size impact**: the release stages a self-contained browser runtime — bundled Node, Playwright MCP, and matching Chromium and Firefox binaries (a **~1.1 GiB** staged runtime) — so the installer and installed footprint are substantially larger than a non-browser build.
 
 ## Agent Skill and fallback prompts
 
 The repository ships a first-class Agent Skill at `plugin/skills/local-workspace-agent/`. `npm run package:skill` produces `dist/local-workspace-agent.zip`, which can be uploaded in ChatGPT from **Plugins → Skills → Create → Upload from your computer** when skill uploading is enabled for the account/workspace. The Skill teaches the `DISCOVER → PLAN → INSPECT → ACT → VERIFY → RECOVER → REPORT` workflow and composes the Local Workspaces MCP app; it does not grant authority.
 
-The MCP server also publishes the same operating contract as fallback initialization instructions and exposes five prompts: `agent-task`, `explore-project`, `implement-change`, `debug-fix`, and `review-verify`. This keeps compatible MCP hosts useful even when they do not load the first-class Skill.
+The MCP server also publishes the same operating contract as fallback initialization instructions and exposes six prompts: `agent-task`, `explore-project`, `implement-change`, `debug-fix`, `debug-web`, and `review-verify`. This keeps compatible MCP hosts useful even when they do not load the first-class Skill.
 
 Pause, workspace capabilities, path confinement, sensitive-file policy, execution policy, screen-capture authorization, and fail-closed MCP audit remain backend-enforced. The local MCP server intentionally stays on `127.0.0.1:<ephemeral>/mcp`; Tailscale Funnel publishes the secret capability endpoint used by the ChatGPT app.
 

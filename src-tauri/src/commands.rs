@@ -470,10 +470,7 @@ fn bundled_browser_available(
     manifest.is_some_and(|manifest| {
         manifest.browser_entries.iter().any(|entry| {
             entry.name.starts_with(entry_prefix)
-                && runtime_root
-                    .join("browsers")
-                    .join(&entry.name)
-                    .is_dir()
+                && runtime_root.join("browsers").join(&entry.name).is_dir()
         })
     })
 }

@@ -166,10 +166,7 @@ pub async fn spawn() -> Fixture {
         .route("/api/ping", get(ping))
         .route("/api/fail", get(fail))
         .route("/download.txt", get(download))
-        .route(
-            "/api/count",
-            get(count_get).post(count_post),
-        )
+        .route("/api/count", get(count_get).post(count_post))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
