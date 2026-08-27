@@ -508,6 +508,11 @@ pub struct BrowserRuntimeManager {
 /// after import (rootfs already ships it; idempotent by design).
 const RUNTIME_DIRS_FRAGMENT: &str = "mkdir -p /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts /opt/local-workspaces/lightpanda && chown -R localworkspaces:localworkspaces /var/lib/local-workspaces /opt/local-workspaces/lightpanda";
 
+/// Fixed shell fragment for Reset Browser Data: removes only the browser
+/// profile/cookies/cache/artifacts directories and recreates them with the
+/// runtime user as owner. Never touches the distro or the Lightpanda binary.
+const RESET_BROWSER_DATA_FRAGMENT: &str = "rm -rf /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts && mkdir -p /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts && chown -R localworkspaces:localworkspaces /var/lib/local-workspaces/browser";
+
 impl BrowserRuntimeManager {
     pub fn new(
         runner: Arc<dyn WslCommandRunner>,
@@ -588,6 +593,76 @@ impl BrowserRuntimeManager {
     /// rebuild the owned distro only when it cannot be repaired in place.
     pub async fn repair_runtime(&self) -> Result<RuntimeProvisionState, CoreError> {
         self.ensure_inner(true).await
+    }
+
+    /// Read-only snapshot of the persisted runtime state for redacted desktop
+    /// diagnostics. Never spawns a process or mutates anything.
+    pub fn state_snapshot(&self) -> Option<RuntimeStateFile> {
+        self.current.try_lock().ok().map(|guard| guard.clone())
+    }
+
+    /// Desktop-only Reset Browser Data: removes only the browser profile,
+    /// cookies, cache, and artifacts inside the verified owned distro and
+    /// recreates clean directories with the correct owner. Never removes the
+    /// distro itself or the Lightpanda binary. Fails closed when the runtime
+    /// is not provisioned or ownership cannot be fully verified.
+    pub async fn reset_browser_data(&self) -> Result<(), CoreError> {
+        let _serialization = self.provision_lock.lock().await;
+        let identity = self.owned_identity().await?;
+        self.exec_sh(
+            &identity.distro_name,
+            RESET_BROWSER_DATA_FRAGMENT,
+            None,
+            "reset browser data",
+        )
+        .await
+    }
+
+    /// Desktop-only Remove Browser Runtime: unregisters the owned distro and
+    /// deletes the app-owned WSL install directory and cached artifacts after
+    /// full ownership verification. The install id and Browser Automation
+    /// toggle are preserved; the next browser use provisions again. Fails
+    /// closed when ownership cannot be fully verified.
+    pub async fn remove_runtime(&self) -> Result<(), CoreError> {
+        let _serialization = self.provision_lock.lock().await;
+        let snapshot = self.current.lock().await.clone();
+        if let Some(identity) = &snapshot.distro {
+            let marker = self.adapter.read_marker(&identity.distro_name).await?;
+            verify_ownership(identity, marker.as_ref(), &identity.install_dir)?;
+            self.adapter
+                .unregister_owned(identity, marker.as_ref(), &identity.install_dir)
+                .await?;
+        }
+        // Only reached after ownership verification (or when no distro was
+        // recorded): delete exactly the app-owned runtime directories.
+        for dir in [&self.wsl_dir, &self.staging_dir] {
+            if dir.exists() {
+                std::fs::remove_dir_all(dir).map_err(CoreError::io)?;
+            }
+        }
+        let mut current = self.current.lock().await;
+        current.state = RuntimeProvisionState::Uninitialized;
+        current.distro = None;
+        current.distro_image_version = None;
+        current.lightpanda_version = None;
+        current.reason = None;
+        Self::persist_state(&self.wsl_dir, &current);
+        Ok(())
+    }
+
+    /// Resolves the owned distro identity with full ownership verification,
+    /// failing closed when the runtime is unprovisioned or not app-owned.
+    async fn owned_identity(&self) -> Result<ManagedDistroIdentity, CoreError> {
+        let snapshot = self.current.lock().await.clone();
+        let identity = snapshot.distro.ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserRuntimeNotReady,
+                "browser runtime is not provisioned yet",
+            )
+        })?;
+        let marker = self.adapter.read_marker(&identity.distro_name).await?;
+        verify_ownership(&identity, marker.as_ref(), &identity.install_dir)?;
+        Ok(identity)
     }
 
     async fn ensure_inner(&self, force_rebuild: bool) -> Result<RuntimeProvisionState, CoreError> {
@@ -1090,6 +1165,7 @@ mod tests {
         lightpanda_installed: bool,
         lightpanda_digest: String,
         symlink_switched: bool,
+        browser_data_reset: bool,
     }
 
     struct ScriptedRunner {
@@ -1194,6 +1270,9 @@ mod tests {
                                     )
                                 })?;
                         world.marker = Some(marker);
+                        Ok(out(0, "", ""))
+                    } else if fragment.starts_with("rm -rf /var/lib/local-workspaces/browser") {
+                        world.browser_data_reset = true;
                         Ok(out(0, "", ""))
                     } else if fragment.contains("wsl.conf")
                         || fragment.contains("mkdir -p /var/lib/local-workspaces")
@@ -1369,6 +1448,7 @@ mod tests {
             lightpanda_installed: true,
             lightpanda_digest: TEST_LP_SHA.to_string(),
             symlink_switched: true,
+            browser_data_reset: false,
         }
     }
 
@@ -1718,6 +1798,138 @@ mod tests {
         assert!(!calls_contain(&calls, "--import"));
         // Digest restored to the pinned value.
         assert_eq!(world_ref.lock().await.lightpanda_digest, TEST_LP_SHA);
+    }
+
+    // --- desktop-only data reset / runtime removal ------------------------------
+
+    async fn provisioned_manager(
+        tmp: &Path,
+    ) -> (
+        Arc<BrowserRuntimeManager>,
+        Arc<Mutex<FakeWorld>>,
+        Arc<Mutex<Vec<Vec<String>>>>,
+    ) {
+        let world = healthy_world();
+        let (runner, calls, world_ref) = ScriptedRunner::new(world);
+        let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
+        let (manager, _smoke_calls) = build_manager(tmp, runner, downloader, true);
+        let install_id = manager.install_id_for_test().await;
+        world_ref.lock().await.marker = Some(OwnershipMarker::new(install_id));
+        manager.seed_identity_for_test().await;
+        manager.ensure_runtime().await.unwrap();
+        (manager, world_ref, calls)
+    }
+
+    #[tokio::test]
+    async fn reset_browser_data_clears_owned_distro_data_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (manager, world_ref, calls) = provisioned_manager(tmp.path()).await;
+
+        manager.reset_browser_data().await.unwrap();
+
+        let world = world_ref.lock().await;
+        assert!(world.browser_data_reset, "reset fragment never ran");
+        // The distro, marker, and Lightpanda binary all survive the reset.
+        assert_eq!(world.distros.len(), 1);
+        assert!(world.marker.is_some());
+        assert!(world.lightpanda_installed);
+        drop(world);
+        let calls = calls.lock().await.clone();
+        assert!(!calls_contain(&calls, "--unregister"));
+        assert_eq!(manager.current_state(), RuntimeProvisionState::Ready);
+    }
+
+    #[tokio::test]
+    async fn reset_browser_data_fails_closed_when_not_provisioned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = FakeWorld {
+            wsl_installed: true,
+            ..Default::default()
+        };
+        let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
+        let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
+        let (manager, _smoke_calls) = build_manager(tmp.path(), runner, downloader, true);
+
+        let err = manager.reset_browser_data().await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserRuntimeNotReady);
+    }
+
+    #[tokio::test]
+    async fn reset_browser_data_fails_closed_on_ownership_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = healthy_world();
+        let (runner, calls, world_ref) = ScriptedRunner::new(world);
+        let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
+        let (manager, _smoke_calls) = build_manager(tmp.path(), runner, downloader, true);
+        // Marker belongs to a different install: never treated as owned.
+        world_ref.lock().await.marker = Some(OwnershipMarker::new("other-install".to_string()));
+        manager.seed_identity_for_test().await;
+
+        let err = manager.reset_browser_data().await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserWslDistroConflict);
+        assert!(!world_ref.lock().await.browser_data_reset);
+        assert!(calls
+            .lock()
+            .await
+            .iter()
+            .all(|argv| !argv.iter().any(|a| a.starts_with("rm -rf"))));
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_unregisters_owned_distro_and_clears_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (manager, world_ref, calls) = provisioned_manager(tmp.path()).await;
+        let install_id = manager.install_id_for_test().await;
+        // Cached runtime artifacts exist before removal.
+        std::fs::create_dir_all(tmp.path().join("staging")).unwrap();
+        std::fs::write(tmp.path().join("staging").join("artifact"), b"x").unwrap();
+
+        manager.remove_runtime().await.unwrap();
+
+        assert!(
+            world_ref.lock().await.distros.is_empty(),
+            "owned distro must be unregistered"
+        );
+        let calls = calls.lock().await.clone();
+        assert!(calls_contain(&calls, "--unregister"));
+        // App-owned directories are gone; state file is re-created reset.
+        assert!(!tmp.path().join("staging").exists());
+        let state_file = tmp.path().join("wsl").join(RUNTIME_STATE_FILE);
+        let persisted: RuntimeStateFile =
+            serde_json::from_slice(&std::fs::read(&state_file).unwrap()).unwrap();
+        assert_eq!(persisted.state, RuntimeProvisionState::Uninitialized);
+        assert!(persisted.distro.is_none());
+        assert!(persisted.lightpanda_version.is_none());
+        // Install id survives so the next provisioning round stays
+        // collision-safe under the same identity.
+        assert_eq!(persisted.install_id, install_id);
+        assert_eq!(
+            manager.current_state(),
+            RuntimeProvisionState::Uninitialized
+        );
+        assert!(manager.distro_identity().is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_runtime_fails_closed_on_ownership_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = healthy_world();
+        let (runner, calls, world_ref) = ScriptedRunner::new(world);
+        let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
+        let (manager, _smoke_calls) = build_manager(tmp.path(), runner, downloader, true);
+        world_ref.lock().await.marker = Some(OwnershipMarker::new("other-install".to_string()));
+        manager.seed_identity_for_test().await;
+
+        let err = manager.remove_runtime().await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserWslDistroConflict);
+        // Nothing was unregistered or deleted.
+        assert_eq!(world_ref.lock().await.distros.len(), 1);
+        assert!(calls
+            .lock()
+            .await
+            .iter()
+            .all(|argv| !argv.iter().any(|a| a == "--unregister")));
+        assert!(manager.distro_identity().is_some());
     }
 
     impl BrowserRuntimeManager {

@@ -45,9 +45,12 @@ const UNRESTRICTED_BODY =
   "Every workspace loses its guards: ANY file becomes readable and editable (including .env, *.pem, *.key), ANY installed program can run, full PowerShell is always available, and execution bounds are lifted (timeouts up to 24 hours, 32 MiB of output per stream). The folder boundary, the Pause kill switch and the audit log stay in force. Only enable this if you fully trust the conversations you use it in.";
 const UNRESTRICTED_KEYWORD = "UNRESTRICTED";
 
-const PROFILE_RESET_TITLE = "Reset the automation browser profile?";
-const PROFILE_SEPARATION_COPY =
-  "Automation always runs in a dedicated Local Workspaces profile, stored inside the app's own data folder. It is completely separate from your personal browser profile, bookmarks, passwords and history.";
+const RESET_DATA_TITLE = "Reset browser data?";
+const RESET_DATA_BODY =
+  "This stops any running automation pages, then removes the browser profile, cookies, cache and artifacts stored inside the managed Local Workspaces Linux runtime. The runtime itself stays installed. Your personal browser and data are not touched.";
+const REMOVE_RUNTIME_TITLE = "Remove the browser runtime?";
+const REMOVE_RUNTIME_BODY =
+  "This stops any running automation pages, unregisters the managed Local Workspaces Linux runtime from WSL, and deletes its app-owned files. Browser Automation stays switched on; the runtime will be set up again the next time a browser session starts.";
 
 /** Middle-truncates to roughly `max` characters for display. */
 function elide(text: string, max = 40): string {
@@ -106,8 +109,11 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
   }
 
   const [browserStatus, setBrowserStatus] = useState<BrowserRuntimeStatus | null>(null);
-  const [resetProfileOpen, setResetProfileOpen] = useState(false);
-  const [resettingProfile, setResettingProfile] = useState(false);
+  const [runtimeBusy, setRuntimeBusy] = useState(false);
+  const [resetDataOpen, setResetDataOpen] = useState(false);
+  const [resettingData, setResettingData] = useState(false);
+  const [removeRuntimeOpen, setRemoveRuntimeOpen] = useState(false);
+  const [removingRuntime, setRemovingRuntime] = useState(false);
 
   async function updateBrowserSettings(
     patch: Partial<Pick<AppSettings, "browser_automation_enabled">>,
@@ -120,19 +126,50 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
     }
   }
 
-  async function confirmResetProfile() {
-    if (!settings || resettingProfile) return;
-    setResettingProfile(true);
+  async function runRuntimeAction(action: () => Promise<BrowserRuntimeStatus>) {
     try {
-      // The backend accepts a fixed bundled engine identity; user engine
-      // selection was removed with the v6 settings schema.
-      const status = await api.resetBrowserProfile("bundled_chromium");
-      setBrowserStatus(status);
-      setResetProfileOpen(false);
+      setBrowserStatus(await action());
     } catch (err) {
       reportError(parseErrorMessage(err));
+      // Refresh status so the card reflects the resulting provision state.
+      api
+        .browserRuntimeStatus()
+        .then(setBrowserStatus)
+        .catch(() => {});
+    }
+  }
+
+  async function setupOrRepairRuntime() {
+    if (runtimeBusy) return;
+    setRuntimeBusy(true);
+    try {
+      await runRuntimeAction(
+        browserStatus?.distro_ready ? api.repairBrowserRuntime : api.setupBrowserRuntime,
+      );
     } finally {
-      setResettingProfile(false);
+      setRuntimeBusy(false);
+    }
+  }
+
+  async function confirmResetData() {
+    if (resettingData) return;
+    setResettingData(true);
+    try {
+      await runRuntimeAction(api.resetBrowserData);
+      setResetDataOpen(false);
+    } finally {
+      setResettingData(false);
+    }
+  }
+
+  async function confirmRemoveRuntime() {
+    if (removingRuntime) return;
+    setRemovingRuntime(true);
+    try {
+      await runRuntimeAction(api.removeBrowserRuntime);
+      setRemoveRuntimeOpen(false);
+    } finally {
+      setRemovingRuntime(false);
     }
   }
 
@@ -202,37 +239,36 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
 
   const fqdn = connection?.state.state === "online" ? connection.state.fqdn : null;
 
-  // Engine availability from backend diagnostics; `undefined` while loading.
-  // Engine selection was removed from settings (v6); these flags are shown as
-  // read-only diagnostics until the Lightpanda runtime replaces them.
-  const engineAvailability = {
-    bundled_chromium: browserStatus?.bundled_chromium_available,
-    chrome: browserStatus?.chrome_available,
-    edge: browserStatus?.edge_available,
-    firefox: browserStatus?.firefox_available,
-  };
-  const browserStateLabel = !browserStatus
-    ? "Checking…"
-    : !browserStatus.enabled
-      ? "Disabled"
-      : browserStatus.running
-        ? "Running"
-        : "Not running";
-  const runtimeVersions = !browserStatus
-    ? "Checking…"
-    : [
-        browserStatus.node_version ? `Node ${browserStatus.node_version}` : null,
-        browserStatus.playwright_mcp_version
-          ? `Playwright MCP ${browserStatus.playwright_mcp_version}`
-          : null,
-        browserStatus.playwright_version ? `Playwright ${browserStatus.playwright_version}` : null,
-      ]
-        .filter(Boolean)
-        .join(" · ") || "Runtime manifest unavailable";
-
-  function availabilityLabel(available: boolean | undefined): string {
-    if (available === undefined) return "Checking…";
-    return available ? "Available" : "Not available";
+  // Runtime provision label from redacted diagnostics; `null` while loading.
+  function runtimeStateLabel(status: BrowserRuntimeStatus): string {
+    switch (status.runtime_state) {
+      case "ready":
+        return status.running ? "Ready · running" : "Ready";
+      case "checking_host":
+        return "Checking…";
+      case "wsl_install_required":
+        return "WSL install required";
+      case "installing_wsl":
+        return "Installing WSL…";
+      case "reboot_required":
+        return "Windows restart required";
+      case "distro_install_required":
+        return "Linux runtime install required";
+      case "installing_distro":
+        return "Installing Linux runtime…";
+      case "lightpanda_install_required":
+        return "Lightpanda install required";
+      case "installing_lightpanda":
+        return "Installing Lightpanda…";
+      case "verifying_runtime":
+        return "Verifying runtime…";
+      case "repair_required":
+        return "Repair required";
+      case "unsupported_host":
+        return "Unsupported host";
+      default:
+        return "Setup required";
+    }
   }
 
   return (
@@ -354,7 +390,8 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
           <div>
             <h2 className="text-sm font-semibold">Browser Automation</h2>
             <p className="text-[13px] text-muted-foreground">
-              Background browser automation for agents, with a dedicated profile.
+              Background browser automation for agents, running on Lightpanda inside a managed
+              WSL2 runtime.
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -374,50 +411,65 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
         </div>
         <ul className="flex flex-col divide-y">
           <li className="flex items-center justify-between gap-3 py-2 text-sm first:pt-0">
-            <span>Status</span>
-            <strong className="text-right font-medium">{browserStateLabel}</strong>
+            <span>Backend</span>
+            <strong className="text-right font-medium">Lightpanda (WSL2)</strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm">
-            <span>Bundled Chromium</span>
-            <strong className="text-right font-medium">
-              {availabilityLabel(engineAvailability.bundled_chromium)}
-            </strong>
+            <span>Mode</span>
+            <strong className="text-right font-medium">Background</strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm">
-            <span>Chrome (system)</span>
+            <span>Runtime status</span>
             <strong className="text-right font-medium">
-              {availabilityLabel(engineAvailability.chrome)}
-            </strong>
-          </li>
-          <li className="flex items-center justify-between gap-3 py-2 text-sm">
-            <span>Edge (system)</span>
-            <strong className="text-right font-medium">
-              {availabilityLabel(engineAvailability.edge)}
-            </strong>
-          </li>
-          <li className="flex items-center justify-between gap-3 py-2 text-sm">
-            <span>Firefox (bundled)</span>
-            <strong className="text-right font-medium">
-              {availabilityLabel(engineAvailability.firefox)}
+              {browserStatus ? runtimeStateLabel(browserStatus) : "Checking…"}
             </strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm last:pb-0">
-            <span>Bundled runtime</span>
-            <strong className="text-right font-medium">{runtimeVersions}</strong>
+            <span>Lightpanda</span>
+            <strong className="text-right font-medium">
+              {browserStatus?.lightpanda_version ?? "—"}
+            </strong>
           </li>
         </ul>
-        <div className="flex items-start justify-between gap-4 rounded-md border p-3">
-          <div>
-            <Label>Dedicated Local Workspaces profile</Label>
-            <p className="mt-1 text-[13px] text-muted-foreground">{PROFILE_SEPARATION_COPY}</p>
-          </div>
+        <div className="rounded-md border p-3">
+          <Label>Capabilities</Label>
+          <ul className="mt-1 flex flex-col gap-1 text-[13px] text-muted-foreground">
+            <li>Semantic browser automation over a private native MCP channel</li>
+            <li>No visual rendering or screenshots</li>
+            <li>No file upload, managed downloads, dialogs, or device emulation</li>
+          </ul>
+        </div>
+        {browserStatus?.reboot_required ? (
+          <p role="alert" className="flex items-start gap-1.5 text-[13px] text-warning">
+            <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+            Windows Subsystem for Linux was installed. Restart Windows, then return here and
+            choose Set up runtime again to finish.
+          </p>
+        ) : null}
+        <div className="flex flex-wrap items-center gap-2">
           <Button
             variant="secondary"
-            className="shrink-0"
-            disabled={!settings || resettingProfile}
-            onClick={() => setResetProfileOpen(true)}
+            disabled={!settings || runtimeBusy || !browserStatus}
+            onClick={() => void setupOrRepairRuntime()}
           >
-            Reset profile…
+            {runtimeBusy ? <Loader2 aria-hidden="true" className="animate-spin" /> : null}
+            {browserStatus?.distro_ready ? "Repair runtime" : "Set up runtime"}
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={!settings || runtimeBusy || resettingData || !browserStatus?.distro_ready}
+            onClick={() => setResetDataOpen(true)}
+          >
+            Reset browser data…
+          </Button>
+          <Button
+            variant="secondary"
+            disabled={
+              !settings || runtimeBusy || removingRuntime || !browserStatus?.distro_ready
+            }
+            onClick={() => setRemoveRuntimeOpen(true)}
+          >
+            Remove browser runtime…
           </Button>
         </div>
       </Card>
@@ -612,38 +664,64 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Confirm before wiping the dedicated automation profile. */}
+      {/* Confirm before wiping browser data inside the managed runtime. */}
       <AlertDialog
-        open={resetProfileOpen}
+        open={resetDataOpen}
         onOpenChange={(o) => {
-          if (!o && !resettingProfile) setResetProfileOpen(false);
+          if (!o && !resettingData) setResetDataOpen(false);
         }}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>{PROFILE_RESET_TITLE}</AlertDialogTitle>
-            <AlertDialogDescription>
-              Resetting stops any running automation browser, then removes the automation
-              cookies, saved logins and localStorage stored in the dedicated Local Workspaces
-              profile. Your normal browser profile and personal data are not touched.
-            </AlertDialogDescription>
+            <AlertDialogTitle>{RESET_DATA_TITLE}</AlertDialogTitle>
+            <AlertDialogDescription>{RESET_DATA_BODY}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={resettingData} onClick={() => setResetDataOpen(false)}>
+              Cancel
+            </AlertDialogCancel>
+            <AlertDialogAction
+              onClick={(event) => {
+                event.preventDefault();
+                void confirmResetData();
+              }}
+              disabled={resettingData}
+              className="bg-destructive text-white hover:bg-destructive/90"
+            >
+              {resettingData ? "Resetting…" : "Reset browser data"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* Confirm before unregistering the managed WSL runtime. */}
+      <AlertDialog
+        open={removeRuntimeOpen}
+        onOpenChange={(o) => {
+          if (!o && !removingRuntime) setRemoveRuntimeOpen(false);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{REMOVE_RUNTIME_TITLE}</AlertDialogTitle>
+            <AlertDialogDescription>{REMOVE_RUNTIME_BODY}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel
-              disabled={resettingProfile}
-              onClick={() => setResetProfileOpen(false)}
+              disabled={removingRuntime}
+              onClick={() => setRemoveRuntimeOpen(false)}
             >
               Cancel
             </AlertDialogCancel>
             <AlertDialogAction
               onClick={(event) => {
                 event.preventDefault();
-                void confirmResetProfile();
+                void confirmRemoveRuntime();
               }}
-              disabled={resettingProfile || !settings}
+              disabled={removingRuntime}
               className="bg-destructive text-white hover:bg-destructive/90"
             >
-              {resettingProfile ? "Resetting…" : "Reset profile"}
+              {removingRuntime ? "Removing…" : "Remove browser runtime"}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

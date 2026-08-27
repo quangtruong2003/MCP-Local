@@ -9,7 +9,7 @@ use serde::Serialize;
 use tauri::{Manager, State};
 
 use crate::{
-    browser::types::{BrowserEngine, BrowserRunMode},
+    browser::runtime::RuntimeProvisionState,
     connection::{
         manager::{ConnectionError, ConnectionManager as TailscaleManager},
         state::ConnectionState,
@@ -416,133 +416,110 @@ fn sync_launch_on_startup(app: &tauri::AppHandle, want: bool) -> Result<(), Stri
     }
 }
 
+/// Truthful capability flags for the Lightpanda runtime: semantic automation
+/// over native MCP works; visual/rendering features fail closed.
+#[derive(Serialize)]
+pub struct BrowserRuntimeCapabilities {
+    pub visual_rendering: bool,
+    pub screenshots: bool,
+    pub file_upload: bool,
+    pub managed_downloads: bool,
+    pub native_mcp: bool,
+}
+
 /// Redacted browser runtime diagnostics for the Settings page (mirrors the
 /// `BrowserRuntimeStatus` TypeScript type). Security invariants: never
-/// contains an active page URL/title, history, cookies, or download
-/// filenames; only availability flags and bundled runtime versions.
+/// contains an active page URL/title, history, cookies, download filenames,
+/// or absolute host paths; only provision state, the pinned Lightpanda
+/// version, and boolean flags.
 #[derive(Serialize)]
 pub struct BrowserRuntimeStatus {
     pub enabled: bool,
     pub running: bool,
-    pub configured_engine: BrowserEngine,
-    pub run_mode: BrowserRunMode,
-    pub bundled_chromium_available: bool,
-    pub chrome_available: bool,
-    pub edge_available: bool,
-    pub firefox_available: bool,
-    pub node_version: Option<String>,
-    pub playwright_mcp_version: Option<String>,
-    pub playwright_version: Option<String>,
+    pub backend: &'static str,
+    pub mode: &'static str,
+    pub runtime_state: RuntimeProvisionState,
+    pub lightpanda_version: Option<String>,
+    pub wsl_installed: bool,
+    pub distro_ready: bool,
+    pub reboot_required: bool,
+    pub repair_required: bool,
+    pub capabilities: BrowserRuntimeCapabilities,
 }
 
-/// Subset of `runtime-manifest.json` written by scripts/build-browser-runtime.ps1.
-/// Fields are optional so a partial/older manifest degrades to "unknown".
-#[derive(Debug, Default, serde::Deserialize)]
-struct RuntimeManifest {
-    #[serde(default)]
-    node_version: Option<String>,
-    #[serde(default)]
-    playwright_mcp_version: Option<String>,
-    #[serde(default)]
-    playwright_version: Option<String>,
-    #[serde(default)]
-    browser_entries: Vec<RuntimeManifestBrowserEntry>,
+/// Boolean provision flags derived purely from the persisted runtime state.
+/// Never spawns a process, so opening Settings stays side-effect free.
+struct ProvisionFlags {
+    wsl_installed: bool,
+    distro_ready: bool,
+    reboot_required: bool,
+    repair_required: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
-struct RuntimeManifestBrowserEntry {
-    name: String,
-}
-
-/// Reads the bundled runtime manifest; a missing or invalid file yields `None`
-/// so diagnostics degrade gracefully instead of failing.
-fn read_runtime_manifest(runtime_root: &std::path::Path) -> Option<RuntimeManifest> {
-    let bytes = std::fs::read(runtime_root.join("runtime-manifest.json")).ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-/// A bundled browser is available only when the manifest lists an entry with
-/// the expected prefix AND the matching `browsers/<name>` directory exists.
-fn bundled_browser_available(
-    manifest: Option<&RuntimeManifest>,
-    runtime_root: &std::path::Path,
-    entry_prefix: &str,
-) -> bool {
-    manifest.is_some_and(|manifest| {
-        manifest.browser_entries.iter().any(|entry| {
-            entry.name.starts_with(entry_prefix)
-                && runtime_root.join("browsers").join(&entry.name).is_dir()
-        })
-    })
-}
-
-const CHROME_INSTALL_RELATIVE: &str = "Google/Chrome/Application/chrome.exe";
-const EDGE_INSTALL_RELATIVE: &str = "Microsoft/Edge/Application/msedge.exe";
-
-/// Candidate install locations for a system browser channel, derived from the
-/// standard Windows roots. Pure function so tests can pin the roots.
-fn channel_install_candidates(
-    program_files: Option<&std::path::Path>,
-    program_files_x86: Option<&std::path::Path>,
-    local_app_data: Option<&std::path::Path>,
-    relative: &str,
-) -> Vec<std::path::PathBuf> {
-    [program_files, program_files_x86, local_app_data]
-        .into_iter()
-        .flatten()
-        .map(|root| root.join(relative))
-        .collect()
-}
-
-/// Filesystem-only probe for a system browser channel. Never starts a page or
-/// a browser process.
-fn system_channel_available(relative: &str) -> bool {
-    let program_files = std::env::var_os("ProgramFiles").map(std::path::PathBuf::from);
-    let program_files_x86 = std::env::var_os("ProgramFiles(x86)").map(std::path::PathBuf::from);
-    let local_app_data = std::env::var_os("LocalAppData").map(std::path::PathBuf::from);
-    channel_install_candidates(
-        program_files.as_deref(),
-        program_files_x86.as_deref(),
-        local_app_data.as_deref(),
-        relative,
-    )
-    .iter()
-    .any(|path| path.is_file())
-}
-
-/// Assembles the redacted runtime status from the manager session state and
-/// the bundled runtime manifest. The manager's richer session status (which
-/// includes the active page URL/title) is intentionally narrowed here.
-async fn build_browser_runtime_status(state: &AppState) -> BrowserRuntimeStatus {
-    let session = state.browser.status().await;
-    let manifest = read_runtime_manifest(&state.browser_runtime);
-    BrowserRuntimeStatus {
-        enabled: session.enabled,
-        running: session.running,
-        configured_engine: session.configured_engine,
-        run_mode: session.run_mode,
-        bundled_chromium_available: bundled_browser_available(
-            manifest.as_ref(),
-            &state.browser_runtime,
-            "chromium-",
+fn provision_flags(state: RuntimeProvisionState) -> ProvisionFlags {
+    use RuntimeProvisionState as S;
+    ProvisionFlags {
+        wsl_installed: matches!(
+            state,
+            S::RebootRequired
+                | S::DistroInstallRequired
+                | S::InstallingDistro
+                | S::LightpandaInstallRequired
+                | S::InstallingLightpanda
+                | S::VerifyingRuntime
+                | S::Ready
+                | S::RepairRequired
         ),
-        chrome_available: system_channel_available(CHROME_INSTALL_RELATIVE),
-        edge_available: system_channel_available(EDGE_INSTALL_RELATIVE),
-        firefox_available: bundled_browser_available(
-            manifest.as_ref(),
-            &state.browser_runtime,
-            "firefox-",
-        ),
-        node_version: manifest.as_ref().and_then(|m| m.node_version.clone()),
-        playwright_mcp_version: manifest
-            .as_ref()
-            .and_then(|m| m.playwright_mcp_version.clone()),
-        playwright_version: manifest.as_ref().and_then(|m| m.playwright_version.clone()),
+        distro_ready: state == S::Ready,
+        reboot_required: state == S::RebootRequired,
+        repair_required: state == S::RepairRequired,
     }
 }
 
-/// Redacted browser runtime diagnostics: reads the runtime manifest and probes
-/// Chrome/Edge channel availability without starting a page.
+/// Assembles the redacted runtime status from the manager session state and
+/// the persisted provisioner state. The manager's richer session status
+/// (which includes the active page URL/title) is intentionally narrowed here.
+async fn build_browser_runtime_status(state: &AppState) -> BrowserRuntimeStatus {
+    let session = state.browser.status().await;
+    let snapshot = state.browser_runtime_manager.state_snapshot();
+    let runtime_state = snapshot
+        .as_ref()
+        .map(|s| s.state)
+        .unwrap_or(RuntimeProvisionState::Uninitialized);
+    let lightpanda_version = snapshot
+        .as_ref()
+        .and_then(|s| s.lightpanda_version.clone())
+        .unwrap_or_else(|| {
+            state
+                .browser_runtime_manager
+                .manifest()
+                .lightpanda_version
+                .clone()
+        });
+    let flags = provision_flags(runtime_state);
+    BrowserRuntimeStatus {
+        enabled: session.enabled,
+        running: session.running,
+        backend: "lightpanda",
+        mode: "background",
+        runtime_state,
+        lightpanda_version: Some(lightpanda_version),
+        wsl_installed: flags.wsl_installed,
+        distro_ready: flags.distro_ready,
+        reboot_required: flags.reboot_required,
+        repair_required: flags.repair_required,
+        capabilities: BrowserRuntimeCapabilities {
+            visual_rendering: false,
+            screenshots: false,
+            file_upload: false,
+            managed_downloads: false,
+            native_mcp: true,
+        },
+    }
+}
+
+/// Redacted browser runtime diagnostics. Reads only in-memory and persisted
+/// provisioner state; never starts downloads, provisioning, or a browser.
 #[tauri::command]
 pub async fn browser_runtime_status(
     state: State<'_, AppState>,
@@ -550,34 +527,88 @@ pub async fn browser_runtime_status(
     Ok(build_browser_runtime_status(&state).await)
 }
 
-/// Desktop-only profile reset. Accepts the engine enum (never a filesystem
-/// path), stops any active browser first, then wipes and recreates exactly
-/// `<app-data>/browser/profiles/<engine>/` via the manager's canonicalized
-/// confinement check. Records a `source=ui` audit row and returns fresh
-/// runtime status.
+/// Desktop-only runtime setup/resume: runs the idempotent provisioner and
+/// returns fresh redacted status. Never exposed as an MCP tool.
 #[tauri::command]
-pub async fn reset_browser_profile(
-    engine: BrowserEngine,
+pub async fn setup_browser_runtime(
     state: State<'_, AppState>,
 ) -> Result<BrowserRuntimeStatus, String> {
     state
-        .browser
-        .reset_profile(engine)
+        .browser_runtime_manager
+        .ensure_runtime()
         .await
         .map_err(err_string)?;
-    // Audit only the managed-relative profile path, never the absolute
-    // filesystem location (final-review Minor 3).
-    let audit_path = format!(
-        "browser/profiles/{}",
-        crate::browser::manager::BrowserManager::engine_slug(engine)
-    );
     audit_ui(
         &state.core.db,
         None,
-        "reset_browser_profile",
+        "setup_browser_runtime",
         None,
-        Some(&audit_path),
-        Some(serde_json::json!({ "engine": engine })),
+        None,
+        None,
+    );
+    Ok(build_browser_runtime_status(&state).await)
+}
+
+/// Desktop-only runtime repair: revalidates and replaces only app-owned
+/// runtime files, then returns fresh redacted status.
+#[tauri::command]
+pub async fn repair_browser_runtime(
+    state: State<'_, AppState>,
+) -> Result<BrowserRuntimeStatus, String> {
+    state
+        .browser_runtime_manager
+        .repair_runtime()
+        .await
+        .map_err(err_string)?;
+    audit_ui(
+        &state.core.db,
+        None,
+        "repair_browser_runtime",
+        None,
+        None,
+        None,
+    );
+    Ok(build_browser_runtime_status(&state).await)
+}
+
+/// Desktop-only Reset Browser Data: closes all page children, then removes
+/// only the owned WSL profile/cookies/cache/artifacts. Never removes the
+/// distro or the Lightpanda binary.
+#[tauri::command]
+pub async fn reset_browser_data(
+    state: State<'_, AppState>,
+) -> Result<BrowserRuntimeStatus, String> {
+    state.browser.close().await.map_err(err_string)?;
+    state
+        .browser_runtime_manager
+        .reset_browser_data()
+        .await
+        .map_err(err_string)?;
+    audit_ui(&state.core.db, None, "reset_browser_data", None, None, None);
+    Ok(build_browser_runtime_status(&state).await)
+}
+
+/// Desktop-only Remove Browser Runtime: closes all page children, then
+/// unregisters the owned distro and deletes app-owned runtime directories
+/// only after full ownership verification. The Browser Automation toggle is
+/// preserved; the next browser use provisions again.
+#[tauri::command]
+pub async fn remove_browser_runtime(
+    state: State<'_, AppState>,
+) -> Result<BrowserRuntimeStatus, String> {
+    state.browser.close().await.map_err(err_string)?;
+    state
+        .browser_runtime_manager
+        .remove_runtime()
+        .await
+        .map_err(err_string)?;
+    audit_ui(
+        &state.core.db,
+        None,
+        "remove_browser_runtime",
+        None,
+        None,
+        None,
     );
     Ok(build_browser_runtime_status(&state).await)
 }
@@ -648,109 +679,103 @@ mod tests {
         assert_eq!(parsed["message"], "sidecar binary missing");
     }
 
-    fn write_manifest(dir: &std::path::Path, json: &str) {
-        std::fs::write(dir.join("runtime-manifest.json"), json).unwrap();
+    #[test]
+    fn provision_flags_track_persisted_state_without_side_effects() {
+        let ready = provision_flags(RuntimeProvisionState::Ready);
+        assert!(ready.wsl_installed);
+        assert!(ready.distro_ready);
+        assert!(!ready.reboot_required);
+        assert!(!ready.repair_required);
+
+        let reboot = provision_flags(RuntimeProvisionState::RebootRequired);
+        assert!(reboot.wsl_installed);
+        assert!(!reboot.distro_ready);
+        assert!(reboot.reboot_required);
+
+        let repair = provision_flags(RuntimeProvisionState::RepairRequired);
+        assert!(repair.wsl_installed);
+        assert!(!repair.distro_ready);
+        assert!(repair.repair_required);
+
+        for state in [
+            RuntimeProvisionState::Uninitialized,
+            RuntimeProvisionState::CheckingHost,
+            RuntimeProvisionState::WslInstallRequired,
+            RuntimeProvisionState::InstallingWsl,
+            RuntimeProvisionState::UnsupportedHost,
+        ] {
+            let flags = provision_flags(state);
+            assert!(!flags.wsl_installed, "{state:?}");
+            assert!(!flags.distro_ready, "{state:?}");
+            assert!(!flags.reboot_required, "{state:?}");
+            assert!(!flags.repair_required, "{state:?}");
+        }
     }
 
     #[test]
-    fn runtime_manifest_versions_and_entries_parse() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(
-            dir.path(),
-            r#"{
-                "node_version": "24.19.0",
-                "playwright_mcp_version": "0.0.79",
-                "playwright_version": "1.57.0",
-                "platform": "windows-x64",
-                "browser_entries": [{"name": "chromium-1200"}, {"name": "firefox-1475"}]
-            }"#,
-        );
-        let manifest = read_runtime_manifest(dir.path()).unwrap();
-        assert_eq!(manifest.node_version.as_deref(), Some("24.19.0"));
-        assert_eq!(manifest.playwright_mcp_version.as_deref(), Some("0.0.79"));
-        assert_eq!(manifest.playwright_version.as_deref(), Some("1.57.0"));
-        assert_eq!(manifest.browser_entries.len(), 2);
-    }
-
-    #[test]
-    fn missing_or_invalid_manifest_degrades_to_none() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(read_runtime_manifest(dir.path()).is_none());
-        write_manifest(dir.path(), "{not json");
-        assert!(read_runtime_manifest(dir.path()).is_none());
-    }
-
-    #[test]
-    fn bundled_availability_requires_manifest_entry_and_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        write_manifest(
-            dir.path(),
-            r#"{"browser_entries": [{"name": "chromium-1200"}]}"#,
-        );
-        let manifest = read_runtime_manifest(dir.path()).unwrap();
-        // Entry listed but the browser directory is missing -> not available.
-        assert!(!bundled_browser_available(
-            Some(&manifest),
-            dir.path(),
-            "chromium-"
-        ));
-        // No manifest at all -> not available.
-        assert!(!bundled_browser_available(None, dir.path(), "chromium-"));
-        // Entry plus matching directory -> available; other prefixes stay false.
-        std::fs::create_dir_all(dir.path().join("browsers").join("chromium-1200")).unwrap();
-        assert!(bundled_browser_available(
-            Some(&manifest),
-            dir.path(),
-            "chromium-"
-        ));
-        assert!(!bundled_browser_available(
-            Some(&manifest),
-            dir.path(),
-            "firefox-"
-        ));
-    }
-
-    #[test]
-    fn channel_candidates_cover_standard_windows_locations() {
-        use std::path::Path;
-        let candidates = channel_install_candidates(
-            Some(Path::new("C:/Program Files")),
-            Some(Path::new("C:/Program Files (x86)")),
-            Some(Path::new("C:/Users/u/AppData/Local")),
-            CHROME_INSTALL_RELATIVE,
-        );
-        assert!(candidates
-            .iter()
-            .any(|p| p.ends_with("Google/Chrome/Application/chrome.exe")));
-        assert_eq!(candidates.len(), 3);
-
-        let edge = channel_install_candidates(
-            Some(Path::new("C:/Program Files")),
-            None,
-            None,
-            EDGE_INSTALL_RELATIVE,
-        );
-        assert_eq!(edge.len(), 1);
-        assert!(edge[0].ends_with("Microsoft/Edge/Application/msedge.exe"));
-    }
-
-    #[test]
-    fn runtime_status_json_never_carries_page_or_file_fields() {
+    fn runtime_status_serialization_is_redacted_and_fixed_shape() {
         let status = BrowserRuntimeStatus {
             enabled: true,
             running: true,
-            configured_engine: BrowserEngine::BundledChromium,
-            run_mode: BrowserRunMode::Background,
-            bundled_chromium_available: true,
-            chrome_available: false,
-            edge_available: false,
-            firefox_available: true,
-            node_version: Some("24.19.0".into()),
-            playwright_mcp_version: Some("0.0.79".into()),
-            playwright_version: Some("1.57.0".into()),
+            backend: "lightpanda",
+            mode: "background",
+            runtime_state: RuntimeProvisionState::Ready,
+            lightpanda_version: Some("0.3.7".into()),
+            wsl_installed: true,
+            distro_ready: true,
+            reboot_required: false,
+            repair_required: false,
+            capabilities: BrowserRuntimeCapabilities {
+                visual_rendering: false,
+                screenshots: false,
+                file_upload: false,
+                managed_downloads: false,
+                native_mcp: true,
+            },
         };
         let json = serde_json::to_string(&status).unwrap();
-        for forbidden in ["url", "title", "history", "cookie", "filename", "download"] {
+        // Exact key whitelists prove no URL/title/history/cookie/path or
+        // download-filename field can ever be serialized.
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let keys: std::collections::BTreeSet<String> =
+            parsed.as_object().unwrap().keys().cloned().collect();
+        let expected: std::collections::BTreeSet<String> = [
+            "backend",
+            "capabilities",
+            "distro_ready",
+            "enabled",
+            "lightpanda_version",
+            "mode",
+            "reboot_required",
+            "repair_required",
+            "running",
+            "runtime_state",
+            "wsl_installed",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(keys, expected);
+        let cap_keys: std::collections::BTreeSet<String> = parsed["capabilities"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        let expected_caps: std::collections::BTreeSet<String> = [
+            "file_upload",
+            "managed_downloads",
+            "native_mcp",
+            "screenshots",
+            "visual_rendering",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(cap_keys, expected_caps);
+        for forbidden in [
+            "url", "title", "history", "cookie", "filename", "c:\\", "/home/",
+        ] {
             assert!(
                 !json.to_ascii_lowercase().contains(forbidden),
                 "runtime status leaks '{forbidden}': {json}"

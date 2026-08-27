@@ -369,7 +369,6 @@ struct ManagerState {
 
 pub struct BrowserManager {
     core: Arc<CoreServices>,
-    app_data_dir: PathBuf,
     settings: RwLock<BrowserRuntimeSettings>,
     page_factory: Arc<dyn BrowserPageDriverFactory>,
     runtime_gate: Arc<dyn RuntimeGate>,
@@ -393,7 +392,6 @@ impl BrowserManager {
         let artifacts = ArtifactStore::new(browser_root.join("artifacts"))?;
         Ok(Self {
             core,
-            app_data_dir,
             settings: RwLock::new(BrowserRuntimeSettings::from(settings)),
             page_factory,
             runtime_gate,
@@ -492,22 +490,6 @@ impl BrowserManager {
             ));
         }
         Ok(())
-    }
-
-    pub(crate) fn engine_slug(engine: BrowserEngine) -> &'static str {
-        match engine {
-            BrowserEngine::BundledChromium => "bundled-chromium",
-            BrowserEngine::Chrome => "chrome",
-            BrowserEngine::Edge => "edge",
-            BrowserEngine::Firefox => "firefox",
-        }
-    }
-
-    pub fn profile_dir_for(&self, engine: BrowserEngine) -> PathBuf {
-        self.app_data_dir
-            .join("browser")
-            .join("profiles")
-            .join(Self::engine_slug(engine))
     }
 
     fn new_session_id(&self) -> String {
@@ -1819,28 +1801,6 @@ impl BrowserManager {
             self.stop_all_unchecked().await?;
         }
         Ok(())
-    }
-
-    pub async fn reset_profile(&self, engine: BrowserEngine) -> Result<(), CoreError> {
-        // Desktop-only caller handles confirmation. Legacy Windows profile
-        // reset retained until the desktop controls move to the WSL-owned
-        // browser data reset (Task 13).
-        self.stop_all_unchecked().await?;
-        let profile = self.profile_dir_for(engine);
-        let profiles_root = self.app_data_dir.join("browser").join("profiles");
-        std::fs::create_dir_all(&profiles_root).map_err(CoreError::io)?;
-        let profiles_root = dunce::canonicalize(&profiles_root).map_err(CoreError::io)?;
-        if profile.exists() {
-            let canonical = dunce::canonicalize(&profile).map_err(CoreError::io)?;
-            if canonical.parent() != Some(profiles_root.as_path()) {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserArtifactFailed,
-                    "browser profile path escaped the managed profile root",
-                ));
-            }
-            std::fs::remove_dir_all(&canonical).map_err(CoreError::io)?;
-        }
-        std::fs::create_dir_all(&profile).map_err(CoreError::io)
     }
 
     pub(crate) async fn active_artifact_dir(&self) -> Result<PathBuf, CoreError> {

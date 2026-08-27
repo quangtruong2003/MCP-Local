@@ -4,12 +4,51 @@ export type ThemePreference = "system" | "light" | "dark";
 export type AgentMode = "autonomous" | "conservative";
 export type CaptureScope = "windows_and_displays" | "windows_only";
 /**
- * Legacy engine identity reported by the bundled Playwright runtime
- * diagnostics. No longer a user-selectable setting; the browser backend is
- * being fixed to Lightpanda (WSL2) by the v0.2.0 migration.
+ * Provisioning state of the managed WSL2 Lightpanda runtime, mirrored from
+ * `RuntimeProvisionState` in src-tauri/src/browser/runtime.rs.
  */
-export type BrowserEngine = "bundled_chromium" | "chrome" | "edge" | "firefox";
-export type BrowserRunMode = "background" | "visible_debug";
+export type BrowserRuntimeProvisionState =
+  | "uninitialized"
+  | "checking_host"
+  | "wsl_install_required"
+  | "installing_wsl"
+  | "reboot_required"
+  | "distro_install_required"
+  | "installing_distro"
+  | "lightpanda_install_required"
+  | "installing_lightpanda"
+  | "verifying_runtime"
+  | "ready"
+  | "repair_required"
+  | "unsupported_host";
+
+/** Truthful capability flags for the Lightpanda backend. */
+export interface BrowserRuntimeCapabilities {
+  visual_rendering: boolean;
+  screenshots: boolean;
+  file_upload: boolean;
+  managed_downloads: boolean;
+  native_mcp: boolean;
+}
+
+/**
+ * Redacted browser runtime diagnostics from `browser_runtime_status`.
+ * Never contains active URLs, history, cookies, download filenames, or
+ * absolute host paths.
+ */
+export interface BrowserRuntimeStatus {
+  enabled: boolean;
+  running: boolean;
+  backend: "lightpanda";
+  mode: "background";
+  runtime_state: BrowserRuntimeProvisionState;
+  lightpanda_version: string | null;
+  wsl_installed: boolean;
+  distro_ready: boolean;
+  reboot_required: boolean;
+  repair_required: boolean;
+  capabilities: BrowserRuntimeCapabilities;
+}
 
 /** Versioned app settings persisted by the backend (`version: 6`). */
 export interface AppSettings {
@@ -27,24 +66,6 @@ export interface AppSettings {
   capture_scope: CaptureScope;
   visual_verification: boolean;
   browser_automation_enabled: boolean;
-}
-
-/**
- * Redacted browser runtime diagnostics from `browser_runtime_status`.
- * Never contains active URLs, history, cookies, or download filenames.
- */
-export interface BrowserRuntimeStatus {
-  enabled: boolean;
-  running: boolean;
-  configured_engine: BrowserEngine;
-  run_mode: BrowserRunMode;
-  bundled_chromium_available: boolean;
-  chrome_available: boolean;
-  edge_available: boolean;
-  firefox_available: boolean;
-  node_version: string | null;
-  playwright_mcp_version: string | null;
-  playwright_version: string | null;
 }
 
 // --- Backend contracts (mirror crates/core/src/models.rs serde output) ---

@@ -24,10 +24,6 @@ pub struct AppState {
     /// never downloads/installs; only session startup or explicit setup /
     /// repair commands drive provisioning.
     pub browser_runtime_manager: Arc<browser::runtime::BrowserRuntimeManager>,
-    /// Root of the bundled Playwright runtime (resource dir, falling back to
-    /// the development checkout). Used for read-only runtime diagnostics until
-    /// the Playwright runtime is removed.
-    pub browser_runtime: std::path::PathBuf,
 }
 
 /// Runtime UI behavior flags mirrored from [`settings::AppSettings`] so the
@@ -97,14 +93,6 @@ pub fn run() {
                 agent_policy.clone(),
             ));
 
-            let resource_runtime = app.path().resource_dir()?.join("browser-runtime");
-            let development_runtime =
-                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("browser-runtime");
-            let browser_runtime = if resource_runtime.join("runtime-manifest.json").is_file() {
-                resource_runtime
-            } else {
-                development_runtime
-            };
             // Typed Lightpanda/WSL runtime provisioner. Reads the pinned,
             // immutable runtime manifest but does NOT provision here; that is
             // deferred to session startup / explicit setup commands so opening
@@ -151,7 +139,6 @@ pub fn run() {
                 agent_settings,
                 browser,
                 browser_runtime_manager,
-                browser_runtime,
             });
             println!("MCP server: http://127.0.0.1:{port}/mcp");
 
@@ -219,7 +206,10 @@ pub fn run() {
             commands::get_app_settings,
             commands::update_app_settings,
             commands::browser_runtime_status,
-            commands::reset_browser_profile,
+            commands::setup_browser_runtime,
+            commands::repair_browser_runtime,
+            commands::reset_browser_data,
+            commands::remove_browser_runtime,
         ])
         .build(tauri::generate_context!())
         .expect("build tauri app")
