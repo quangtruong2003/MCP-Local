@@ -15,26 +15,22 @@ use crate::{
             BrowserConsoleOutput, BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs,
             BrowserDomOutput, BrowserDragArgs, BrowserEmulateArgs, BrowserEvaluateArgs,
             BrowserEvaluateOutput, BrowserExtractArgs, BrowserExtractOutput, BrowserFillArgs,
-            BrowserFindElementArgs, BrowserHtmlArgs, BrowserLoadState, BrowserMarkdownArgs,
-            BrowserNavigateArgs, BrowserNavigationAction, BrowserNavigationOutput,
-            BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput, BrowserOpenArgs,
-            BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput, BrowserPressArgs,
-            BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
-            BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScreenshotMode,
-            BrowserScrollArgs, BrowserSearchArgs, BrowserSelectArgs, BrowserSetCheckedArgs,
-            BrowserSnapshotOutput, BrowserStep, BrowserStepError, BrowserTabAction,
-            BrowserTabsArgs, BrowserTargetArgs, BrowserTextOutput, BrowserTextTruncatedOutput,
-            BrowserTraceAction, BrowserTraceArgs, BrowserTraceOutput, BrowserUploadArgs,
-            BrowserUploadOutput, BrowserUploadSource, BrowserViewportArgs, BrowserViewportOutput,
-            BrowserWaitArgs, BrowserWaitCondition,
+            BrowserFindElementArgs, BrowserHtmlArgs, BrowserMarkdownArgs, BrowserNavigateArgs,
+            BrowserNavigationAction, BrowserNavigationOutput, BrowserNetworkArgs,
+            BrowserNetworkOutput, BrowserOkOutput, BrowserOpenArgs, BrowserOpenOutput,
+            BrowserPageSummary, BrowserPerformanceOutput, BrowserPressArgs, BrowserRunStepsArgs,
+            BrowserRunStepsOutput, BrowserSaveDownloadArgs, BrowserScreenshotArgs,
+            BrowserScreenshotMetadata, BrowserScreenshotMode, BrowserScrollArgs, BrowserSearchArgs,
+            BrowserSelectArgs, BrowserSetCheckedArgs, BrowserSnapshotOutput, BrowserStep,
+            BrowserStepError, BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs,
+            BrowserTextOutput, BrowserTextTruncatedOutput, BrowserTraceAction, BrowserTraceArgs,
+            BrowserTraceOutput, BrowserUploadArgs, BrowserUploadOutput, BrowserUploadSource,
+            BrowserViewportArgs, BrowserViewportOutput, BrowserWaitArgs, BrowserWaitCondition,
         },
-        playwright::{
-            DOM_INSPECT_FUNCTION, PERFORMANCE_FUNCTION, WAIT_READY_FUNCTION, WAIT_URL_FUNCTION,
-            WAIT_VISIBLE_FUNCTION,
-        },
+        playwright::{DOM_INSPECT_FUNCTION, PERFORMANCE_FUNCTION},
         policy::{
-            bounded_event_limit, redacted_origin, validate_batch_step_count,
-            validate_navigation_url, validate_timeout, validate_viewport,
+            bounded_event_limit, redacted_origin, validate_batch_step_count, validate_timeout,
+            validate_viewport,
         },
         types::{
             BrowserSessionStatus, DEFAULT_SCREENSHOT_MAX_EDGE, MAX_SCREENSHOT_ENCODED_BYTES,
@@ -63,11 +59,7 @@ use rmcp::{
     },
     ServerHandler,
 };
-use std::{
-    io::Cursor,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{io::Cursor, sync::Arc};
 
 /// Builds a success result carrying both the pretty-printed text (for
 /// clients that ignore schemas) and the typed `structuredContent` payload
@@ -461,91 +453,7 @@ async fn browser_wait_internal(
     requested_timeout: Option<u64>,
 ) -> Result<BrowserOkOutput, CoreError> {
     let timeout_ms = validate_timeout(requested_timeout, false)?;
-    match condition {
-        BrowserWaitCondition::TextPresent { text } => {
-            let mut args = serde_json::Map::new();
-            args.insert("text".into(), serde_json::Value::String(text));
-            browser.call_upstream("browser_wait_for", args).await?;
-        }
-        BrowserWaitCondition::TextAbsent { text } => {
-            let mut args = serde_json::Map::new();
-            args.insert("textGone".into(), serde_json::Value::String(text));
-            browser.call_upstream("browser_wait_for", args).await?;
-        }
-        BrowserWaitCondition::Delay { milliseconds } => {
-            if milliseconds == 0 || milliseconds > timeout_ms {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "browser wait delay must be within timeout",
-                ));
-            }
-            let mut args = serde_json::Map::new();
-            args.insert(
-                "time".into(),
-                serde_json::json!(milliseconds as f64 / 1000.0),
-            );
-            browser.call_upstream("browser_wait_for", args).await?;
-        }
-        other => {
-            let started = Instant::now();
-            loop {
-                browser.guard_page_operation().await?;
-                let (function, target, expected) = match &other {
-                    BrowserWaitCondition::RefVisible { ref_id } => {
-                        (WAIT_VISIBLE_FUNCTION, Some(ref_id.as_str()), Some(true))
-                    }
-                    BrowserWaitCondition::RefHidden { ref_id } => {
-                        (WAIT_VISIBLE_FUNCTION, Some(ref_id.as_str()), Some(false))
-                    }
-                    BrowserWaitCondition::UrlContains { .. } => (WAIT_URL_FUNCTION, None, None),
-                    BrowserWaitCondition::LoadState { .. } => (WAIT_READY_FUNCTION, None, None),
-                    _ => unreachable!(),
-                };
-                let mut args = serde_json::Map::new();
-                args.insert(
-                    "function".into(),
-                    serde_json::Value::String(function.into()),
-                );
-                if let Some(target) = target {
-                    args.insert("target".into(), serde_json::Value::String(target.into()));
-                }
-                let response = browser.call_upstream("browser_evaluate", args).await?;
-                let text = call_result_text(&response);
-                let matched = match &other {
-                    BrowserWaitCondition::RefVisible { .. }
-                    | BrowserWaitCondition::RefHidden { .. } => {
-                        // Upstream browser_evaluate returns JSON.stringify(result).
-                        // Parse it and compare the boolean instead of substring
-                        // matching, so an error message or string that merely
-                        // contains "true"/"false" can never false-match.
-                        serde_json::from_str::<serde_json::Value>(&text)
-                            .map(|value| value == serde_json::Value::Bool(expected.unwrap()))
-                            .unwrap_or(false)
-                    }
-                    BrowserWaitCondition::UrlContains { value } => text.contains(value),
-                    BrowserWaitCondition::LoadState { state } => {
-                        let wanted = match state {
-                            BrowserLoadState::Loading => "loading",
-                            BrowserLoadState::Interactive => "interactive",
-                            BrowserLoadState::Complete => "complete",
-                        };
-                        text.to_ascii_lowercase().contains(wanted)
-                    }
-                    _ => false,
-                };
-                if matched {
-                    break;
-                }
-                if started.elapsed() >= Duration::from_millis(timeout_ms) {
-                    return Err(CoreError::new(
-                        ErrorCode::BrowserActionTimeout,
-                        "browser wait condition timed out",
-                    ));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-        }
-    }
+    browser.wait_for(condition, timeout_ms).await?;
     Ok(BrowserOkOutput { ok: true })
 }
 
@@ -798,7 +706,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Navigate the active page to an http(s) URL, go back, go forward, or reload. file:// and non-http(s) schemes are rejected before Playwright is called.",
+        description = "Navigate the active page to an http(s) URL, go back, go forward, or reload. file:// and non-http(s) schemes are rejected before the browser runtime is called.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserNavigationOutput>()
     )]
@@ -814,8 +722,7 @@ impl WorkspaceServer {
         };
         let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
         let result = async {
-            let mut args = serde_json::Map::new();
-            let upstream = match a.action {
+            let final_url = match a.action {
                 BrowserNavigationAction::Url => {
                     let url = a.url.as_deref().ok_or_else(|| {
                         CoreError::new(
@@ -823,16 +730,11 @@ impl WorkspaceServer {
                             "browser_navigate action=url requires url",
                         )
                     })?;
-                    validate_navigation_url(url)?;
-                    args.insert("url".into(), serde_json::Value::String(url.to_string()));
-                    "browser_navigate"
+                    self.browser.navigate_to(url).await?
                 }
-                BrowserNavigationAction::Back => "browser_navigate_back",
-                BrowserNavigationAction::Forward => "browser_navigate_forward",
-                BrowserNavigationAction::Reload => "browser_reload",
+                action => self.browser.navigate_history(action).await?,
             };
-            let response = self.browser.call_upstream(upstream, args).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
+            let (text, truncated) = truncate_utf8(final_url, 256 * 1024);
             let pages = page_summaries(&self.browser).await;
             Ok::<_, CoreError>(BrowserNavigationOutput {
                 text,
@@ -850,7 +752,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Search the web in the active browser using Google Search. The query is URL-encoded and is never written to the audit log.",
+        description = "Search the web in the active browser using the runtime's native search tool. The query is never written to the audit log.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserNavigationOutput>()
     )]
@@ -862,12 +764,8 @@ impl WorkspaceServer {
                     "browser_search query cannot be empty",
                 ));
             }
-            let mut url = url::Url::parse("https://www.google.com/search").expect("static URL");
-            url.query_pairs_mut().append_pair("q", &a.query);
-            let mut args = serde_json::Map::new();
-            args.insert("url".into(), serde_json::Value::String(url.to_string()));
-            let response = self.browser.call_upstream("browser_navigate", args).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
+            let text = self.browser.search(&a.query).await?;
+            let (text, truncated) = truncate_utf8(text, 256 * 1024);
             let pages = page_summaries(&self.browser).await;
             Ok::<_, CoreError>(BrowserNavigationOutput {
                 text,
@@ -967,12 +865,7 @@ impl WorkspaceServer {
                     "browser key must be 1 to 128 bytes",
                 ));
             }
-            let mut args = serde_json::Map::new();
-            args.insert("key".into(), serde_json::Value::String(a.key.clone()));
-            let r = self
-                .browser
-                .call_upstream("browser_press_key", args)
-                .await?;
+            let r = self.browser.press_key(&a.key).await?;
             Ok::<_, CoreError>(BrowserTextOutput {
                 text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
             })
@@ -1564,7 +1457,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Evaluate JavaScript inside the active page context, optionally against an element target. This never routes through Playwright process-level code execution.",
+        description = "Evaluate JavaScript inside the active page context, optionally against an element ref. Function-style expressions are invoked once and return their value.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserEvaluateOutput>()
     )]
@@ -1579,16 +1472,11 @@ impl WorkspaceServer {
                     "browser evaluate expression must be 1..262144 bytes",
                 ));
             }
-            let mut args = serde_json::Map::new();
-            args.insert(
-                "function".into(),
-                serde_json::Value::String(a.expression.clone()),
-            );
-            if let Some(target) = a.ref_id.clone() {
-                args.insert("target".into(), serde_json::Value::String(target));
-            }
-            let response = self.browser.call_upstream("browser_evaluate", args).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
+            let text = self
+                .browser
+                .evaluate_expression(&a.expression, a.ref_id.as_deref())
+                .await?;
+            let (text, truncated) = truncate_utf8(text, 256 * 1024);
             Ok::<_, CoreError>(BrowserEvaluateOutput {
                 result: text,
                 truncated,
@@ -1896,40 +1784,141 @@ impl WorkspaceServer {
             })
             .collect();
         let mut step_failure: Option<CoreError> = None;
-        let result=async {
+        let result = async {
             validate_batch_step_count(step_count)?;
             self.browser.guard_page_operation().await?;
-            let mut results=Vec::with_capacity(step_count);
-            for (index,step) in a.steps.into_iter().enumerate(){
-                let one:Result<serde_json::Value,CoreError>=async {
+            let mut results = Vec::with_capacity(step_count);
+            for (index, step) in a.steps.into_iter().enumerate() {
+                let one: Result<serde_json::Value, CoreError> = async {
                     match step {
-                        BrowserStep::Navigate{url}=>{validate_navigation_url(&url)?;let mut args=serde_json::Map::new();args.insert("url".into(),serde_json::Value::String(url));let r=self.browser.call_upstream("browser_navigate",args).await?;Ok(serde_json::json!({"text":truncate_utf8(call_result_text(&r),64*1024).0}))}
-                        BrowserStep::Snapshot=>{let r=self.browser.call_upstream("browser_snapshot",serde_json::Map::new()).await?;let (text,truncated)=truncate_utf8(call_result_text(&r),crate::browser::types::MAX_SNAPSHOT_BYTES);Ok(serde_json::json!({"snapshot":text,"truncated":truncated}))}
-                        BrowserStep::Click{ref_id}=>{let mut args=serde_json::Map::new();args.insert("target".into(),serde_json::Value::String(ref_id));self.browser.call_upstream("browser_click",args).await?;Ok(serde_json::json!({"ok":true}))}
-                        BrowserStep::Fill{ref_id,text}=>{let mut args=serde_json::Map::new();args.insert("target".into(),serde_json::Value::String(ref_id));args.insert("text".into(),serde_json::Value::String(text));args.insert("submit".into(),serde_json::Value::Bool(false));args.insert("slowly".into(),serde_json::Value::Bool(false));self.browser.call_upstream("browser_type",args).await?;Ok(serde_json::json!({"ok":true}))}
-                        BrowserStep::Press{key}=>{let mut args=serde_json::Map::new();args.insert("key".into(),serde_json::Value::String(key));self.browser.call_upstream("browser_press_key",args).await?;Ok(serde_json::json!({"ok":true}))}
-                        BrowserStep::Select{ref_id,values}=>{let mut args=serde_json::Map::new();args.insert("target".into(),serde_json::Value::String(ref_id));args.insert("values".into(),serde_json::json!(values));self.browser.call_upstream("browser_select_option",args).await?;Ok(serde_json::json!({"ok":true}))}
-                        BrowserStep::Wait{condition,timeout_ms}=>{let ok=browser_wait_internal(&self.browser,condition,timeout_ms).await?;Ok(serde_json::to_value(ok).unwrap_or_default())}
-                        BrowserStep::SetViewport{width,height}=>{validate_viewport(width,height)?;let mut args=serde_json::Map::new();args.insert("width".into(),serde_json::json!(width));args.insert("height".into(),serde_json::json!(height));self.browser.call_upstream("browser_resize",args).await?;Ok(serde_json::json!({"width":width,"height":height}))}
-                        BrowserStep::Screenshot{mode,ref_id,max_edge}=>{if matches!(mode,BrowserScreenshotMode::Element)&&ref_id.is_none(){return Err(CoreError::new(ErrorCode::InvalidArgument,"element screenshot requires ref"));} else if !matches!(mode,BrowserScreenshotMode::Element)&&ref_id.is_some(){return Err(CoreError::new(ErrorCode::InvalidArgument,"ref is only valid for element screenshots"));}let mut args=serde_json::Map::new();args.insert("type".into(),serde_json::Value::String("png".into()));args.insert("scale".into(),serde_json::Value::String("css".into()));args.insert("fullPage".into(),serde_json::Value::Bool(matches!(mode,BrowserScreenshotMode::FullPage)));if matches!(mode,BrowserScreenshotMode::Element){if let Some(t)=ref_id{args.insert("target".into(),serde_json::Value::String(t));}}let r=self.browser.call_upstream("browser_take_screenshot",args).await?;let (_bytes,metadata)=browser_screenshot_payload(&r,mode,max_edge)?;Ok(serde_json::json!({"metadata":metadata}))}
+                        BrowserStep::Navigate { url } => {
+                            let final_url = self.browser.navigate_to(&url).await?;
+                            Ok(serde_json::json!({"text":truncate_utf8(final_url,64*1024).0}))
+                        }
+                        BrowserStep::Snapshot => {
+                            let text = self.browser.snapshot_tree().await?;
+                            let (text, truncated) =
+                                truncate_utf8(text, crate::browser::types::MAX_SNAPSHOT_BYTES);
+                            Ok(serde_json::json!({"snapshot":text,"truncated":truncated}))
+                        }
+                        BrowserStep::Click { ref_id } => {
+                            let mut args = serde_json::Map::new();
+                            args.insert("target".into(), serde_json::Value::String(ref_id));
+                            self.browser.call_upstream("browser_click", args).await?;
+                            Ok(serde_json::json!({"ok":true}))
+                        }
+                        BrowserStep::Fill { ref_id, text } => {
+                            let mut args = serde_json::Map::new();
+                            args.insert("target".into(), serde_json::Value::String(ref_id));
+                            args.insert("text".into(), serde_json::Value::String(text));
+                            args.insert("submit".into(), serde_json::Value::Bool(false));
+                            args.insert("slowly".into(), serde_json::Value::Bool(false));
+                            self.browser.call_upstream("browser_type", args).await?;
+                            Ok(serde_json::json!({"ok":true}))
+                        }
+                        BrowserStep::Press { key } => {
+                            let mut args = serde_json::Map::new();
+                            args.insert("key".into(), serde_json::Value::String(key));
+                            self.browser
+                                .call_upstream("browser_press_key", args)
+                                .await?;
+                            Ok(serde_json::json!({"ok":true}))
+                        }
+                        BrowserStep::Select { ref_id, values } => {
+                            let mut args = serde_json::Map::new();
+                            args.insert("target".into(), serde_json::Value::String(ref_id));
+                            args.insert("values".into(), serde_json::json!(values));
+                            self.browser
+                                .call_upstream("browser_select_option", args)
+                                .await?;
+                            Ok(serde_json::json!({"ok":true}))
+                        }
+                        BrowserStep::Wait {
+                            condition,
+                            timeout_ms,
+                        } => {
+                            let ok =
+                                browser_wait_internal(&self.browser, condition, timeout_ms).await?;
+                            Ok(serde_json::to_value(ok).unwrap_or_default())
+                        }
+                        BrowserStep::SetViewport { width, height } => {
+                            validate_viewport(width, height)?;
+                            let mut args = serde_json::Map::new();
+                            args.insert("width".into(), serde_json::json!(width));
+                            args.insert("height".into(), serde_json::json!(height));
+                            self.browser.call_upstream("browser_resize", args).await?;
+                            Ok(serde_json::json!({"width":width,"height":height}))
+                        }
+                        BrowserStep::Screenshot {
+                            mode,
+                            ref_id,
+                            max_edge,
+                        } => {
+                            if matches!(mode, BrowserScreenshotMode::Element) && ref_id.is_none() {
+                                return Err(CoreError::new(
+                                    ErrorCode::InvalidArgument,
+                                    "element screenshot requires ref",
+                                ));
+                            } else if !matches!(mode, BrowserScreenshotMode::Element)
+                                && ref_id.is_some()
+                            {
+                                return Err(CoreError::new(
+                                    ErrorCode::InvalidArgument,
+                                    "ref is only valid for element screenshots",
+                                ));
+                            }
+                            let mut args = serde_json::Map::new();
+                            args.insert("type".into(), serde_json::Value::String("png".into()));
+                            args.insert("scale".into(), serde_json::Value::String("css".into()));
+                            args.insert(
+                                "fullPage".into(),
+                                serde_json::Value::Bool(matches!(
+                                    mode,
+                                    BrowserScreenshotMode::FullPage
+                                )),
+                            );
+                            if matches!(mode, BrowserScreenshotMode::Element) {
+                                if let Some(t) = ref_id {
+                                    args.insert("target".into(), serde_json::Value::String(t));
+                                }
+                            }
+                            let r = self
+                                .browser
+                                .call_upstream("browser_take_screenshot", args)
+                                .await?;
+                            let (_bytes, metadata) =
+                                browser_screenshot_payload(&r, mode, max_edge)?;
+                            Ok(serde_json::json!({"metadata":metadata}))
+                        }
                     }
-                }.await;
+                }
+                .await;
                 match one {
-                    Ok(v)=>results.push(serde_json::json!({"index":index,"ok":true,"result":v})),
-                    Err(e)=>{
-                        step_failure=Some(e.clone());
-                        return Ok::<_,CoreError>(BrowserRunStepsOutput {
-                            ok:false,
+                    Ok(v) => results.push(serde_json::json!({"index":index,"ok":true,"result":v})),
+                    Err(e) => {
+                        step_failure = Some(e.clone());
+                        return Ok::<_, CoreError>(BrowserRunStepsOutput {
+                            ok: false,
                             results,
-                            failed_index:Some(index),
-                            status:Some("failed".to_string()),
-                            error:Some(BrowserStepError { code: e.code.as_str().to_string(), message: e.message }),
+                            failed_index: Some(index),
+                            status: Some("failed".to_string()),
+                            error: Some(BrowserStepError {
+                                code: e.code.as_str().to_string(),
+                                message: e.message,
+                            }),
                         });
                     }
                 }
             }
-            Ok::<_,CoreError>(BrowserRunStepsOutput { ok:true, results, failed_index:None, status:None, error:None })
-        }.await;
+            Ok::<_, CoreError>(BrowserRunStepsOutput {
+                ok: true,
+                results,
+                failed_index: None,
+                status: None,
+                error: None,
+            })
+        }
+        .await;
         // A failed step must never audit as allow: record failed_index/status
         // and the error decision while still returning per-step results to the
         // caller (stop-on-first-failure, no replay).

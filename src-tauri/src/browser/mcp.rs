@@ -696,6 +696,41 @@ pub(crate) fn validate_scroll_offsets(x: Option<i64>, y: Option<i64>) -> Result<
     }
 }
 
+/// Encodes one string as a JSON/JS string literal so page data is embedded as
+/// data, never concatenated as executable source.
+pub(crate) fn encode_js_string(text: &str) -> String {
+    serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
+}
+
+/// Adapts a public `browser_evaluate` expression to Lightpanda's `evaluate`
+/// script contract. Playwright-style function literals are invoked once so
+/// they return their value; with an element selector the recovered element is
+/// passed as the first argument.
+pub(crate) fn page_evaluate_script(expression: &str, selector: Option<&str>) -> String {
+    let trimmed = expression.trim();
+    let is_function_literal = trimmed.starts_with("()")
+        || trimmed.starts_with("async")
+        || trimmed.starts_with("function")
+        || (trimmed.starts_with('(') && trimmed.contains("=>"));
+    match selector {
+        Some(selector) => {
+            let target = format!("document.querySelector({})", encode_js_string(selector));
+            if is_function_literal {
+                format!("({trimmed})({target})")
+            } else {
+                format!("((el) => ({trimmed}))({target})")
+            }
+        }
+        None => {
+            if is_function_literal {
+                format!("({trimmed})()")
+            } else {
+                trimmed.to_string()
+            }
+        }
+    }
+}
+
 /// Validates one `browser_extract` schema before any native call and returns
 /// its canonical encoded form for the upstream `extract` tool. Rejects
 /// non-object roots, oversized documents, deep nesting, too many selector
@@ -970,5 +1005,46 @@ mod validation_tests {
         let big = serde_json::json!({"field": "x".repeat(MAX_EXTRACT_SCHEMA_BYTES)});
         let err = validate_extract_schema(&big).unwrap_err();
         assert_eq!(err.code, ErrorCode::InvalidArgument);
+    }
+
+    #[test]
+    fn encode_js_string_is_safe_json_literal() {
+        assert_eq!(encode_js_string("abc"), "\"abc\"");
+        assert_eq!(encode_js_string("a\"b\\c"), "\"a\\\"b\\\\c\"");
+        // Newlines and quotes can never break out of the literal.
+        assert_eq!(encode_js_string("'); alert(1); ('"), "\"'); alert(1); ('\"");
+    }
+
+    #[test]
+    fn page_evaluate_script_invokes_function_literals_once() {
+        assert_eq!(
+            page_evaluate_script("() => document.title", None),
+            "(() => document.title)()"
+        );
+        assert_eq!(
+            page_evaluate_script("async () => 1", None),
+            "(async () => 1)()"
+        );
+        assert_eq!(
+            page_evaluate_script("function() { return 1; }", None),
+            "(function() { return 1; })()"
+        );
+        // Bare expressions pass through untouched.
+        assert_eq!(
+            page_evaluate_script("document.title", None),
+            "document.title"
+        );
+    }
+
+    #[test]
+    fn page_evaluate_script_binds_element_target() {
+        assert_eq!(
+            page_evaluate_script("(el) => el.textContent", Some("#nd-4")),
+            "((el) => el.textContent)(document.querySelector(\"#nd-4\"))"
+        );
+        assert_eq!(
+            page_evaluate_script("el.tagName", Some("#nd-4")),
+            "((el) => (el.tagName))(document.querySelector(\"#nd-4\"))"
+        );
     }
 }

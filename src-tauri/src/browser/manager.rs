@@ -14,7 +14,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
         Arc,
     },
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -31,7 +31,11 @@ use crate::settings::AppSettings;
 use super::{
     artifacts::ArtifactStore,
     driver::{BrowserPageDriver, BrowserPageDriverFactory, PageLaunchSpec},
-    mcp::{call_result_text, is_valid_ref, normalize_tree_text, parse_node_selector},
+    mcp::{
+        call_result_text, encode_js_string, is_valid_ref, normalize_tree_text,
+        page_evaluate_script, parse_node_selector, BrowserLoadState, BrowserNavigationAction,
+        BrowserWaitCondition,
+    },
     policy::validate_navigation_url,
     runtime::{BrowserRuntimeManager, RuntimeProvisionState},
     types::{
@@ -54,6 +58,18 @@ pub const BROWSER_CACHE_DIR: &str = "/var/lib/local-workspaces/browser/cache";
 pub const STORAGE_SQLITE_PATH: &str = "/var/lib/local-workspaces/browser/profile/storage.sqlite";
 pub const CANONICAL_COOKIE_PATH: &str = "/var/lib/local-workspaces/browser/cookies/canonical.json";
 
+/// Fixed application-owned scripts for history navigation. Lightpanda has no
+/// native back/forward/reload primitive; these evaluate calls are the only
+/// scripts the manager ever runs for navigation control.
+const HISTORY_BACK_SCRIPT: &str = "history.back()";
+const HISTORY_FORWARD_SCRIPT: &str = "history.forward()";
+const PAGE_RELOAD_SCRIPT: &str = "location.reload()";
+const WAIT_READY_STATE_COMPLETE_SCRIPT: &str = "document.readyState === \"complete\"";
+/// Bound for waiting until a history/reload navigation settles at `load`.
+const HISTORY_SETTLE_TIMEOUT_MS: u64 = 30_000;
+/// Short bound for the post-load readyState verification read.
+const READY_STATE_VERIFY_TIMEOUT_MS: u64 = 5_000;
+
 /// Per-page exit jar path. Page ids are app-generated opaque values; they are
 /// validated here so only a fixed alphabet ever reaches a distro path.
 pub fn cookie_exit_jar_path(page_id: &str) -> Result<String, CoreError> {
@@ -69,6 +85,27 @@ pub fn cookie_exit_jar_path(page_id: &str) -> Result<String, CoreError> {
         ));
     }
     Ok(format!("{BROWSER_COOKIE_DIR}/{page_id}.exit.json"))
+}
+
+/// Best-effort page title from a bounded semantic-tree read. The root line of
+/// a Lightpanda tree is `<id> WebArea '<title>'`; anything unparseable yields
+/// None rather than a fabricated title.
+fn parse_tree_title(tree_text: &str) -> Option<String> {
+    let first = tree_text.lines().next()?.trim();
+    let rest = first.trim_start_matches(|c: char| c.is_ascii_digit());
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix("WebArea")?;
+    let start = rest.find('\'')?;
+    let end = rest.rfind('\'')?;
+    if end <= start {
+        return None;
+    }
+    let title = rest[start + 1..end].trim();
+    if title.is_empty() {
+        None
+    } else {
+        Some(title.to_string())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,19 +612,7 @@ impl BrowserManager {
             session.active_page_id = page_id.clone();
         }
         if let Some(url) = url {
-            let mut args = Map::new();
-            args.insert("url".into(), Value::String(url.to_string()));
-            self.route_to_page(&page_id, "goto", args).await?;
-            let mut state = self.state.lock().await;
-            if let Some(page) = state
-                .active
-                .as_mut()
-                .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
-            {
-                page.url = Some(url.to_string());
-                // Navigation replaces major DOM state: every older ref is stale.
-                Self::invalidate_page_refs(page);
-            }
+            self.goto_and_verify(&page_id, url).await?;
         }
         Ok(page_id)
     }
@@ -706,19 +731,7 @@ impl BrowserManager {
                 let state = self.state.lock().await;
                 Self::active_page_id_or_err(&state)?
             };
-            let mut args = Map::new();
-            args.insert("url".into(), Value::String(url.to_string()));
-            self.route_to_page(&page_id, "goto", args).await?;
-            let mut state = self.state.lock().await;
-            if let Some(page) = state
-                .active
-                .as_mut()
-                .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
-            {
-                page.url = Some(url.to_string());
-                // Navigation replaces major DOM state: every older ref is stale.
-                Self::invalidate_page_refs(page);
-            }
+            self.goto_and_verify(&page_id, url).await?;
         }
         Ok(self.status().await)
     }
@@ -758,6 +771,313 @@ impl BrowserManager {
             Self::active_page_id_or_err(&state)?
         };
         self.route_to_page(&page_id, tool, arguments).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Navigation, search, evaluate, waits: typed native operations. goto
+    // success alone is never trusted; every navigation is verified with a
+    // follow-up getUrl plus a bounded semantic-tree read.
+    // -----------------------------------------------------------------------
+
+    /// goto + verification. Updates the cached url/title and invalidates
+    /// refs, because navigation replaces the whole DOM.
+    async fn goto_and_verify(&self, page_id: &str, url: &str) -> Result<String, CoreError> {
+        let mut args = Map::new();
+        args.insert("url".into(), Value::String(url.to_string()));
+        self.route_to_page(page_id, "goto", args).await?;
+        let url_response = self.route_to_page(page_id, "getUrl", Map::new()).await?;
+        let final_url = call_result_text(&url_response).trim().to_string();
+        if final_url.is_empty() {
+            return Err(CoreError::new(
+                ErrorCode::BrowserProtocolError,
+                "navigation could not be verified: page reported no url",
+            ));
+        }
+        let mut tree_args = Map::new();
+        tree_args.insert("maxDepth".into(), Value::from(1));
+        let tree_response = self.route_to_page(page_id, "tree", tree_args).await?;
+        let tree_text = call_result_text(&tree_response);
+        if tree_text.trim().is_empty() {
+            return Err(CoreError::new(
+                ErrorCode::BrowserProtocolError,
+                "navigation could not be verified: page has no readable content",
+            ));
+        }
+        let title = parse_tree_title(&tree_text);
+        let mut state = self.state.lock().await;
+        if let Some(page) = state
+            .active
+            .as_mut()
+            .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
+        {
+            page.url = Some(final_url.clone());
+            page.title = title;
+            // Navigation replaces major DOM state: every older ref is stale.
+            Self::invalidate_page_refs(page);
+        }
+        Ok(final_url)
+    }
+
+    /// Navigates the active page to a validated URL and returns the verified
+    /// final URL.
+    pub async fn navigate_to(&self, url: &str) -> Result<String, CoreError> {
+        self.guard_page_operation().await?;
+        validate_navigation_url(url)?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        self.goto_and_verify(&page_id, url).await
+    }
+
+    /// Back/forward/reload through fixed application-owned evaluate scripts;
+    /// Lightpanda has no native history primitive. Refs are invalidated as
+    /// soon as the navigation script has run, before waiting for the page to
+    /// settle, because the DOM may be replaced at any moment.
+    pub async fn navigate_history(
+        &self,
+        action: BrowserNavigationAction,
+    ) -> Result<String, CoreError> {
+        let script = match action {
+            BrowserNavigationAction::Back => HISTORY_BACK_SCRIPT,
+            BrowserNavigationAction::Forward => HISTORY_FORWARD_SCRIPT,
+            BrowserNavigationAction::Reload => PAGE_RELOAD_SCRIPT,
+            BrowserNavigationAction::Url => {
+                return Err(CoreError::new(
+                    ErrorCode::InvalidArgument,
+                    "navigate_history requires back, forward, or reload",
+                ))
+            }
+        };
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let mut args = Map::new();
+        args.insert("script".into(), Value::String(script.to_string()));
+        self.route_to_page(&page_id, "evaluate", args).await?;
+        self.invalidate_refs(&page_id).await;
+        let mut wait = Map::new();
+        wait.insert("state".into(), Value::String("load".to_string()));
+        wait.insert("timeout".into(), Value::from(HISTORY_SETTLE_TIMEOUT_MS));
+        self.route_to_page(&page_id, "waitForState", wait).await?;
+        let url_response = self.route_to_page(&page_id, "getUrl", Map::new()).await?;
+        let final_url = call_result_text(&url_response).trim().to_string();
+        let mut state = self.state.lock().await;
+        if let Some(page) = state
+            .active
+            .as_mut()
+            .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
+        {
+            page.url = Some(final_url.clone());
+        }
+        Ok(final_url)
+    }
+
+    /// Web search through the native search tool. Never synthesizes a
+    /// search-engine URL. Browser state after a search is unspecified, so
+    /// refs are invalidated.
+    pub async fn search(&self, query: &str) -> Result<String, CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let mut args = Map::new();
+        args.insert("query".into(), Value::String(query.to_string()));
+        let response = self.route_to_page(&page_id, "search", args).await?;
+        self.invalidate_refs(&page_id).await;
+        Ok(call_result_text(&response))
+    }
+
+    /// Presses one keyboard key natively. Key input can mutate the DOM or
+    /// submit forms, so refs are invalidated even when the press fails.
+    pub async fn press_key(&self, key: &str) -> Result<CallToolResult, CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let mut args = Map::new();
+        args.insert("key".into(), Value::String(key.to_string()));
+        let result = self.route_to_page(&page_id, "press", args).await;
+        self.invalidate_refs(&page_id).await;
+        result
+    }
+
+    /// Evaluates one expression in the page. An optional snapshot ref is
+    /// recovered to a selector and bound as the element argument.
+    pub async fn evaluate_expression(
+        &self,
+        expression: &str,
+        ref_id: Option<&str>,
+    ) -> Result<String, CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let selector = match ref_id {
+            Some(ref_id) => Some(self.selector_for_ref(&page_id, ref_id).await?),
+            None => None,
+        };
+        let script = page_evaluate_script(expression, selector.as_deref());
+        let mut args = Map::new();
+        args.insert("script".into(), Value::String(script));
+        let response = self.route_to_page(&page_id, "evaluate", args).await?;
+        Ok(call_result_text(&response))
+    }
+
+    /// Waits for one public wait condition using native waitFor* tools with
+    /// fixed application-owned scripts. Delay waits on the host in
+    /// Pause-interruptible chunks.
+    pub async fn wait_for(
+        &self,
+        condition: BrowserWaitCondition,
+        timeout_ms: u64,
+    ) -> Result<(), CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        match condition {
+            BrowserWaitCondition::Delay { milliseconds } => {
+                self.wait_delay(milliseconds, timeout_ms).await
+            }
+            BrowserWaitCondition::TextPresent { text } => {
+                let script = format!(
+                    "document.body && document.body.innerText.includes({})",
+                    encode_js_string(&text)
+                );
+                self.wait_for_script(&page_id, &script, timeout_ms).await
+            }
+            BrowserWaitCondition::TextAbsent { text } => {
+                let script = format!(
+                    "!document.body || !document.body.innerText.includes({})",
+                    encode_js_string(&text)
+                );
+                self.wait_for_script(&page_id, &script, timeout_ms).await
+            }
+            BrowserWaitCondition::UrlContains { value } => {
+                let script = format!("location.href.includes({})", encode_js_string(&value));
+                self.wait_for_script(&page_id, &script, timeout_ms).await
+            }
+            BrowserWaitCondition::RefVisible { ref_id } => {
+                let selector = self.selector_for_ref(&page_id, &ref_id).await?;
+                let mut args = Map::new();
+                args.insert("selector".into(), Value::String(selector));
+                args.insert("timeout".into(), Value::from(timeout_ms));
+                self.map_wait_timeout(
+                    self.route_to_page(&page_id, "waitForSelector", args)
+                        .await
+                        .map(|_| ()),
+                )
+            }
+            BrowserWaitCondition::RefHidden { ref_id } => {
+                let selector = match self.selector_for_ref(&page_id, &ref_id).await {
+                    Ok(selector) => selector,
+                    // The node is already gone for this generation: hidden
+                    // holds immediately.
+                    Err(error) if error.code == ErrorCode::BrowserStaleRef => return Ok(()),
+                    Err(error) => return Err(error),
+                };
+                let script = format!(
+                    "document.querySelector({}) === null",
+                    encode_js_string(&selector)
+                );
+                self.wait_for_script(&page_id, &script, timeout_ms).await
+            }
+            BrowserWaitCondition::LoadState { state } => match state {
+                BrowserLoadState::Loading => {
+                    self.wait_for_script(
+                        &page_id,
+                        "document.readyState === \"loading\"",
+                        timeout_ms,
+                    )
+                    .await
+                }
+                BrowserLoadState::Interactive => {
+                    self.wait_for_script(
+                        &page_id,
+                        "document.readyState === \"interactive\"",
+                        timeout_ms,
+                    )
+                    .await
+                }
+                BrowserLoadState::Complete => {
+                    let mut args = Map::new();
+                    args.insert("state".into(), Value::String("load".to_string()));
+                    args.insert("timeout".into(), Value::from(timeout_ms));
+                    self.map_wait_timeout(
+                        self.route_to_page(&page_id, "waitForState", args)
+                            .await
+                            .map(|_| ()),
+                    )?;
+                    self.wait_for_script(
+                        &page_id,
+                        WAIT_READY_STATE_COMPLETE_SCRIPT,
+                        timeout_ms.min(READY_STATE_VERIFY_TIMEOUT_MS),
+                    )
+                    .await
+                }
+            },
+        }
+    }
+
+    async fn wait_for_script(
+        &self,
+        page_id: &str,
+        script: &str,
+        timeout_ms: u64,
+    ) -> Result<(), CoreError> {
+        let mut args = Map::new();
+        args.insert("script".into(), Value::String(script.to_string()));
+        args.insert("timeout".into(), Value::from(timeout_ms));
+        self.map_wait_timeout(
+            self.route_to_page(page_id, "waitForScript", args)
+                .await
+                .map(|_| ()),
+        )
+    }
+
+    /// Public wait conditions time out with BROWSER_ACTION_TIMEOUT no matter
+    /// which native waitFor* tool carried the wait.
+    fn map_wait_timeout(&self, result: Result<(), CoreError>) -> Result<(), CoreError> {
+        result.map_err(|error| match error.code {
+            ErrorCode::BrowserNavigationTimeout | ErrorCode::BrowserActionTimeout => {
+                CoreError::new(
+                    ErrorCode::BrowserActionTimeout,
+                    "browser wait condition timed out",
+                )
+            }
+            _ => error,
+        })
+    }
+
+    async fn wait_delay(&self, milliseconds: u64, timeout_ms: u64) -> Result<(), CoreError> {
+        if milliseconds == 0 || milliseconds > timeout_ms {
+            return Err(CoreError::new(
+                ErrorCode::InvalidArgument,
+                "browser wait delay must be within timeout",
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_millis(milliseconds);
+        loop {
+            if self.core.pause.is_paused() {
+                return Err(CoreError::new(
+                    ErrorCode::AccessPaused,
+                    "access is paused by the user",
+                ));
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1381,6 +1701,19 @@ mod tests {
                     "{\"cookies\":[{\"name\":\"sid\",\"domain\":\"a.test\",\"path\":\"/\",\"value\":\"v\"}]}",
                 )]));
             }
+            if tool == "getUrl" {
+                // Mirror a real page: the current URL is the last goto target.
+                let calls = self.recorder.calls.lock().await;
+                let last_url = calls
+                    .iter()
+                    .rev()
+                    .filter(|(_, name, _)| name == "goto")
+                    .find_map(|(_, _, args)| args.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("about:blank");
+                return Ok(CallToolResult::success(vec![ContentBlock::text(
+                    last_url.to_string(),
+                )]));
+            }
             if tool == "tree" {
                 return Ok(CallToolResult::success(vec![ContentBlock::text(
                     "1 WebArea 'x'\n 2 [i] button 'Go'\n",
@@ -1554,7 +1887,16 @@ mod tests {
         assert_eq!(recorder.created.load(Ordering::SeqCst), 1);
         assert_eq!(recorder.starts.load(Ordering::SeqCst), 1);
         let calls = recorded_calls(&recorder).await;
-        assert_eq!(calls, vec![(0, "goto".to_string())]);
+        // goto success is never trusted: the manager verifies with a
+        // follow-up getUrl and a bounded tree read.
+        assert_eq!(
+            calls,
+            vec![
+                (0, "goto".to_string()),
+                (0, "getUrl".to_string()),
+                (0, "tree".to_string())
+            ]
+        );
         let status = manager.status().await;
         assert!(status.running);
         assert_eq!(

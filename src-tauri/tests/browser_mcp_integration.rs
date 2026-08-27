@@ -165,6 +165,19 @@ impl BrowserPageDriver for FakePageDriver {
                     )),
                 ]));
             }
+            // Mirrors a real page: the current URL is the last goto target.
+            "getUrl" => {
+                let calls = self.shared.calls.lock().unwrap();
+                let last_url = calls
+                    .iter()
+                    .rev()
+                    .filter(|c| c.tool == "goto")
+                    .find_map(|c| c.arguments.get("url").and_then(|v| v.as_str()))
+                    .unwrap_or("about:blank");
+                return Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(last_url.to_string()),
+                ]));
+            }
             "browser_take_screenshot" => {
                 let block = self.shared.screenshot_block.lock().unwrap().take();
                 return Ok(rmcp::model::CallToolResult::success(vec![
@@ -516,7 +529,10 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         );
         // Side-effecting interactions invalidate snapshot refs; the next ref
         // use must re-snapshot first, exactly like a real agent flow.
-        if matches!(name, "browser_click" | "browser_fill" | "browser_select") {
+        if matches!(
+            name,
+            "browser_click" | "browser_fill" | "browser_select" | "browser_press"
+        ) {
             let resnap = client
                 .call_tool(CallToolRequestParams::new("browser_snapshot"))
                 .await
@@ -899,10 +915,20 @@ async fn navigation_url_is_validated_forwarded_and_audited_by_origin_only() {
         serde_json::to_string(&result).unwrap()
     );
 
+    // Native mapping: goto carries the full URL, and goto success is
+    // verified with a follow-up getUrl and a bounded tree read.
     assert!(driver
         .calls()
         .iter()
-        .any(|call| { call.tool == "browser_navigate" && call.arguments["url"] == secret_url }));
+        .any(|call| { call.tool == "goto" && call.arguments["url"] == secret_url }));
+    let calls = driver.calls();
+    let sequence: Vec<&str> = calls
+        .iter()
+        .filter(|call| ["goto", "getUrl", "tree"].contains(&call.tool.as_str()))
+        .map(|call| call.tool.as_str())
+        .collect();
+    assert_eq!(sequence, vec!["goto", "getUrl", "tree"]);
+
     let rows = matching_audit(&core, "browser_navigate");
     assert_eq!(rows.len(), 1);
     let detail = rows[0].detail.as_ref().unwrap();
@@ -938,7 +964,7 @@ async fn navigation_rejects_file_url_before_driver_call() {
 }
 
 #[tokio::test]
-async fn navigation_search_encodes_query_without_auditing_query_text() {
+async fn navigation_search_uses_native_search_and_never_synthesizes_engine_urls() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     client
@@ -955,20 +981,25 @@ async fn navigation_search_encodes_query_without_auditing_query_text() {
         .await
         .unwrap();
     assert!(!result.is_error.unwrap_or(false));
+
+    // Native mapping: the query goes to the runtime's search tool verbatim.
     let search_call = driver
         .calls()
         .into_iter()
         .rev()
-        .find(|call| call.tool == "browser_navigate")
-        .expect("search must map to browser_navigate");
-    let url = search_call.arguments["url"].as_str().unwrap();
-    let parsed = url::Url::parse(url).unwrap();
-    assert_eq!(parsed.scheme(), "https");
-    assert_eq!(parsed.host_str(), Some("www.google.com"));
-    assert_eq!(parsed.path(), "/search");
-    assert_eq!(
-        parsed.query_pairs().find(|(key, _)| key == "q").unwrap().1,
-        query
+        .find(|call| call.tool == "search")
+        .expect("search must map to the native search tool");
+    assert_eq!(search_call.arguments["query"], query);
+
+    // No search-engine URL is ever synthesized on the host side.
+    assert!(
+        driver.calls().iter().all(|call| {
+            call.arguments
+                .get("url")
+                .and_then(|v| v.as_str())
+                .is_none_or(|url| !url.contains("google.com"))
+        }),
+        "search must never synthesize a search-engine url"
     );
 
     let rows = matching_audit(&core, "browser_search");
@@ -976,6 +1007,597 @@ async fn navigation_search_encodes_query_without_auditing_query_text() {
     let detail = rows[0].detail.as_ref().unwrap();
     assert_eq!(detail["query_bytes"], query.len());
     assert!(!serde_json::to_string(detail).unwrap().contains(query));
+}
+
+#[tokio::test]
+async fn navigation_back_forward_reload_use_fixed_evaluate_scripts_and_invalidate_refs() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    for (action, script) in [
+        ("back", "history.back()"),
+        ("forward", "history.forward()"),
+        ("reload", "location.reload()"),
+    ] {
+        let result = client
+            .call_tool(
+                CallToolRequestParams::new("browser_navigate")
+                    .with_arguments(arguments(serde_json::json!({"action": action}))),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !result.is_error.unwrap_or(false),
+            "{action}: {}",
+            serde_json::to_string(&result).unwrap()
+        );
+
+        // The fixed application-owned script ran, then the page was waited
+        // to `load`, then the final URL was read.
+        let eval = driver
+            .calls()
+            .into_iter()
+            .rev()
+            .find(|c| c.tool == "evaluate")
+            .unwrap_or_else(|| panic!("{action} must run an evaluate script"));
+        assert_eq!(eval.arguments["script"], script, "{action}");
+        let wait = driver
+            .calls()
+            .into_iter()
+            .rev()
+            .find(|c| c.tool == "waitForState")
+            .unwrap_or_else(|| panic!("{action} must wait for load"));
+        assert_eq!(wait.arguments["state"], "load", "{action}");
+        assert!(
+            driver.calls().iter().any(|c| c.tool == "getUrl"),
+            "{action} must read the final url"
+        );
+
+        // History navigation replaces the DOM: refs are stale until a new
+        // snapshot.
+        let click = client
+            .call_tool(
+                CallToolRequestParams::new("browser_click")
+                    .with_arguments(arguments(serde_json::json!({"ref":"e4"}))),
+            )
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&click).unwrap();
+        assert!(click.is_error.unwrap_or(false), "{action}: {text}");
+        assert!(text.contains("BROWSER_STALE_REF"), "{action}: {text}");
+
+        let resnap = client
+            .call_tool(CallToolRequestParams::new("browser_snapshot"))
+            .await
+            .unwrap();
+        assert!(!resnap.is_error.unwrap_or(false), "{action}");
+    }
+}
+
+#[tokio::test]
+async fn navigation_goto_success_without_verification_is_a_navigation_error() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    // Variant 1: getUrl comes back empty -> the navigation is unverified.
+    driver.respond("getUrl", String::new());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_navigate").with_arguments(arguments(
+                serde_json::json!({"action":"url","url":"https://example.com/"}),
+            )),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_PROTOCOL_ERROR"), "{text}");
+    assert!(text.contains("could not be verified"), "{text}");
+    assert!(
+        driver.calls().iter().any(|c| c.tool == "goto"),
+        "goto must run before verification"
+    );
+    assert!(
+        driver.calls().iter().all(|c| c.tool != "tree"),
+        "unverified navigation must stop before the tree read"
+    );
+
+    // Variant 2: the bounded tree read comes back empty -> unverified.
+    driver.respond("tree", String::new());
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_navigate").with_arguments(arguments(
+                serde_json::json!({"action":"url","url":"https://example.com/"}),
+            )),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("could not be verified"), "{text}");
+}
+
+#[tokio::test]
+async fn interaction_press_and_evaluate_map_to_native_tools() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    // Plain expression passes through; function literals are invoked once.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_evaluate").with_arguments(arguments(
+                serde_json::json!({"expression":"() => document.title"}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let eval = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "evaluate")
+        .expect("evaluate must map to the native evaluate tool");
+    assert_eq!(eval.arguments["script"], "(() => document.title)()");
+
+    // With a ref, the selector is recovered through nodeDetails and bound
+    // as the element argument.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_evaluate").with_arguments(arguments(
+                serde_json::json!({"expression":"(el) => el.textContent","ref":"e2"}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "nodeDetails" && c.arguments["backendNodeId"] == 2));
+    let eval = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "evaluate")
+        .unwrap();
+    assert_eq!(
+        eval.arguments["script"],
+        "((el) => el.textContent)(document.querySelector(\"#nd-2\"))"
+    );
+
+    // Audit stores byte counts only, never the expression.
+    let rows = matching_audit(&core, "browser_evaluate");
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        let detail = row.detail.as_ref().unwrap();
+        let serialized = serde_json::to_string(detail).unwrap();
+        assert!(!serialized.contains("document.title"), "{serialized}");
+        assert!(!serialized.contains("textContent"), "{serialized}");
+    }
+
+    // press maps to the native press tool with the key verbatim.
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_press")
+                .with_arguments(arguments(serde_json::json!({"key":"Enter"}))),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let press = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "press")
+        .expect("press must map to the native press tool");
+    assert_eq!(press.arguments["key"], "Enter");
+}
+
+#[tokio::test]
+async fn wait_text_and_url_conditions_map_to_fixed_waitforscript_with_encoded_data() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    let text = "Hello \"wide\" world";
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"text_present","text":text},"timeout_ms":1500}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .expect("text_present must map to waitForScript");
+    let encoded = serde_json::to_string(text).unwrap();
+    assert_eq!(
+        wait.arguments["script"],
+        format!("document.body && document.body.innerText.includes({encoded})")
+    );
+    assert_eq!(wait.arguments["timeout"], 1500);
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"text_absent","text":"bye"},"timeout_ms":1500}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .unwrap();
+    assert_eq!(
+        wait.arguments["script"],
+        "!document.body || !document.body.innerText.includes(\"bye\")"
+    );
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"url_contains","value":"example"},"timeout_ms":1500}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .unwrap();
+    assert_eq!(
+        wait.arguments["script"],
+        "location.href.includes(\"example\")"
+    );
+}
+
+#[tokio::test]
+async fn wait_ref_visible_recovers_selector_and_waits_for_selector() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"ref_visible","ref_id":"e4"},"timeout_ms":2500}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    assert!(driver
+        .calls()
+        .iter()
+        .any(|c| c.tool == "nodeDetails" && c.arguments["backendNodeId"] == 4));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForSelector")
+        .expect("ref_visible must map to waitForSelector");
+    assert_eq!(wait.arguments["selector"], "#nd-4");
+    assert_eq!(wait.arguments["timeout"], 2500);
+}
+
+#[tokio::test]
+async fn wait_ref_hidden_waits_for_node_gone_and_stale_ref_succeeds_immediately() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"ref_hidden","ref_id":"e4"},"timeout_ms":2500}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .expect("ref_hidden must map to waitForScript");
+    assert_eq!(
+        wait.arguments["script"],
+        "document.querySelector(\"#nd-4\") === null"
+    );
+
+    // Navigate away: every ref becomes stale. A hidden wait on a stale ref
+    // succeeds immediately because the node is already gone.
+    let nav = client
+        .call_tool(
+            CallToolRequestParams::new("browser_navigate").with_arguments(arguments(
+                serde_json::json!({"action":"url","url":"https://example.com/next"}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!nav.is_error.unwrap_or(false));
+    let waits_before = driver
+        .calls()
+        .iter()
+        .filter(|c| c.tool == "waitForScript")
+        .count();
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"ref_hidden","ref_id":"e4"},"timeout_ms":2500}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !result.is_error.unwrap_or(false),
+        "{}",
+        serde_json::to_string(&result).unwrap()
+    );
+    let waits_after = driver
+        .calls()
+        .iter()
+        .filter(|c| c.tool == "waitForScript")
+        .count();
+    assert_eq!(
+        waits_before, waits_after,
+        "stale ref hidden wait must not call the page"
+    );
+}
+
+#[tokio::test]
+async fn wait_load_state_maps_each_public_state_to_native_waits() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"load_state","state":"complete"},"timeout_ms":3000}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForState")
+        .expect("complete must map to waitForState");
+    assert_eq!(wait.arguments["state"], "load");
+    assert_eq!(wait.arguments["timeout"], 3000);
+    let verify = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .expect("complete must verify readyState");
+    assert_eq!(
+        verify.arguments["script"],
+        "document.readyState === \"complete\""
+    );
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"load_state","state":"loading"},"timeout_ms":3000}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .unwrap();
+    assert_eq!(
+        wait.arguments["script"],
+        "document.readyState === \"loading\""
+    );
+
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"load_state","state":"interactive"},"timeout_ms":3000}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    let wait = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "waitForScript")
+        .unwrap();
+    assert_eq!(
+        wait.arguments["script"],
+        "document.readyState === \"interactive\""
+    );
+}
+
+#[tokio::test]
+async fn wait_delay_sleeps_on_host_without_upstream_calls_and_is_bounded() {
+    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let before = driver.calls().len();
+
+    let started = std::time::Instant::now();
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                serde_json::json!({"condition":{"kind":"delay","milliseconds":150},"timeout_ms":2000}),
+            )),
+        )
+        .await
+        .unwrap();
+    assert!(!result.is_error.unwrap_or(false));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(120),
+        "delay must actually wait on the host"
+    );
+    assert_eq!(
+        driver.calls().len(),
+        before,
+        "delay must not call the page child"
+    );
+
+    for bad in [
+        serde_json::json!({"condition":{"kind":"delay","milliseconds":3000},"timeout_ms":2000}),
+        serde_json::json!({"condition":{"kind":"delay","milliseconds":0},"timeout_ms":2000}),
+    ] {
+        let result = client
+            .call_tool(CallToolRequestParams::new("browser_wait").with_arguments(arguments(bad)))
+            .await
+            .unwrap();
+        let text = serde_json::to_string(&result).unwrap();
+        assert!(result.is_error.unwrap_or(false), "{text}");
+        assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    }
+    assert_eq!(driver.calls().len(), before);
+}
+
+#[tokio::test]
+async fn wait_delay_is_interrupted_by_pause() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let before = driver.calls().len();
+
+    let started = std::time::Instant::now();
+    let handle = tokio::spawn(async move {
+        client
+            .call_tool(
+                CallToolRequestParams::new("browser_wait").with_arguments(arguments(
+                    serde_json::json!({"condition":{"kind":"delay","milliseconds":5000},"timeout_ms":10000}),
+                )),
+            )
+            .await
+            .unwrap()
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    core.pause.set(true);
+    let result = handle.await.unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("ACCESS_PAUSED"), "{text}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "pause must interrupt the delay promptly"
+    );
+    assert_eq!(driver.calls().len(), before);
+}
+
+#[tokio::test]
+async fn process_lost_marks_only_that_page_lost_and_never_replays_side_effects() {
+    let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
+    let client = client(port).await;
+    open_browser(&client).await;
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
+
+    driver.fail(
+        "click",
+        CoreError::new(ErrorCode::BrowserProcessLost, "page process was lost"),
+    );
+    let result = client
+        .call_tool(
+            CallToolRequestParams::new("browser_click")
+                .with_arguments(arguments(serde_json::json!({"ref":"e4"}))),
+        )
+        .await
+        .unwrap();
+    let text = serde_json::to_string(&result).unwrap();
+    assert!(result.is_error.unwrap_or(false), "{text}");
+    assert!(text.contains("BROWSER_PROCESS_LOST"), "{text}");
+
+    // The side-effecting action reached the child exactly once: no replay.
+    let clicks = driver.calls().iter().filter(|c| c.tool == "click").count();
+    assert_eq!(clicks, 1, "a lost action must never be replayed");
+    let rows = matching_audit(&core, "browser_click");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].decision, "error");
+    assert_eq!(rows[0].error_code.as_deref(), Some("BROWSER_PROCESS_LOST"));
+
+    // The page is latched lost: further calls fail closed without reaching
+    // the driver.
+    let calls_before = driver.calls().len();
+    let snap = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    let snap_text = serde_json::to_string(&snap).unwrap();
+    assert!(snap.is_error.unwrap_or(false), "{snap_text}");
+    assert!(snap_text.contains("BROWSER_PROCESS_LOST"), "{snap_text}");
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "a lost page must never receive another call"
+    );
+
+    // Sibling isolation: a new logical tab gets a fresh child and works.
+    let new_tab = client
+        .call_tool(
+            CallToolRequestParams::new("browser_tabs")
+                .with_arguments(arguments(serde_json::json!({"action":"new"}))),
+        )
+        .await
+        .unwrap();
+    assert!(!new_tab.is_error.unwrap_or(false));
+    let snap = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(
+        !snap.is_error.unwrap_or(false),
+        "sibling page must survive one lost page: {}",
+        serde_json::to_string(&snap).unwrap()
+    );
 }
 
 #[tokio::test]
@@ -1507,122 +2129,6 @@ async fn snapshot_300kib_is_truncated_to_256kib_with_byte_only_audit() {
 }
 
 #[tokio::test]
-async fn wait_conditions_map_to_upstream_primitives() {
-    let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
-    let client = client(port).await;
-    open_browser(&client).await;
-
-    let ok_cases = [
-        (
-            serde_json::json!({"condition":{"kind":"text_present","text":"Ready"}}),
-            serde_json::json!({"text":"Ready"}),
-        ),
-        (
-            serde_json::json!({"condition":{"kind":"text_absent","text":"Gone"}}),
-            serde_json::json!({"textGone":"Gone"}),
-        ),
-        (
-            serde_json::json!({"condition":{"kind":"delay","milliseconds":250},"timeout_ms":2000}),
-            serde_json::json!({"time":0.25}),
-        ),
-    ];
-    for (args, expected) in ok_cases {
-        let result = client
-            .call_tool(CallToolRequestParams::new("browser_wait").with_arguments(arguments(args)))
-            .await
-            .unwrap();
-        assert!(
-            !result.is_error.unwrap_or(false),
-            "{}",
-            serde_json::to_string(&result).unwrap()
-        );
-        let call = driver
-            .calls()
-            .into_iter()
-            .rev()
-            .find(|c| c.tool == "browser_wait_for")
-            .expect("text/delay waits must map to browser_wait_for");
-        assert_eq!(call.arguments, expected);
-    }
-
-    let before = driver
-        .calls()
-        .iter()
-        .filter(|c| c.tool == "browser_wait_for")
-        .count();
-    let too_long = client
-        .call_tool(CallToolRequestParams::new("browser_wait").with_arguments(arguments(
-            serde_json::json!({"condition":{"kind":"delay","milliseconds":5000},"timeout_ms":1000}),
-        )))
-        .await
-        .unwrap();
-    let text = serde_json::to_string(&too_long).unwrap();
-    assert!(too_long.is_error.unwrap_or(false), "{text}");
-    assert!(text.contains("INVALID_ARGUMENT"), "{text}");
-    assert_eq!(
-        driver
-            .calls()
-            .iter()
-            .filter(|c| c.tool == "browser_wait_for")
-            .count(),
-        before,
-        "over-long delay reached the driver"
-    );
-
-    let poll_cases = [
-        (
-            serde_json::json!({"condition":{"kind":"ref_visible","ref_id":"e9"},"timeout_ms":2000}),
-            "getBoundingClientRect",
-            Some("e9"),
-        ),
-        (
-            serde_json::json!({"condition":{"kind":"url_contains","value":"example.test"},"timeout_ms":2000}),
-            "location.href",
-            None,
-        ),
-        (
-            serde_json::json!({"condition":{"kind":"load_state","state":"complete"},"timeout_ms":2000}),
-            "document.readyState",
-            None,
-        ),
-    ];
-    for (args, marker, target) in poll_cases {
-        let result = client
-            .call_tool(CallToolRequestParams::new("browser_wait").with_arguments(arguments(args)))
-            .await
-            .unwrap();
-        assert!(
-            !result.is_error.unwrap_or(false),
-            "{}",
-            serde_json::to_string(&result).unwrap()
-        );
-        let call = driver
-            .calls()
-            .into_iter()
-            .rev()
-            .find(|c| {
-                c.tool == "browser_evaluate"
-                    && c.arguments["function"]
-                        .as_str()
-                        .is_some_and(|f| f.contains(marker))
-            })
-            .unwrap_or_else(|| panic!("wait must poll browser_evaluate with {marker}"));
-        match target {
-            Some(expected) => assert_eq!(call.arguments["target"], expected),
-            None => assert!(call.arguments.get("target").is_none()),
-        }
-    }
-
-    assert!(
-        driver
-            .calls()
-            .iter()
-            .all(|c| c.tool != "browser_run_code" && c.tool != "browser_run_code_unsafe"),
-        "wait polling must never use process-level code execution"
-    );
-}
-
-#[tokio::test]
 async fn viewport_is_unsupported_and_invalid_sizes_are_rejected_before_any_effect() {
     let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
@@ -2147,28 +2653,11 @@ async fn dom_inspection_uses_fixed_function_with_exact_ref() {
 }
 
 #[tokio::test]
-async fn evaluate_maps_to_page_context_and_never_process_code() {
+async fn evaluate_rejects_empty_expression_before_any_upstream_call() {
     let (port, _dir, _core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-
-    let result = client
-        .call_tool(
-            CallToolRequestParams::new("browser_evaluate").with_arguments(arguments(
-                serde_json::json!({"expression":"() => 42","ref":"e1"}),
-            )),
-        )
-        .await
-        .unwrap();
-    assert!(!result.is_error.unwrap_or(false));
-    let call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_evaluate")
-        .unwrap();
-    assert_eq!(call.arguments["function"], "() => 42");
-    assert_eq!(call.arguments["target"], "e1");
+    let calls_before = driver.calls().len();
 
     let empty = client
         .call_tool(
@@ -2180,6 +2669,11 @@ async fn evaluate_maps_to_page_context_and_never_process_code() {
     let text = serde_json::to_string(&empty).unwrap();
     assert!(empty.is_error.unwrap_or(false), "{text}");
     assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+    assert_eq!(
+        driver.calls().len(),
+        calls_before,
+        "empty expression reached the driver"
+    );
 
     assert!(
         driver

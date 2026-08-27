@@ -76,14 +76,6 @@ const CHROMIUM_PERFORMANCE_CODE: &str = r#"async (page) => {
   return result;
 }"#;
 
-/// Fixed app-owned page-context expressions. These run through upstream
-/// `browser_evaluate` (page context) and never through process-level code
-/// execution. They are named constants so tests can prove that model/MCP input
-/// is never interpolated into them.
-pub(crate) const WAIT_VISIBLE_FUNCTION: &str = "(element) => { const s=getComputedStyle(element); const r=element.getBoundingClientRect(); return s.visibility !== 'hidden' && s.display !== 'none' && r.width > 0 && r.height > 0; }";
-pub(crate) const WAIT_URL_FUNCTION: &str = "() => location.href";
-pub(crate) const WAIT_READY_FUNCTION: &str = "() => document.readyState";
-
 /// DOM inspection expression. The outerHTML is serialized from a CLONED element
 /// after redacting sensitive attributes and password values, so the live DOM is
 /// never mutated and secret values never leak through the serialized markup.
@@ -692,9 +684,6 @@ mod tests {
     #[test]
     fn fixed_expressions_have_no_interpolation_points() {
         for f in [
-            WAIT_VISIBLE_FUNCTION,
-            WAIT_URL_FUNCTION,
-            WAIT_READY_FUNCTION,
             DOM_INSPECT_FUNCTION,
             PERFORMANCE_FUNCTION,
             CHROMIUM_PERFORMANCE_CODE,
