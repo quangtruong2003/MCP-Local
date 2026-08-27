@@ -58,23 +58,22 @@ The system tray mirrors the essentials: open the window, start/stop the tunnel, 
 
 ## MCP tool surface
 
-Forty-three tools are exposed. `get_agent_policy` reports live Agent/Privacy state; `list_workspaces` returns approved workspace ids without absolute paths. The nine workspace-scoped file/execution tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), `apply_patch`, `run_command` (approved basenames: git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet), and `run_powershell` (requires the workspace's Full PowerShell mode unless unrestricted access is enabled). `list_capture_targets` and `capture_screen` provide permission-gated visual evidence. Read tools return bounded results (`read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` (sha256) that `apply_patch` requires as `base_revision`.
+Fifty-three tools are exposed. `get_agent_policy` reports live Agent/Privacy state; `list_workspaces` returns approved workspace ids without absolute paths. The nine workspace-scoped file/execution tools are `list_directory`, `find_files`, `search_text`, `read_file`, `read_files` (≤8 per call), `create_file` (≤10 MB), `apply_patch`, `run_command` (approved basenames: git, cargo, rustc, npm, npx, node, pnpm, yarn, python, python3, pip, go, dotnet), and `run_powershell` (requires the workspace's Full PowerShell mode unless unrestricted access is enabled). `list_capture_targets` and `capture_screen` provide permission-gated visual evidence. Read tools return bounded results (`read_file` returns a ≤256 KB window with a truncation flag) and carry a `revision` (sha256) that `apply_patch` requires as `base_revision`.
 
 `capture_screen` returns one in-memory PNG image block plus dimensions, encoded byte count, and SHA-256 metadata. Screen capture is off by default, has its own permission independent of unrestricted filesystem/execution access, can be limited to windows only, and is always blocked by Pause.
 
 ## Browser automation
 
-The app can drive a real browser on the agent's behalf — navigate, click, fill, read the accessibility snapshot/DOM, capture screenshots, collect console and network diagnostics, record traces, and upload/download files — through the same fail-closed policy pipeline as the file and command tools. A dedicated family of `browser_*` tools covers interaction, inspection, visual evidence, debugging, file transfer, and batched steps.
+The app can drive a real browser on the agent's behalf — navigate, click, fill, read the accessibility snapshot/DOM, evaluate page JavaScript, collect console and network diagnostics, and record traces — through the same fail-closed policy pipeline as the file and command tools. A dedicated family of 39 `browser_*` tools covers interaction, inspection, debugging, and batched steps.
 
 - **On by default, one toggle**: Browser Automation defaults **ON** but can be disabled with a single Settings toggle. When off, every browser tool fails closed with a clear blocker.
-- **Bundled Chromium + dedicated profile**: the defaults are bundled Chromium and a dedicated **Local Workspaces** browser profile stored inside the app's own data folder — completely separate from your personal browser profile, bookmarks, passwords, and history.
-- **Background mode (default)**: runs in the background and does **not** open a normal browser window.
-- **Visible Debug (opt-in)**: can show a Chromium-family browser window plus DevTools for step-by-step debugging.
-- **Screenshots are page-renderer captures**: browser screenshots come from the page renderer and are independent of the OS Screen Capture permission.
-- **Files stay confined**: uploads and downloads remain sandbox/workspace-confined; downloads land in the session artifact store and reach a workspace only through an explicit, policy-checked export step.
+- **Lightpanda runtime in managed WSL2**: browser pages run in the Lightpanda headless browser (pinned **0.3.7**) inside an app-owned WSL2 distro, as a non-root user. The runtime is **not bundled** in the installer; it is downloaded and checksum-verified on first browser use.
+- **Background/headless only**: Lightpanda runs headless in the managed distro and does **not** open a visible browser window or DevTools.
+- **Dedicated profile**: the browser profile and cookies live inside the app's own WSL distro — completely separate from your personal browser profile, bookmarks, passwords, and history.
+- **Unsupported operations fail closed**: screenshots, file upload/download, device emulation, viewport resizing, and dialog handling are not supported by the Lightpanda runtime and return a stable `BROWSER_FEATURE_UNSUPPORTED` error with zero side effects.
 - **Pause wins**: Pause blocks browser automation immediately, just like every other MCP tool.
 
-**Installer size impact**: the release stages a self-contained browser runtime — bundled Node, Playwright MCP, and matching Chromium and Firefox binaries (a **~1.1 GiB** staged runtime) — so the installer and installed footprint are substantially larger than a non-browser build.
+**Installer size impact**: the browser runtime is **not** included in the installer. The NSIS package stays small (under 100 MiB) and ships only the app, the Tailscale sidecar, a small Lightpanda runtime manifest, and license/notice metadata. The Ubuntu 24.04 rootfs and the Lightpanda binary are downloaded separately on first use, each verified against a pinned SHA-256 digest. See `THIRD_PARTY_NOTICES.md` and `third-party/lightpanda-source-reference.txt`.
 
 ## Agent Skill and fallback prompts
 
