@@ -315,24 +315,6 @@ async fn evaluate_str(client: &Client, expression: &str) -> String {
         .to_string()
 }
 
-/// Tolerant string evaluate: returns `None` instead of panicking when the
-/// browser call fails (used inside retry loops where a transient failure is an
-/// expected outcome, not a test failure).
-async fn try_evaluate_str(client: &Client, expression: &str) -> Option<String> {
-    let result = call(
-        client,
-        "browser_evaluate",
-        json!({ "expression": expression }),
-    )
-    .await;
-    if !is_ok(&result) {
-        return None;
-    }
-    let content = structured(&result);
-    let raw = content["result"].as_str()?;
-    parse_evaluate_result(raw).as_str().map(str::to_string)
-}
-
 /// Opens the browser and navigates to `url`; returns the structured payload.
 async fn open_url(client: &Client, url: &str) -> Value {
     let result = call(client, "browser_open", json!({ "url": url })).await;

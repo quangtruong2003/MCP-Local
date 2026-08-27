@@ -7,3 +7,4 @@ pub mod mcp;
 pub mod playwright;
 pub mod policy;
 pub mod types;
+pub mod wsl;
