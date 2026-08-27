@@ -26,9 +26,9 @@ use super::{
     playwright::PlaywrightMcpDriver,
     policy::validate_navigation_url,
     types::{
-        BrowserEmulation, BrowserEngine, BrowserLaunchSpec, BrowserPageStatus,
-        BrowserRunMode, BrowserRuntimeSettings, BrowserSessionStatus,
-        DEFAULT_ACTION_TIMEOUT_MS, DEFAULT_NAVIGATION_TIMEOUT_MS,
+        BrowserEmulation, BrowserEngine, BrowserLaunchSpec, BrowserPageStatus, BrowserRunMode,
+        BrowserRuntimeSettings, BrowserSessionStatus, DEFAULT_ACTION_TIMEOUT_MS,
+        DEFAULT_NAVIGATION_TIMEOUT_MS,
     },
 };
 

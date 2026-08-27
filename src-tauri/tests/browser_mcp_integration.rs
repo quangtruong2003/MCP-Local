@@ -2078,10 +2078,7 @@ async fn devtools_is_unsupported_under_fixed_background_backend() {
         .unwrap();
     let text = serde_json::to_string(&result).unwrap();
     assert!(result.is_error.unwrap_or(false), "{text}");
-    assert!(
-        text.contains("BROWSER_FEATURE_UNSUPPORTED"),
-        "{text}"
-    );
+    assert!(text.contains("BROWSER_FEATURE_UNSUPPORTED"), "{text}");
     assert_eq!(
         driver.starts.load(Ordering::SeqCst),
         1,
