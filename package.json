@@ -4,10 +4,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "vitest run",
     "build": "tsc && vite build",
+    "tauri": "tauri",
+    "test": "vitest run",
     "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build-tailscale-sidecar.ps1",
     "verify:lightpanda-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-lightpanda-runtime-manifest.ps1",
+    "verify:browser-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-browser-release.ps1",
     "validate:skill": "python scripts/validate-agent-skill.py",
     "package:skill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-agent-skill.ps1",
     "verify": "npm run validate:skill && npm run build && npm run build:sidecar"

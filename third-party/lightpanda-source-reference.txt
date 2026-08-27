@@ -1,0 +1,35 @@
+Lightpanda — upstream source reference (AGPLv3)
+================================================
+
+This product uses the Lightpanda headless browser as a separate,
+runtime-provisioned component. The Lightpanda binary is NOT bundled in the
+installer; it is downloaded and verified on first browser use.
+
+Component name:     Lightpanda
+Exact version:      0.3.7
+License:            GNU Affero General Public License v3.0 (AGPL-3.0)
+Upstream project:   https://github.com/lightpanda-io/browser
+Source reference:   https://github.com/lightpanda-io/browser (tag 0.3.7)
+
+Distributed artifact (unmodified upstream release binary):
+  Platform:         x86_64-linux
+  Asset URL:        https://github.com/lightpanda-io/browser/releases/download/0.3.7/lightpanda-x86_64-linux
+  SHA-256:          895339b02205171a181dde743ae0068bb4564884076feac8482baca9c212aa5a
+
+Modification status: UNMODIFIED. The binary is the exact, unmodified artifact
+published by the Lightpanda project at the release tag above, verified against
+the official SHA-256 digest before use.
+
+AGPLv3 obligations:
+  Lightpanda is licensed under the GNU AGPLv3. The complete corresponding
+  machine-readable source code for Lightpanda 0.3.7 is available from the
+  upstream repository at https://github.com/lightpanda-io/browser. A copy of
+  the GNU AGPLv3 license text is available at
+  https://www.gnu.org/licenses/agpl-3.0.txt and from the upstream repository.
+  This product keeps Lightpanda as a separate process/runtime component and
+  does not repackage or modify the binary.
+
+Runtime provisioning:
+  The Lightpanda binary and the managed Linux rootfs are downloaded separately
+  after installation and are not included in the NSIS installer. See
+  THIRD_PARTY_NOTICES.md and src-tauri/resources/lightpanda-runtime-manifest.json.
