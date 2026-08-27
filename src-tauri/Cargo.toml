@@ -45,6 +45,7 @@ url = "2"
 rand = "0.10.2"
 sha2 = "0.10"
 base64 = "0.23.1"
+regex = "1"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]

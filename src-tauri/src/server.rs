@@ -10,24 +10,24 @@ use crate::{
     browser::{
         files::{BrowserDownloadInfo, BrowserSavedDownloadOutput},
         mcp::{
-            call_result_text, truncate_utf8, validate_extract_schema, validate_find_element,
-            validate_scroll_offsets, validated_content_cap, BrowserConsoleArgs,
-            BrowserConsoleOutput, BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs,
-            BrowserDomOutput, BrowserDragArgs, BrowserEmulateArgs, BrowserEvaluateArgs,
-            BrowserEvaluateOutput, BrowserExtractArgs, BrowserExtractOutput, BrowserFillArgs,
-            BrowserFindElementArgs, BrowserHtmlArgs, BrowserMarkdownArgs, BrowserNavigateArgs,
-            BrowserNavigationAction, BrowserNavigationOutput, BrowserNetworkArgs,
-            BrowserNetworkOutput, BrowserOkOutput, BrowserOpenArgs, BrowserOpenOutput,
-            BrowserPageSummary, BrowserPerformanceOutput, BrowserPressArgs, BrowserRunStepsArgs,
-            BrowserRunStepsOutput, BrowserSaveDownloadArgs, BrowserScreenshotArgs,
-            BrowserScreenshotMetadata, BrowserScreenshotMode, BrowserScrollArgs, BrowserSearchArgs,
-            BrowserSelectArgs, BrowserSetCheckedArgs, BrowserSnapshotOutput, BrowserStep,
-            BrowserStepError, BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs,
-            BrowserTextOutput, BrowserTextTruncatedOutput, BrowserTraceAction, BrowserTraceArgs,
-            BrowserTraceOutput, BrowserUploadArgs, BrowserUploadOutput, BrowserUploadSource,
-            BrowserViewportArgs, BrowserViewportOutput, BrowserWaitArgs, BrowserWaitCondition,
+            call_result_text, is_static_initiator, redact_sensitive_url, truncate_utf8,
+            validate_extract_schema, validate_find_element, validate_scroll_offsets,
+            validated_content_cap, BrowserConsoleArgs, BrowserConsoleOutput, BrowserDevtoolsOutput,
+            BrowserDialogArgs, BrowserDomArgs, BrowserDomOutput, BrowserDragArgs,
+            BrowserEmulateArgs, BrowserEvaluateArgs, BrowserEvaluateOutput, BrowserExtractArgs,
+            BrowserExtractOutput, BrowserFillArgs, BrowserFindElementArgs, BrowserHtmlArgs,
+            BrowserMarkdownArgs, BrowserNavigateArgs, BrowserNavigationAction,
+            BrowserNavigationOutput, BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput,
+            BrowserOpenArgs, BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput,
+            BrowserPressArgs, BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
+            BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScreenshotMode,
+            BrowserScrollArgs, BrowserSearchArgs, BrowserSelectArgs, BrowserSetCheckedArgs,
+            BrowserSnapshotOutput, BrowserStep, BrowserStepError, BrowserTabAction,
+            BrowserTabsArgs, BrowserTargetArgs, BrowserTextOutput, BrowserTextTruncatedOutput,
+            BrowserTraceAction, BrowserTraceArgs, BrowserTraceOutput, BrowserUploadArgs,
+            BrowserUploadOutput, BrowserUploadSource, BrowserViewportArgs, BrowserViewportOutput,
+            BrowserWaitArgs, BrowserWaitCondition,
         },
-        playwright::{DOM_INSPECT_FUNCTION, PERFORMANCE_FUNCTION},
         policy::{
             bounded_event_limit, redacted_origin, validate_batch_step_count, validate_timeout,
             validate_viewport,
@@ -381,70 +381,34 @@ fn console_level_histogram(text: &str) -> std::collections::BTreeMap<String, u64
     levels
 }
 
-/// Level of one console line. Pinned upstream 0.0.79 renders messages as
-/// `[ERROR] boom @ https://example.test/app.js:12`; the simpler
-/// `error: boom` shape is accepted as a fallback. Anything else is "other".
+/// Level of one console line. Lightpanda `consoleLogs` renders each message as
+/// `[tag] text` where tag is one of log/debug/info/warning/error/fatal/trace/
+/// dir/dirxml. Tags are folded onto the four public levels; anything unparsable
+/// is treated as debug so it is never silently dropped.
 fn console_line_level(line: &str) -> String {
     let trimmed = line.trim();
-    let prefix = if let Some(rest) = trimmed.strip_prefix('[') {
+    let tag = if let Some(rest) = trimmed.strip_prefix('[') {
         rest.split(']').next().unwrap_or_default()
     } else {
-        trimmed.split(':').next().unwrap_or_default()
+        ""
     };
-    match prefix.trim().to_ascii_lowercase().as_str() {
-        level @ ("error" | "warning" | "info" | "debug") => level.to_string(),
-        _ => "other".to_string(),
+    match tag.trim().to_ascii_lowercase().as_str() {
+        "error" | "fatal" => "error".to_string(),
+        "warning" => "warning".to_string(),
+        "info" | "log" => "info".to_string(),
+        _ => "debug".to_string(),
     }
 }
 
-/// Strips the pinned upstream 0.0.79 presentation header from console output:
-/// `Total messages: N (Errors: E, Warnings: W)`, the optional
-/// `Returning M messages for level "X"` line, and the separating blank line.
-/// Message text itself is never altered.
-fn strip_console_header(text: &str) -> &str {
-    let mut offset = 0;
-    let mut saw_header = false;
-    for line in text.split_inclusive('\n') {
-        let trimmed = line.trim();
-        if trimmed.starts_with("Total messages:")
-            || (saw_header && trimmed.starts_with("Returning "))
-        {
-            saw_header = true;
-            offset += line.len();
-            continue;
-        }
-        if saw_header && trimmed.is_empty() {
-            offset += line.len();
-            continue;
-        }
-        break;
+/// Severity rank used for the minimum-level console filter.
+fn console_level_rank(level: &str) -> u8 {
+    match level {
+        "debug" => 0,
+        "info" => 1,
+        "warning" => 2,
+        "error" => 3,
+        _ => 0,
     }
-    &text[offset..]
-}
-
-fn redact_network_text(text: String) -> String {
-    const DENY: &[&str] = &[
-        "authorization",
-        "proxy-authorization",
-        "cookie",
-        "set-cookie",
-        "x-api-key",
-    ];
-    text.lines()
-        .map(|line| {
-            let lower = line.to_ascii_lowercase();
-            if DENY
-                .iter()
-                .any(|name| lower.trim_start().starts_with(&format!("{name}:")))
-            {
-                let name = line.split(':').next().unwrap_or("header");
-                format!("{name}: [redacted]")
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 async fn browser_wait_internal(
@@ -1152,22 +1116,13 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Drag from one semantic element target to another.",
+        description = "Drag from one semantic element target to another using an app-owned synthetic DataTransfer event sequence. Refs are invalidated even when the drop is rejected.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserOkOutput>()
     )]
     async fn browser_drag(&self, Parameters(a): Parameters<BrowserDragArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert(
-                "startTarget".into(),
-                serde_json::Value::String(a.start_ref.clone()),
-            );
-            args.insert(
-                "endTarget".into(),
-                serde_json::Value::String(a.end_ref.clone()),
-            );
-            self.browser.call_upstream("browser_drag", args).await?;
+            self.browser.drag_refs(&a.start_ref, &a.end_ref).await?;
             Ok::<_, CoreError>(BrowserOkOutput { ok: true })
         }
         .await;
@@ -1352,16 +1307,16 @@ impl WorkspaceServer {
                     "browser console level must be error, warning, info, or debug",
                 ));
             }
-            let mut args = serde_json::Map::new();
-            args.insert("level".into(), serde_json::Value::String(level.clone()));
-            args.insert("all".into(), serde_json::Value::Bool(true));
-            let response = self
-                .browser
-                .call_upstream("browser_console_messages", args)
-                .await?;
-            let raw = call_result_text(&response);
-            let (text, next_cursor) =
-                paginate_lines(strip_console_header(&raw), a.cursor.as_deref(), limit)?;
+            // Native `consoleLogs` drains the child buffer; the manager ring is
+            // the stable source. Filter by minimum severity app-side.
+            let ring = self.browser.console_lines().await?;
+            let min_rank = console_level_rank(&level);
+            let filtered: Vec<String> = ring
+                .into_iter()
+                .filter(|line| console_level_rank(&console_line_level(line)) >= min_rank)
+                .collect();
+            let joined = filtered.join("\n");
+            let (text, next_cursor) = paginate_lines(&joined, a.cursor.as_deref(), limit)?;
             let count = text.lines().count();
             let levels = console_level_histogram(&text);
             Ok::<_, CoreError>(BrowserConsoleOutput {
@@ -1381,7 +1336,7 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Read bounded browser network request metadata. The optional filter is a regular expression matched against request URLs (e.g. \"/api/.*user\"). Sensitive authorization/cookie/API-key header lines are redacted and response bodies are never fetched.",
+        description = "Read bounded browser network resource metadata from Performance Resource Timing. The optional filter is a regular expression matched against resource URLs (e.g. \"/api/.*user\"). Credential-like URL query values are redacted. Method, status, and headers are not available in this runtime and are never fabricated.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserNetworkOutput>()
     )]
@@ -1391,31 +1346,74 @@ impl WorkspaceServer {
     ) -> CallToolResult {
         let result = async {
             let limit = bounded_event_limit(a.limit)?;
-            let mut args = serde_json::Map::new();
-            args.insert("static".into(), serde_json::Value::Bool(a.include_static));
-            if let Some(filter) = a.filter.clone() {
-                // Pre-flight guard: the filter is forwarded upstream as a JavaScript
-                // regular expression; bound its length and reject control characters
-                // before it leaves this process.
-                if filter.len() > 4096 || filter.bytes().any(|byte| byte < 0x20) {
-                    return Err(CoreError::new(
-                        ErrorCode::InvalidArgument,
-                        "browser network filter must be a regular expression of at most 4096 bytes without control characters",
-                    ));
+            let filter_regex = match a.filter.clone() {
+                Some(filter) => {
+                    // Pre-flight guard: bound the length and reject control
+                    // characters before compiling, then compile app-side.
+                    if filter.len() > 4096 || filter.bytes().any(|byte| byte < 0x20) {
+                        return Err(CoreError::new(
+                            ErrorCode::InvalidArgument,
+                            "browser network filter must be a regular expression of at most 4096 bytes without control characters",
+                        ));
+                    }
+                    Some(regex::Regex::new(&filter).map_err(|_| {
+                        CoreError::new(
+                            ErrorCode::InvalidArgument,
+                            "browser network filter is not a valid regular expression",
+                        )
+                    })?)
                 }
-                args.insert("filter".into(), serde_json::Value::String(filter));
+                None => None,
+            };
+            // Lightpanda exposes only Performance Resource Timing; there are no
+            // method/status/header fields to fetch and none are fabricated.
+            let raw = self.browser.network_resource_timing().await?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
+            let resources = parsed
+                .get("resources")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let mut lines: Vec<String> = Vec::new();
+            for resource in &resources {
+                let name = resource
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let initiator = resource
+                    .get("initiatorType")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("other");
+                if !a.include_static && is_static_initiator(initiator) {
+                    continue;
+                }
+                if let Some(re) = &filter_regex {
+                    if !re.is_match(name) {
+                        continue;
+                    }
+                }
+                let duration = resource
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let size = resource
+                    .get("transferSize")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(0);
+                let url = redact_sensitive_url(name);
+                lines.push(format!(
+                    "[{initiator}] {url} => duration={duration:.0}ms size={size}"
+                ));
             }
-            let response = self
-                .browser
-                .call_upstream("browser_network_requests", args)
-                .await?;
-            let safe = redact_network_text(call_result_text(&response));
-            let (text, next_cursor) = paginate_lines(&safe, a.cursor.as_deref(), limit)?;
+            let joined = lines.join("\n");
+            let (text, next_cursor) = paginate_lines(&joined, a.cursor.as_deref(), limit)?;
             let count = text.lines().count();
             Ok::<_, CoreError>(BrowserNetworkOutput {
                 count,
                 requests: text,
                 next_cursor,
+                coverage: "performance-resource-timing: method, status, and headers are not available in this runtime".to_string(),
             })
         }
         .await;
@@ -1427,20 +1425,14 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Inspect one element target with app-owned DOM/computed-style JavaScript. Sensitive value/token/password-like attributes are redacted.",
+        description = "Inspect one element target via nodeDetails plus a redacted outerHTML and computed-style allowlist. Sensitive value/token/password-like attributes are redacted. The layout rect is always null because this runtime performs no layout.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserDomOutput>()
     )]
     async fn browser_dom(&self, Parameters(a): Parameters<BrowserDomArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
-            args.insert(
-                "function".into(),
-                serde_json::Value::String(DOM_INSPECT_FUNCTION.into()),
-            );
-            let response = self.browser.call_upstream("browser_evaluate", args).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), 64 * 1024);
+            let text = self.browser.dom_inspect(&a.ref_id).await?;
+            let (text, truncated) = truncate_utf8(text, 64 * 1024);
             Ok::<_, CoreError>(BrowserDomOutput {
                 target: a.ref_id.clone(),
                 result: text,
@@ -1494,33 +1486,29 @@ impl WorkspaceServer {
     }
 
     #[tool(
-        description = "Read browser performance timing/resource data from the active page. The Lightpanda runtime exposes no CDP, so cdp_supported is always false.",
+        description = "Read browser performance timing/resource data from the active page via the Performance API. The Lightpanda runtime exposes no CDP, so cdp_supported is always false.",
         annotations(read_only_hint = true),
         output_schema = schema_for_output::<BrowserPerformanceOutput>()
     )]
     async fn browser_performance(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = async {
-            let mut args = serde_json::Map::new();
-            args.insert(
-                "function".into(),
-                serde_json::Value::String(PERFORMANCE_FUNCTION.into()),
-            );
-            let page = self.browser.call_upstream("browser_evaluate", args).await?;
-            let (page_text, page_truncated) = truncate_utf8(call_result_text(&page), 256 * 1024);
+            let raw = self.browser.performance_timing().await?;
+            let (page_text, page_truncated) = truncate_utf8(raw, 256 * 1024);
             Ok::<_, CoreError>(BrowserPerformanceOutput {
                 page: page_text,
                 page_truncated,
                 cdp_supported: false,
                 cdp: None,
+                backend: "lightpanda".to_string(),
             })
         }
         .await;
-        let detail=result.as_ref().ok().map(|v|serde_json::json!({"cdp_supported":v.cdp_supported,"page_truncated":v.page_truncated}));
+        let detail=result.as_ref().ok().map(|v|serde_json::json!({"cdp_supported":v.cdp_supported,"page_truncated":v.page_truncated,"backend":v.backend}));
         browser_outcome(&self.core, "browser_performance", result, detail)
     }
 
     #[tool(
-        description = "Start, stop, or read status of Playwright tracing for the active browser session. Trace artifacts stay inside the session sandbox and are returned only as opaque metadata.",
+        description = "Start, stop, or read status of app-owned tracing for the active browser session. The trace records timestamps and tool names only, never arguments or page content. Trace artifacts stay inside the session sandbox and are returned only as opaque metadata.",
         annotations(read_only_hint = false),
         output_schema = schema_for_output::<BrowserTraceOutput>()
     )]
@@ -1546,10 +1534,7 @@ impl WorkspaceServer {
                             "browser trace is already running",
                         ));
                     }
-                    self.browser
-                        .call_upstream("browser_start_tracing", serde_json::Map::new())
-                        .await?;
-                    self.browser.set_tracing(true).await;
+                    self.browser.start_trace().await;
                     Ok(BrowserTraceOutput {
                         tracing: true,
                         artifact_id: None,
@@ -1564,38 +1549,43 @@ impl WorkspaceServer {
                             "browser trace is not running",
                         ));
                     }
-                    self.browser
-                        .call_upstream("browser_stop_tracing", serde_json::Map::new())
-                        .await?;
-                    self.browser.set_tracing(false).await;
+                    let events = self.browser.stop_trace().await;
                     let trace_dir = self.browser.active_artifact_dir().await?.join("traces");
-                    let mut files = 0usize;
+                    std::fs::create_dir_all(&trace_dir).map_err(CoreError::io)?;
+                    let mut events_body = String::new();
+                    for event in &events {
+                        let line = serde_json::to_string(event).map_err(|_| {
+                            CoreError::new(
+                                ErrorCode::BrowserArtifactFailed,
+                                "browser trace event could not be serialized",
+                            )
+                        })?;
+                        events_body.push_str(&line);
+                        events_body.push('\n');
+                    }
+                    let manifest_body = serde_json::to_string_pretty(&serde_json::json!({
+                        "schema": "lc-trace-v1",
+                        "event_count": events.len(),
+                    }))
+                    .map_err(|_| {
+                        CoreError::new(
+                            ErrorCode::BrowserArtifactFailed,
+                            "browser trace manifest could not be serialized",
+                        )
+                    })?;
+                    let written: [(&str, String); 2] = [
+                        ("events.jsonl", events_body),
+                        ("manifest.json", manifest_body),
+                    ];
                     let mut total = 0u64;
                     let mut records: Vec<(String, String)> = Vec::new();
-                    let mut stack = vec![trace_dir.clone()];
-                    while let Some(dir) = stack.pop() {
-                        for entry in std::fs::read_dir(&dir).map_err(CoreError::io)? {
-                            let entry = entry.map_err(CoreError::io)?;
-                            let p = entry.path();
-                            if p.is_dir() {
-                                stack.push(p);
-                            } else if p.is_file() {
-                                let rel = p
-                                    .strip_prefix(&trace_dir)
-                                    .map_err(|_| {
-                                        CoreError::new(
-                                            ErrorCode::BrowserArtifactFailed,
-                                            "browser trace escaped the active trace directory",
-                                        )
-                                    })?
-                                    .to_string_lossy()
-                                    .replace('\\', "/");
-                                let bytes = std::fs::read(&p).map_err(CoreError::io)?;
-                                total = total.saturating_add(bytes.len() as u64);
-                                files += 1;
-                                records.push((rel, lc_core::ops::sha256_hex(&bytes)));
-                            }
-                        }
+                    for (rel, body) in &written {
+                        std::fs::write(trace_dir.join(rel), body).map_err(CoreError::io)?;
+                        total = total.saturating_add(body.len() as u64);
+                        records.push((
+                            (*rel).to_string(),
+                            lc_core::ops::sha256_hex(body.as_bytes()),
+                        ));
                     }
                     // Brief, opaque stop metadata: one artifact id fingerprinting the whole
                     // trace set (sorted rel-path + per-file sha256), a file count, and total
@@ -1612,7 +1602,7 @@ impl WorkspaceServer {
                     Ok(BrowserTraceOutput {
                         tracing: false,
                         artifact_id: Some(artifact_id),
-                        files: Some(files),
+                        files: Some(written.len()),
                         bytes: Some(total),
                     })
                 }

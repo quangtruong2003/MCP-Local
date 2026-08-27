@@ -32,9 +32,11 @@ use super::{
     artifacts::ArtifactStore,
     driver::{BrowserPageDriver, BrowserPageDriverFactory, PageLaunchSpec},
     mcp::{
-        call_result_text, encode_js_string, is_valid_ref, normalize_backend_node_ids,
-        normalize_tree_text, page_evaluate_script, parse_node_selector, redact_form_passwords,
-        BrowserLoadState, BrowserNavigationAction, BrowserWaitCondition,
+        call_result_text, drag_synthetic_script, encode_js_string, hover_synthetic_script,
+        is_valid_ref, normalize_backend_node_ids, normalize_tree_text, page_evaluate_script,
+        parse_node_selector, redact_form_passwords, BrowserLoadState, BrowserNavigationAction,
+        BrowserWaitCondition, DOM_OUTER_SCRIPT, NETWORK_RESOURCE_TIMING_SCRIPT,
+        PERFORMANCE_TIMING_SCRIPT,
     },
     policy::validate_navigation_url,
     runtime::{BrowserRuntimeManager, RuntimeProvisionState},
@@ -328,6 +330,26 @@ struct ManagedPage {
     title: Option<String>,
     lost: bool,
     cookie_jar_path: String,
+    /// App-owned console ring. Native `consoleLogs` drains the child's buffer,
+    /// so drained lines accumulate here to keep cursor pagination stable.
+    console_ring: Vec<String>,
+}
+
+/// One app-owned trace record. Deliberately minimal: a timestamp and the
+/// native tool that ran. No arguments, page content, cookies, fill text, or
+/// evaluate source are ever recorded.
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct TraceEvent {
+    pub(crate) ts: u64,
+    pub(crate) tool: String,
+    pub(crate) page_id: String,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 struct ActiveSession {
@@ -341,6 +363,8 @@ struct ActiveSession {
 struct ManagerState {
     active: Option<ActiveSession>,
     tracing: bool,
+    /// App-owned trace event buffer, populated while `tracing` is set.
+    trace_events: Vec<TraceEvent>,
 }
 
 pub struct BrowserManager {
@@ -608,6 +632,7 @@ impl BrowserManager {
                 title: None,
                 lost: false,
                 cookie_jar_path,
+                console_ring: Vec::new(),
             });
             session.active_page_id = page_id.clone();
         }
@@ -660,6 +685,16 @@ impl BrowserManager {
                 .and_then(|s| s.pages.iter_mut().find(|p| p.page_id == page_id))
             {
                 page.lost = true;
+            }
+        }
+        if result.is_ok() {
+            let mut state = self.state.lock().await;
+            if state.tracing {
+                state.trace_events.push(TraceEvent {
+                    ts: now_millis(),
+                    tool: tool.to_string(),
+                    page_id: page_id.to_string(),
+                });
             }
         }
         result
@@ -771,6 +806,158 @@ impl BrowserManager {
             Self::active_page_id_or_err(&state)?
         };
         self.route_to_page(&page_id, tool, arguments).await
+    }
+
+    // -----------------------------------------------------------------------
+    // Truthful compatibility adapters (Task 11): console, network, DOM,
+    // performance, drag. Each maps to pinned Lightpanda native primitives and
+    // never fabricates data the runtime cannot provide.
+    // -----------------------------------------------------------------------
+
+    /// Drains the child's console buffer into the app-owned ring and returns
+    /// the accumulated lines. Native `consoleLogs` clears the child buffer on
+    /// every call, so the ring is the stable source for cursor pagination.
+    pub async fn console_lines(&self) -> Result<Vec<String>, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let response = self
+            .route_to_page(&page_id, "consoleLogs", Map::new())
+            .await?;
+        let text = call_result_text(&response);
+        let mut state = self.state.lock().await;
+        let page = Self::page_mut(&mut state, &page_id)?;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed == "No console messages." {
+                continue;
+            }
+            page.console_ring.push(line.to_string());
+        }
+        const MAX_CONSOLE_RING: usize = 2000;
+        if page.console_ring.len() > MAX_CONSOLE_RING {
+            let drop_count = page.console_ring.len() - MAX_CONSOLE_RING;
+            page.console_ring.drain(..drop_count);
+        }
+        Ok(page.console_ring.clone())
+    }
+
+    /// Evaluates one fixed app-owned script (no caller input) in the page.
+    async fn evaluate_fixed_script(&self, expression: &str) -> Result<String, CoreError> {
+        let page_id = self.active_page_guarded().await?;
+        let mut args = Map::new();
+        args.insert(
+            "script".into(),
+            Value::String(page_evaluate_script(expression, None)),
+        );
+        let response = self.route_to_page(&page_id, "evaluate", args).await?;
+        Ok(call_result_text(&response))
+    }
+
+    /// Navigation/Resource Performance timing. The Lightpanda runtime exposes
+    /// no CDP, so only standard Performance APIs are read.
+    pub async fn performance_timing(&self) -> Result<String, CoreError> {
+        self.evaluate_fixed_script(PERFORMANCE_TIMING_SCRIPT).await
+    }
+
+    /// Performance Resource Timing — the only network signal the runtime
+    /// exposes. Method/status/headers are unavailable and never fabricated.
+    pub async fn network_resource_timing(&self) -> Result<String, CoreError> {
+        self.evaluate_fixed_script(NETWORK_RESOURCE_TIMING_SCRIPT)
+            .await
+    }
+
+    /// Inspects one element via `nodeDetails` plus a redacted outerHTML and
+    /// computed-style allowlist read. The layout rect is always null because
+    /// Lightpanda performs no layout; it is never fabricated.
+    pub async fn dom_inspect(&self, ref_id: &str) -> Result<String, CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let backend_node_id = self.resolve_ref(&page_id, ref_id).await?;
+        let mut args = Map::new();
+        args.insert("backendNodeId".into(), Value::from(backend_node_id));
+        let details_response = self.route_to_page(&page_id, "nodeDetails", args).await?;
+        let details_text = call_result_text(&details_response);
+        let selector = parse_node_selector(&details_text);
+        let mut details: Value = serde_json::from_str(&details_text).unwrap_or(Value::Null);
+        if let Some(obj) = details.as_object_mut() {
+            obj.remove("backendNodeId");
+            let is_password = obj
+                .get("inputType")
+                .and_then(|v| v.as_str())
+                .is_some_and(|t| t.eq_ignore_ascii_case("password"));
+            if is_password && obj.contains_key("value") {
+                obj.insert("value".into(), Value::String("*****".into()));
+            }
+        }
+        let (outer_html, style) = match selector {
+            Some(selector) => {
+                let mut ev = Map::new();
+                ev.insert(
+                    "script".into(),
+                    Value::String(page_evaluate_script(DOM_OUTER_SCRIPT, Some(&selector))),
+                );
+                let ev_response = self.route_to_page(&page_id, "evaluate", ev).await?;
+                let parsed: Value =
+                    serde_json::from_str(&call_result_text(&ev_response)).unwrap_or(Value::Null);
+                (
+                    parsed.get("outerHTML").cloned().unwrap_or(Value::Null),
+                    parsed.get("style").cloned().unwrap_or(Value::Null),
+                )
+            }
+            None => (Value::Null, Value::Null),
+        };
+        let mut result = details;
+        if let Some(obj) = result.as_object_mut() {
+            obj.insert("outerHTML".into(), outer_html);
+            obj.insert("computedStyle".into(), style);
+            obj.insert("rect".into(), Value::Null);
+        }
+        Ok(serde_json::to_string(&result).unwrap_or_default())
+    }
+
+    /// Synthetic HTML5 drag between two refs via recovered selectors. Fails
+    /// closed as unsupported when the runtime lacks DragEvent/DataTransfer or
+    /// either target is missing; there is no coordinate API under Lightpanda.
+    /// Side-effecting: refs are invalidated even on failure.
+    pub async fn drag_refs(&self, start_ref: &str, end_ref: &str) -> Result<(), CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let start_selector = self.selector_for_ref(&page_id, start_ref).await?;
+        let end_selector = self.selector_for_ref(&page_id, end_ref).await?;
+        let mut args = Map::new();
+        args.insert(
+            "script".into(),
+            Value::String(drag_synthetic_script(&start_selector, &end_selector)),
+        );
+        let response = self.route_to_page(&page_id, "evaluate", args).await;
+        self.invalidate_refs(&page_id).await;
+        let response = response?;
+        if call_result_text(&response).trim() != "true" {
+            return Err(CoreError::new(
+                ErrorCode::BrowserFeatureUnsupported,
+                "drag is not supported by this runtime for the given targets",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Begins app-owned tracing, clearing any previous event buffer.
+    pub(crate) async fn start_trace(&self) {
+        let mut state = self.state.lock().await;
+        state.tracing = true;
+        state.trace_events.clear();
+    }
+
+    /// Ends app-owned tracing and returns the recorded events.
+    pub(crate) async fn stop_trace(&self) -> Vec<TraceEvent> {
+        let mut state = self.state.lock().await;
+        state.tracing = false;
+        std::mem::take(&mut state.trace_events)
     }
 
     // -----------------------------------------------------------------------
@@ -1248,8 +1435,29 @@ impl BrowserManager {
         self.act_on_ref(ref_id, "click", Map::new()).await
     }
 
-    pub async fn hover_ref(&self, ref_id: &str) -> Result<CallToolResult, CoreError> {
-        self.act_on_ref(ref_id, "hover", Map::new()).await
+    /// Hovers the target via a synthetic mouseover sequence. Lightpanda has
+    /// no native hover primitive, and hovering is not side-effecting enough
+    /// to invalidate snapshot refs.
+    pub async fn hover_ref(&self, ref_id: &str) -> Result<(), CoreError> {
+        self.guard_page_operation().await?;
+        let page_id = {
+            let state = self.state.lock().await;
+            Self::active_page_id_or_err(&state)?
+        };
+        let selector = self.selector_for_ref(&page_id, ref_id).await?;
+        let mut args = Map::new();
+        args.insert(
+            "script".into(),
+            Value::String(hover_synthetic_script(&selector)),
+        );
+        let response = self.route_to_page(&page_id, "evaluate", args).await?;
+        if call_result_text(&response).trim() != "true" {
+            return Err(CoreError::new(
+                ErrorCode::BrowserTargetNotFound,
+                "the hover target no longer exists; take a new browser_snapshot",
+            ));
+        }
+        Ok(())
     }
 
     /// Fills the target and optionally submits with a native Enter press.
@@ -1649,10 +1857,6 @@ impl BrowserManager {
                     "browser is not running; call browser_open first",
                 )
             })
-    }
-
-    pub(crate) async fn set_tracing(&self, tracing: bool) {
-        self.state.lock().await.tracing = tracing;
     }
 
     pub(crate) async fn is_tracing(&self) -> bool {

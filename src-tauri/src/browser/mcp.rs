@@ -449,6 +449,9 @@ pub struct BrowserNetworkOutput {
     pub count: usize,
     pub requests: String,
     pub next_cursor: Option<String>,
+    /// Explicit coverage marker: the Lightpanda runtime exposes only
+    /// Performance Resource Timing, so method/status/headers are unavailable.
+    pub coverage: String,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -470,6 +473,8 @@ pub struct BrowserPerformanceOutput {
     pub page_truncated: bool,
     pub cdp_supported: bool,
     pub cdp: Option<serde_json::Value>,
+    /// The timing backend that produced this data. Always `lightpanda` here.
+    pub backend: String,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -757,6 +762,160 @@ pub(crate) fn page_evaluate_script(expression: &str, selector: Option<&str>) -> 
             }
         }
     }
+}
+
+/// Fixed app-owned page-context expressions for the truthful compatibility
+/// adapters (Task 11). Each runs through the native `evaluate` tool and never
+/// through process-level code execution. They are named constants so tests can
+/// prove model/MCP input is never interpolated into them.
+///
+/// Navigation/Resource Performance APIs only. The Lightpanda runtime exposes
+/// no CDP, so no renderer/CDP metrics are collected here.
+pub(crate) const PERFORMANCE_TIMING_SCRIPT: &str = "() => ({navigation: performance.getEntriesByType('navigation').map(e=>({name:e.name,duration:e.duration,domContentLoadedEventEnd:e.domContentLoadedEventEnd,loadEventEnd:e.loadEventEnd})), resources: performance.getEntriesByType('resource').slice(-100).map(e=>({name:e.name,initiatorType:e.initiatorType,duration:e.duration,transferSize:e.transferSize}))})";
+
+/// Performance Resource Timing is the only network signal the Lightpanda
+/// runtime exposes; method/status/headers are not available and are never
+/// fabricated.
+pub(crate) const NETWORK_RESOURCE_TIMING_SCRIPT: &str = "() => ({resources: performance.getEntriesByType('resource').slice(-200).map(e=>({name:e.name,initiatorType:e.initiatorType,duration:e.duration,transferSize:e.transferSize}))})";
+
+/// Element outerHTML + computed-style allowlist for `browser_dom`. Sensitive
+/// attributes and password values are redacted on a CLONED node so the live
+/// DOM is never mutated. No layout rect is read: Lightpanda performs no
+/// layout, so the public rect stays null rather than fabricated.
+pub(crate) const DOM_OUTER_SCRIPT: &str = r#"(element) => {
+  if (!element) return null;
+  const sensitive = (name) => {
+    const n = String(name || '').toLowerCase();
+    return n.includes('token') || n.includes('secret') || n.includes('password') || n === 'value';
+  };
+  const redact = (node) => {
+    for (const a of Array.from(node.attributes || [])) {
+      if (sensitive(a.name)) { try { node.setAttribute(a.name, '[redacted]'); } catch (e) {} }
+    }
+    const tag = String(node.tagName || '').toUpperCase();
+    const type = String((node.getAttribute && node.getAttribute('type')) || '').toLowerCase();
+    if (tag === 'INPUT' && type === 'password') { try { node.setAttribute('value', '[redacted]'); } catch (e) {} }
+  };
+  const clone = element.cloneNode(true);
+  redact(clone);
+  if (clone.querySelectorAll) { for (const d of clone.querySelectorAll('*')) redact(d); }
+  let style = null;
+  try {
+    const cs = getComputedStyle(element);
+    const allow = ['display','visibility','position','color','backgroundColor','fontSize','opacity','cursor'];
+    style = {};
+    for (const p of allow) { if (cs[p] !== undefined) style[p] = cs[p]; }
+  } catch (e) { style = null; }
+  return { outerHTML: String(clone.outerHTML || '').slice(0, 32768), style: style };
+}"#;
+
+/// Synthetic HTML5 drag between two recovered selectors. Uses a DataTransfer
+/// and dispatched DragEvents only; there is no coordinate API under Lightpanda.
+/// Returns false (surfaced as unsupported) when the runtime lacks the DragEvent
+/// / DataTransfer constructors or either element is missing.
+pub(crate) const DRAG_SYNTHETIC_SCRIPT: &str = r#"(startSel, endSel) => {
+  const start = document.querySelector(startSel);
+  const end = document.querySelector(endSel);
+  if (!start || !end) return false;
+  if (typeof DataTransfer === 'undefined' || typeof DragEvent === 'undefined') return false;
+  const dt = new DataTransfer();
+  const fire = (type, target) => {
+    try { target.dispatchEvent(new DragEvent(type, { dataTransfer: dt, bubbles: true, cancelable: true })); } catch (e) {}
+  };
+  fire('dragstart', start);
+  fire('dragenter', end);
+  fire('dragover', end);
+  fire('drop', end);
+  fire('dragend', start);
+  return true;
+}"#;
+
+/// Builds the concrete drag script by binding the two recovered selectors as
+/// JSON string literals. Selectors are data, never concatenated as code.
+pub(crate) fn drag_synthetic_script(start_selector: &str, end_selector: &str) -> String {
+    format!(
+        "({DRAG_SYNTHETIC_SCRIPT})({},{})",
+        encode_js_string(start_selector),
+        encode_js_string(end_selector)
+    )
+}
+
+/// Synthetic hover for runtimes without a native hover primitive: dispatches
+/// the mouseover/mouseenter/mousemove sequence on the recovered element.
+/// Returns false when the element is missing.
+pub(crate) const HOVER_SYNTHETIC_SCRIPT: &str = r#"(sel) => {
+  const el = document.querySelector(sel);
+  if (!el) return false;
+  for (const type of ['mouseover', 'mouseenter', 'mousemove']) {
+    try { el.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true })); } catch (e) {}
+  }
+  return true;
+}"#;
+
+/// Builds the concrete hover script by binding the recovered selector as a
+/// JSON string literal. The selector is data, never concatenated as code.
+pub(crate) fn hover_synthetic_script(selector: &str) -> String {
+    format!("({HOVER_SYNTHETIC_SCRIPT})({})", encode_js_string(selector))
+}
+
+/// Initiator types treated as static subresources for the `include_static`
+/// network filter. Anything else (fetch/xhr/beacon/...) is dynamic.
+pub(crate) fn is_static_initiator(initiator_type: &str) -> bool {
+    matches!(
+        initiator_type,
+        "img"
+            | "image"
+            | "script"
+            | "link"
+            | "css"
+            | "font"
+            | "iframe"
+            | "media"
+            | "object"
+            | "embed"
+            | "svg"
+    )
+}
+
+/// Redacts sensitive query-parameter values in one URL. Only the value of a
+/// key that looks credential-like is replaced; the key and the rest of the URL
+/// stay intact so filtering/auditing remains useful.
+pub(crate) fn redact_sensitive_url(url: &str) -> String {
+    const SENSITIVE: &[&str] = &[
+        "token",
+        "access_token",
+        "api_key",
+        "apikey",
+        "key",
+        "secret",
+        "password",
+        "passwd",
+        "session",
+        "sessionid",
+        "auth",
+        "authorization",
+        "sig",
+        "signature",
+    ];
+    let Some(query_pos) = url.find('?') else {
+        return url.to_string();
+    };
+    let (head, query) = url.split_at(query_pos + 1);
+    let redacted: Vec<String> = query
+        .split('&')
+        .map(|pair| {
+            let mut parts = pair.splitn(2, '=');
+            let key = parts.next().unwrap_or_default();
+            let value = parts.next();
+            let key_lower = key.to_ascii_lowercase();
+            if value.is_some() && SENSITIVE.iter().any(|s| key_lower.contains(s)) {
+                format!("{key}=[redacted]")
+            } else {
+                pair.to_string()
+            }
+        })
+        .collect();
+    format!("{head}{}", redacted.join("&"))
 }
 
 /// Validates one `browser_extract` schema before any native call and returns
@@ -1101,6 +1260,117 @@ mod validation_tests {
         assert_eq!(
             page_evaluate_script("el.tagName", Some("#nd-4")),
             "((el) => (el.tagName))(document.querySelector(\"#nd-4\"))"
+        );
+    }
+
+    #[test]
+    fn fixed_lightpanda_scripts_have_no_interpolation_points() {
+        for script in [
+            PERFORMANCE_TIMING_SCRIPT,
+            NETWORK_RESOURCE_TIMING_SCRIPT,
+            DOM_OUTER_SCRIPT,
+            DRAG_SYNTHETIC_SCRIPT,
+            HOVER_SYNTHETIC_SCRIPT,
+        ] {
+            assert!(!script.contains("{0}"), "fixed script has a format slot");
+            assert!(!script.contains("${"), "fixed script has a template slot");
+        }
+    }
+
+    #[test]
+    fn dom_outer_script_sanitizes_outerhtml_from_a_clone() {
+        // Sanitization must happen on a clone, not the live element.
+        assert!(
+            DOM_OUTER_SCRIPT.contains("cloneNode(true)"),
+            "must clone before serializing"
+        );
+        assert!(
+            DOM_OUTER_SCRIPT.contains("[redacted]"),
+            "must redact sensitive values"
+        );
+        assert!(
+            DOM_OUTER_SCRIPT.contains("setAttribute"),
+            "must overwrite sensitive attributes"
+        );
+        // The serialized markup must come from the clone, never the live element.
+        assert!(
+            DOM_OUTER_SCRIPT.contains("clone.outerHTML"),
+            "must serialize the clone"
+        );
+        assert!(
+            !DOM_OUTER_SCRIPT.contains("element.outerHTML"),
+            "must not serialize the live element's outerHTML directly"
+        );
+        // Lightpanda performs no layout; a rect would be fabricated.
+        assert!(
+            !DOM_OUTER_SCRIPT.contains("getBoundingClientRect"),
+            "must not read a layout rect"
+        );
+    }
+
+    #[test]
+    fn drag_synthetic_script_binds_selectors_as_data() {
+        let script = drag_synthetic_script("#nd-1", "#nd-2");
+        assert!(
+            script.ends_with(")(\"#nd-1\",\"#nd-2\")"),
+            "selectors must be bound as JSON string literals: {script}"
+        );
+        let hostile = drag_synthetic_script("\"); evil(); (", "#nd-2");
+        assert!(
+            hostile.contains("\"\\\"); evil(); (\""),
+            "hostile selector must stay inside the string literal: {hostile}"
+        );
+        assert!(
+            !hostile.contains("); evil(); (,"),
+            "hostile selector escaped the literal: {hostile}"
+        );
+    }
+
+    #[test]
+    fn hover_synthetic_script_binds_selector_as_data() {
+        let script = hover_synthetic_script("#nd-4");
+        assert!(
+            script.ends_with(")(\"#nd-4\")"),
+            "selector must be bound as a JSON string literal: {script}"
+        );
+        let hostile = hover_synthetic_script("\"); evil(); (");
+        assert!(
+            hostile.contains("\"\\\"); evil(); (\""),
+            "hostile selector must stay inside the string literal: {hostile}"
+        );
+    }
+
+    #[test]
+    fn is_static_initiator_classifies_subresource_types() {
+        for initiator in [
+            "img", "image", "script", "link", "css", "font", "iframe", "media",
+        ] {
+            assert!(is_static_initiator(initiator), "{initiator}");
+        }
+        for initiator in ["fetch", "xmlhttprequest", "beacon", "other", ""] {
+            assert!(!is_static_initiator(initiator), "{initiator}");
+        }
+    }
+
+    #[test]
+    fn redact_sensitive_url_masks_credential_like_query_values() {
+        assert_eq!(
+            redact_sensitive_url("https://ex.test/a?token=abc&page=2"),
+            "https://ex.test/a?token=[redacted]&page=2"
+        );
+        assert_eq!(
+            redact_sensitive_url("https://ex.test/a?API_KEY=x&Session=y&q=z"),
+            "https://ex.test/a?API_KEY=[redacted]&Session=[redacted]&q=z"
+        );
+        // No query string: untouched.
+        assert_eq!(
+            redact_sensitive_url("https://ex.test/a"),
+            "https://ex.test/a"
+        );
+        // A sensitive key without a value is not a leak.
+        assert_eq!(
+            redact_sensitive_url("https://ex.test/a?token"),
+            "https://ex.test/a?token"
         );
     }
 }

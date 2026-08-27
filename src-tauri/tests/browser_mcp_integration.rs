@@ -37,7 +37,6 @@ struct FakeBrowser {
     failures: std::sync::Mutex<Vec<(String, lc_core::error::CoreError)>>,
     responses: std::sync::Mutex<Vec<(String, String)>>,
     screenshot_block: std::sync::Mutex<Option<rmcp::model::ContentBlock>>,
-    artifacts_root: std::sync::Mutex<Option<PathBuf>>,
     starts: AtomicUsize,
     stops: AtomicUsize,
 }
@@ -73,25 +72,6 @@ impl FakeBrowser {
             base64::engine::general_purpose::STANDARD.encode(bytes),
             "image/png",
         )
-    }
-
-    /// Writes a trace file into the newest session artifact dir, mirroring a
-    /// tracing runtime that flushes on stop.
-    fn write_trace_artifact(&self) {
-        let Some(root) = self.artifacts_root.lock().unwrap().clone() else {
-            return;
-        };
-        let Ok(entries) = std::fs::read_dir(&root) else {
-            return;
-        };
-        let newest = entries
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .max();
-        let Some(session_dir) = newest else { return };
-        std::fs::create_dir_all(session_dir.join("traces")).unwrap();
-        std::fs::write(session_dir.join("traces").join("trace.zip"), b"trace").unwrap();
     }
 }
 
@@ -184,26 +164,20 @@ impl BrowserPageDriver for FakePageDriver {
                     block.unwrap_or_else(FakeBrowser::png_block),
                 ]));
             }
-            // Mirrors pinned @playwright/mcp 0.0.79 output: a `Total messages:`
-            // header, a blank separator line, then `[LEVEL] text @ url:line` rows.
-            "browser_console_messages" => return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("Total messages: 3 (Errors: 1, Warnings: 1)\n\n[INFO] hello @ https://example.test/app.js:1\n[WARNING] warn @ https://example.test/app.js:2\n[ERROR] boom @ https://example.test/app.js:3")])),
-            // Mirrors pinned @playwright/mcp 0.0.79 output: numbered
-            // `N. [METHOD] URL => [STATUS] STATUS_TEXT` rows. Real 0.0.79 list
-            // output carries no header lines; the sensitive ones below are kept
-            // deliberately so redaction stays covered defense-in-depth.
-            "browser_network_requests" => return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("1. [GET] https://example.test/api => [200] OK\nAuthorization: Bearer secret\nCookie: session=secret")])),
-            "browser_evaluate" => {
-                let f = arguments.get("function").and_then(|v| v.as_str()).unwrap_or_default();
-                let text = if f.contains("document.readyState") { "complete" }
-                    else if f.contains("location.href") { "https://example.test/path" }
-                    else if f.contains("getBoundingClientRect") && f.contains("visibility") { "true" }
-                    else if f.contains("performance.getEntriesByType") { "{\"navigation\":[],\"resources\":[]}" }
-                    else if f.contains("outerHTML") { "{\"tagName\":\"INPUT\",\"attrs\":{\"value\":\"[redacted]\"}}" }
+            // Mirrors Lightpanda 0.3.7 `consoleLogs`: `[tag] text` lines, one
+            // batch per call, drained from the child's buffer. A fresh session
+            // reports no messages unless a test queues a batch via respond().
+            "consoleLogs" => return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("No console messages.")])),
+            "evaluate" => {
+                let script = arguments.get("script").and_then(|v| v.as_str()).unwrap_or_default();
+                let text = if script.contains("slice(-200)") { "{\"resources\":[]}" }
+                    else if script.contains("performance.getEntriesByType") { "{\"navigation\":[],\"resources\":[]}" }
+                    else if script.contains("clone.outerHTML") { "{\"outerHTML\":\"<input type=\\\"password\\\" value=\\\"[redacted]\\\">\",\"style\":null}" }
+                    else if script.contains("DragEvent") || script.contains("MouseEvent") { "true" }
                     else { "eval-ok" };
-                return Ok(rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(text)]));
-            }
-            "browser_stop_tracing" => {
-                self.shared.write_trace_artifact();
+                return Ok(rmcp::model::CallToolResult::success(vec![
+                    rmcp::model::ContentBlock::text(text),
+                ]));
             }
             "getCookies" => {
                 return Ok(rmcp::model::CallToolResult::success(vec![
@@ -302,7 +276,6 @@ async fn spawn(
         policy.clone(),
     ));
     let fake = Arc::new(FakeBrowser::default());
-    *fake.artifacts_root.lock().unwrap() = Some(dir.path().join("browser").join("artifacts"));
     let browser = Arc::new(
         BrowserManager::new(
             core.clone(),
@@ -540,7 +513,7 @@ async fn task7_to_11_browser_tools_smoke_through_mcp_and_preserve_redaction() {
         // use must re-snapshot first, exactly like a real agent flow.
         if matches!(
             name,
-            "browser_click" | "browser_fill" | "browser_select" | "browser_press"
+            "browser_click" | "browser_fill" | "browser_select" | "browser_press" | "browser_drag"
         ) {
             let resnap = client
                 .call_tool(CallToolRequestParams::new("browser_snapshot"))
@@ -1857,15 +1830,19 @@ async fn interaction_tools_resolve_refs_to_native_selectors_via_node_details() {
         "{}",
         serde_json::to_string(&hover).unwrap()
     );
+    // Lightpanda has no native hover primitive: hover is a synthetic
+    // mouseover sequence bound to the recovered selector as data.
     let hover_call = driver
         .calls()
         .into_iter()
         .rev()
-        .find(|c| c.tool == "hover")
-        .expect("hover must reach the native hover tool");
-    assert_eq!(
-        hover_call.arguments,
-        serde_json::json!({"selector": "#nd-1"})
+        .find(|c| c.tool == "evaluate")
+        .expect("hover must route through evaluate");
+    let hover_script = hover_call.arguments["script"].as_str().unwrap();
+    assert!(hover_script.contains("mouseover"), "{hover_script}");
+    assert!(
+        hover_script.ends_with(")(\"#nd-1\")"),
+        "hover must bind the recovered selector as data: {hover_script}"
     );
 
     // Neither opaque refs nor backend node ids may reach action arguments.
@@ -2388,12 +2365,14 @@ async fn console_cursor_levels_and_audit_metadata() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-    // Pinned @playwright/mcp 0.0.79 console shape: header line, blank line,
-    // then `[LEVEL] text @ url:line` rows.
-    let script = "Total messages: 5 (Errors: 1, Warnings: 1)\n\n[INFO] one @ https://example.test/app.js:1\n[WARNING] two @ https://example.test/app.js:2\n[ERROR] three @ https://example.test/app.js:3\n[INFO] four @ https://example.test/app.js:4\n[DEBUG] five @ https://example.test/app.js:5";
-    for _ in 0..3 {
-        driver.respond("browser_console_messages", script.to_string());
-    }
+    // Lightpanda 0.3.7 `consoleLogs` shape: `[tag] text` lines. Each call
+    // drains the child buffer, so the app accumulates drained batches into a
+    // stable ring and paginates over it.
+    driver.respond(
+        "consoleLogs",
+        "[info] one\n[warning] two\n[error] three".to_string(),
+    );
+    driver.respond("consoleLogs", "[info] four\n[debug] five".to_string());
 
     let page1 = client
         .call_tool(
@@ -2405,19 +2384,9 @@ async fn console_cursor_levels_and_audit_metadata() {
     assert!(!page1.is_error.unwrap_or(false));
     let structured = page1.structured_content.as_ref().unwrap().clone();
     assert_eq!(structured["count"], 2);
-    assert_eq!(
-        structured["messages"],
-        "[INFO] one @ https://example.test/app.js:1\n[WARNING] two @ https://example.test/app.js:2"
-    );
+    assert_eq!(structured["messages"], "[info] one\n[warning] two");
     assert_eq!(structured["levels"]["info"], 1);
     assert_eq!(structured["levels"]["warning"], 1);
-    assert!(
-        !structured["messages"]
-            .as_str()
-            .unwrap()
-            .contains("Total messages"),
-        "upstream presentation header must not consume the first page"
-    );
     let cursor1 = structured["next_cursor"].as_str().unwrap().to_string();
 
     let page2 = client
@@ -2428,29 +2397,17 @@ async fn console_cursor_levels_and_audit_metadata() {
         .await
         .unwrap();
     let structured = page2.structured_content.as_ref().unwrap().clone();
-    assert_eq!(
-        structured["messages"],
-        "[ERROR] three @ https://example.test/app.js:3\n[INFO] four @ https://example.test/app.js:4"
+    // The default level is info, so the debug line stays in the ring but is
+    // filtered out of every page: page2 is already the last page.
+    assert_eq!(structured["messages"], "[error] three\n[info] four");
+    assert!(
+        structured["next_cursor"].is_null(),
+        "filtered debug lines must not extend info-level pagination"
     );
-    let cursor2 = structured["next_cursor"].as_str().unwrap().to_string();
-
-    let page3 = client
-        .call_tool(
-            CallToolRequestParams::new("browser_console")
-                .with_arguments(arguments(serde_json::json!({"limit":2,"cursor":cursor2}))),
-        )
-        .await
-        .unwrap();
-    let structured = page3.structured_content.as_ref().unwrap().clone();
-    assert_eq!(
-        structured["messages"],
-        "[DEBUG] five @ https://example.test/app.js:5"
-    );
-    assert!(structured["next_cursor"].is_null());
 
     // Audit stores only count/levels/cursor, never message text.
     let rows = matching_audit(&core, "browser_console");
-    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.len(), 2);
     for row in &rows {
         let detail = row.detail.as_ref().unwrap();
         let keys: std::collections::BTreeSet<String> =
@@ -2497,25 +2454,49 @@ async fn console_cursor_levels_and_audit_metadata() {
         assert!(text.contains("INVALID_ARGUMENT"), "{args}: {text}");
     }
 
-    driver.respond(
-        "browser_console_messages",
-        "Total messages: 1 (Errors: 1, Warnings: 0)\n\n[ERROR] only @ https://example.test/app.js:1"
-            .to_string(),
-    );
-    client
+    // Level filtering happens app-side over the ring; the native consoleLogs
+    // drain call takes no level/limit arguments.
+    let debug = client
         .call_tool(
             CallToolRequestParams::new("browser_console")
-                .with_arguments(arguments(serde_json::json!({"level":"error"}))),
+                .with_arguments(arguments(serde_json::json!({"level":"debug","limit":100}))),
         )
         .await
         .unwrap();
-    let call = driver
+    let structured = debug.structured_content.as_ref().unwrap().clone();
+    assert_eq!(
+        structured["messages"],
+        "[info] one\n[warning] two\n[error] three\n[info] four\n[debug] five"
+    );
+    assert_eq!(structured["levels"]["debug"], 1);
+
+    let errors = client
+        .call_tool(
+            CallToolRequestParams::new("browser_console")
+                .with_arguments(arguments(serde_json::json!({"level":"error","limit":100}))),
+        )
+        .await
+        .unwrap();
+    let structured = errors.structured_content.as_ref().unwrap().clone();
+    assert_eq!(structured["messages"], "[error] three");
+    assert_eq!(structured["levels"]["error"], 1);
+
+    let console_calls = driver
         .calls()
         .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_console_messages")
-        .unwrap();
-    assert_eq!(call.arguments["level"], "error");
+        .filter(|c| c.tool == "consoleLogs")
+        .collect::<Vec<_>>();
+    assert!(
+        !console_calls.is_empty(),
+        "console must drain the native consoleLogs tool"
+    );
+    for call in &console_calls {
+        assert!(
+            call.arguments.as_object().unwrap().is_empty(),
+            "consoleLogs drain takes no arguments: {:?}",
+            call.arguments
+        );
+    }
 }
 
 #[tokio::test]
@@ -2523,54 +2504,88 @@ async fn network_cursor_filter_and_redaction() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
-    // Pinned @playwright/mcp 0.0.79 network shape: numbered
-    // `N. [METHOD] URL => [STATUS] STATUS_TEXT` rows. The sensitive header
-    // lines are not part of real list output but are kept so redaction stays
-    // covered defense-in-depth.
-    let script = "1. [GET] https://a.test/ => [200] OK\nAuthorization: Bearer secret\n2. [GET] https://b.test/ => [200] OK\nCookie: session=secret\n3. [GET] https://c.test/ => [200] OK";
-    driver.respond("browser_network_requests", script.to_string());
-    driver.respond("browser_network_requests", script.to_string());
+    // Lightpanda exposes network activity only through Performance Resource
+    // Timing: name/initiatorType/duration/transferSize. No method, status, or
+    // headers exist to fabricate. The sensitive query value stays covered by
+    // app-side redaction.
+    let resources = "{\"resources\":[{\"name\":\"https://a.test/api/items?token=abc\",\"initiatorType\":\"fetch\",\"duration\":10.4,\"transferSize\":200},{\"name\":\"https://b.test/logo.png\",\"initiatorType\":\"img\",\"duration\":3,\"transferSize\":1024},{\"name\":\"https://c.test/api/users\",\"initiatorType\":\"xmlhttprequest\",\"duration\":7,\"transferSize\":512}]}";
+    driver.respond("evaluate", resources.to_string());
+    driver.respond("evaluate", resources.to_string());
 
     let page1 = client
         .call_tool(
             CallToolRequestParams::new("browser_network").with_arguments(arguments(
-                serde_json::json!({"limit":2,"filter":"api","include_static":true}),
+                serde_json::json!({"limit":1,"filter":"api","include_static":true}),
             )),
         )
         .await
         .unwrap();
     assert!(!page1.is_error.unwrap_or(false));
-    let call = driver
-        .calls()
-        .into_iter()
-        .rev()
-        .find(|c| c.tool == "browser_network_requests")
-        .unwrap();
-    assert_eq!(call.arguments["filter"], "api");
-    assert_eq!(call.arguments["static"], true);
     let structured = page1.structured_content.as_ref().unwrap().clone();
-    assert_eq!(structured["count"], 2);
+    assert_eq!(structured["count"], 1);
     let requests = structured["requests"].as_str().unwrap();
-    assert!(requests.contains("[GET] https://a.test/ => [200]"));
-    assert!(requests.contains("Authorization: [redacted]"));
-    assert!(!requests.contains("Bearer secret"));
+    assert!(
+        requests.contains(
+            "[fetch] https://a.test/api/items?token=[redacted] => duration=10ms size=200"
+        ),
+        "{requests}"
+    );
+    assert!(!requests.contains("token=abc"), "query secret leaked");
+    assert!(
+        structured["coverage"]
+            .as_str()
+            .unwrap()
+            .contains("method, status, and headers are not available"),
+        "coverage must state what this runtime cannot report"
+    );
     let cursor = structured["next_cursor"].as_str().unwrap().to_string();
 
     let page2 = client
         .call_tool(
             CallToolRequestParams::new("browser_network")
-                .with_arguments(arguments(serde_json::json!({"limit":10,"cursor":cursor}))),
+                .with_arguments(arguments(serde_json::json!({"limit":10,"cursor":cursor,"filter":"api","include_static":true}))),
         )
         .await
         .unwrap();
     let structured = page2.structured_content.as_ref().unwrap().clone();
     let requests = structured["requests"].as_str().unwrap();
-    assert!(requests.contains("Cookie: [redacted]"));
-    assert!(!requests.contains("session=secret"));
+    assert!(
+        requests.contains("[xmlhttprequest] https://c.test/api/users => duration=7ms size=512"),
+        "{requests}"
+    );
     assert!(structured["next_cursor"].is_null());
 
+    // The filter is compiled app-side; the native call is a fixed Resource
+    // Timing script and never carries the filter.
+    let call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "evaluate")
+        .unwrap();
+    let script = call.arguments["script"].as_str().unwrap();
+    assert!(
+        script.contains("performance.getEntriesByType('resource')"),
+        "{script}"
+    );
+    assert!(!script.contains("api"), "filter must not reach the page");
+
+    // include_static=false drops static subresources by initiatorType.
+    driver.respond("evaluate", resources.to_string());
+    let no_static = client
+        .call_tool(
+            CallToolRequestParams::new("browser_network")
+                .with_arguments(arguments(serde_json::json!({"include_static":false}))),
+        )
+        .await
+        .unwrap();
+    let structured = no_static.structured_content.as_ref().unwrap().clone();
+    let requests = structured["requests"].as_str().unwrap();
+    assert!(!requests.contains("logo.png"), "{requests}");
+    assert_eq!(structured["count"], 2);
+
     let rows = matching_audit(&core, "browser_network");
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
     for row in &rows {
         let detail = row.detail.as_ref().unwrap();
         let keys: std::collections::BTreeSet<String> =
@@ -2585,16 +2600,17 @@ async fn network_cursor_filter_and_redaction() {
         );
     }
 
-    // The filter is a regular expression; length/control-character guards
-    // reject bad filters before any upstream call is made.
+    // The filter is a regular expression; length/control-character/regex
+    // guards reject bad filters before any upstream call is made.
     let upstream_calls = driver
         .calls()
         .iter()
-        .filter(|c| c.tool == "browser_network_requests")
+        .filter(|c| c.tool == "evaluate")
         .count();
     for bad in [
         serde_json::json!({"filter":"a\nb"}),
         serde_json::json!({"filter":"x".repeat(4097)}),
+        serde_json::json!({"filter":"("}),
     ] {
         let result = client
             .call_tool(
@@ -2611,7 +2627,7 @@ async fn network_cursor_filter_and_redaction() {
         driver
             .calls()
             .iter()
-            .filter(|c| c.tool == "browser_network_requests")
+            .filter(|c| c.tool == "evaluate")
             .count(),
         upstream_calls,
         "rejected filters must not reach upstream"
@@ -2623,6 +2639,12 @@ async fn dom_inspection_uses_fixed_function_with_exact_ref() {
     let (port, _dir, core, driver, _browser) = spawn(AppSettings::default()).await;
     let client = client(port).await;
     open_browser(&client).await;
+    // Refs come from a snapshot; e2 is the textbox (backend node 2).
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
 
     let result = client
         .call_tool(
@@ -2632,23 +2654,46 @@ async fn dom_inspection_uses_fixed_function_with_exact_ref() {
         .await
         .unwrap();
     assert!(!result.is_error.unwrap_or(false));
-    let call = driver
+    // The opaque ref resolves to backend node 2 of the current generation.
+    let details_call = driver
         .calls()
         .into_iter()
         .rev()
-        .find(|c| c.tool == "browser_evaluate")
-        .expect("browser_dom must map to browser_evaluate");
-    assert_eq!(call.arguments["target"], "e2");
-    let function = call.arguments["function"].as_str().unwrap();
+        .find(|c| c.tool == "nodeDetails")
+        .expect("browser_dom must resolve the ref through nodeDetails");
+    assert_eq!(details_call.arguments["backendNodeId"], 2);
+    // outerHTML comes from the fixed redaction script bound to the recovered
+    // selector as data.
+    let eval_call = driver
+        .calls()
+        .into_iter()
+        .rev()
+        .find(|c| c.tool == "evaluate")
+        .expect("browser_dom must read outerHTML through evaluate");
+    let script = eval_call.arguments["script"].as_str().unwrap();
     assert!(
-        function.contains("cloneNode(true)"),
-        "must serialize a clone"
+        script.contains("cloneNode(true)"),
+        "must serialize a clone: {script}"
     );
     assert!(
-        function.contains("[redacted]"),
-        "must redact sensitive values"
+        script.contains("[redacted]"),
+        "must redact sensitive values: {script}"
     );
-    assert!(function.contains("outerHTML"));
+    assert!(script.contains("clone.outerHTML"), "{script}");
+    assert!(
+        script.contains("document.querySelector(\"#nd-2\")"),
+        "must bind the recovered selector as data: {script}"
+    );
+    assert!(
+        !script.contains("getBoundingClientRect"),
+        "must not read a layout rect under Lightpanda: {script}"
+    );
+    // Output merges nodeDetails with the redacted outerHTML and a null rect.
+    let structured = result.structured_content.as_ref().unwrap().clone();
+    let text = structured["result"].as_str().unwrap();
+    assert!(text.contains("\"rect\":null"), "{text}");
+    assert!(text.contains("[redacted]"), "{text}");
+    assert!(!text.contains("backendNodeId"), "{text}");
     assert!(
         driver
             .calls()
@@ -2707,12 +2752,22 @@ async fn performance_reports_no_cdp_under_lightpanda_runtime() {
     let structured = result.structured_content.as_ref().unwrap().clone();
     assert_eq!(structured["cdp_supported"], false);
     assert!(structured["cdp"].is_null(), "cdp metrics must be absent");
+    assert_eq!(structured["backend"], "lightpanda");
+    // Timing comes from the fixed Performance API script via native evaluate,
+    // never from CDP or Chromium metrics.
     assert!(driver.calls().iter().any(|c| {
-        c.tool == "browser_evaluate"
-            && c.arguments["function"]
+        c.tool == "evaluate"
+            && c.arguments["script"]
                 .as_str()
-                .is_some_and(|f| f.contains("performance.getEntriesByType"))
+                .is_some_and(|s| s.contains("performance.getEntriesByType"))
     }));
+    assert!(
+        driver
+            .calls()
+            .iter()
+            .all(|c| c.tool != "browser_run_code" && c.tool != "browser_run_code_unsafe"),
+        "performance must never route through process-level code execution"
+    );
 }
 
 #[tokio::test]
@@ -2741,10 +2796,14 @@ async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
         .await
         .unwrap();
     assert!(!start.is_error.unwrap_or(false));
-    assert!(driver
-        .calls()
-        .iter()
-        .any(|c| c.tool == "browser_start_tracing"));
+    // Tracing is app-owned: no upstream tracing primitives exist or are called.
+    assert!(
+        driver
+            .calls()
+            .iter()
+            .all(|c| c.tool != "browser_start_tracing" && c.tool != "browser_stop_tracing"),
+        "tracing must not call removed Playwright tracing tools"
+    );
 
     let double = client
         .call_tool(
@@ -2756,6 +2815,13 @@ async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
     let text = serde_json::to_string(&double).unwrap();
     assert!(double.is_error.unwrap_or(false), "{text}");
     assert!(text.contains("INVALID_ARGUMENT"), "{text}");
+
+    // While tracing, each routed native tool records exactly one minimal event.
+    let snapshot = client
+        .call_tool(CallToolRequestParams::new("browser_snapshot"))
+        .await
+        .unwrap();
+    assert!(!snapshot.is_error.unwrap_or(false));
 
     let stop = client
         .call_tool(
@@ -2772,11 +2838,15 @@ async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
     let artifact_id = structured["artifact_id"].as_str().unwrap();
     assert!(artifact_id.starts_with("a-"), "{text}");
     assert_eq!(artifact_id.len(), 18, "{text}");
-    assert_eq!(structured["files"], 1, "{text}");
-    assert_eq!(structured["bytes"], 5, "{text}");
+    assert_eq!(structured["files"], 2, "{text}");
+    assert!(structured["bytes"].as_u64().unwrap() > 0, "{text}");
     assert!(structured.get("artifacts").is_none(), "{text}");
     assert!(
-        !text.contains("trace.zip"),
+        !text.contains("events.jsonl"),
+        "trace response leaks file names"
+    );
+    assert!(
+        !text.contains("manifest.json"),
         "trace response leaks file names"
     );
     let artifact_dir = active_artifact_dir(&dir);
@@ -2789,6 +2859,32 @@ async fn trace_lifecycle_returns_opaque_artifacts_without_paths() {
         !text.contains(&dir_string.replace('\\', "/")),
         "trace response leaks absolute paths"
     );
+
+    // Artifacts on disk: one event line per routed tool call, and a manifest.
+    // Events carry ts/tool/page_id only — never arguments or page content.
+    let traces_dir = artifact_dir.join("traces");
+    let events = std::fs::read_to_string(traces_dir.join("events.jsonl")).unwrap();
+    let lines: Vec<&str> = events.lines().collect();
+    assert_eq!(lines.len(), 1, "{events}");
+    for line in &lines {
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let keys: std::collections::BTreeSet<String> =
+            parsed.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(
+            keys,
+            ["page_id", "tool", "ts"]
+                .into_iter()
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<String>>(),
+            "trace events must stay minimal: {line}"
+        );
+    }
+    assert!(lines[0].contains("\"tool\":\"tree\""), "{}", lines[0]);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(traces_dir.join("manifest.json")).unwrap())
+            .unwrap();
+    assert_eq!(manifest["schema"], "lc-trace-v1");
+    assert_eq!(manifest["event_count"], lines.len() as u64);
 
     let stopped = client
         .call_tool(

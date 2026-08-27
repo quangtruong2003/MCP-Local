@@ -76,44 +76,6 @@ const CHROMIUM_PERFORMANCE_CODE: &str = r#"async (page) => {
   return result;
 }"#;
 
-/// DOM inspection expression. The outerHTML is serialized from a CLONED element
-/// after redacting sensitive attributes and password values, so the live DOM is
-/// never mutated and secret values never leak through the serialized markup.
-pub(crate) const DOM_INSPECT_FUNCTION: &str = r#"(element) => {
-  const sensitive = (name) => {
-    const n = String(name || '').toLowerCase();
-    return n.includes('token') || n.includes('secret') || n.includes('password') || n === 'value';
-  };
-  const r = element.getBoundingClientRect();
-  const s = getComputedStyle(element);
-  const attrs = {};
-  for (const a of element.attributes || []) {
-    attrs[a.name] = sensitive(a.name) ? '[redacted]' : String(a.value).slice(0, 2048);
-  }
-  const redact = (el) => {
-    for (const a of Array.from(el.attributes || [])) {
-      if (sensitive(a.name)) { try { el.setAttribute(a.name, '[redacted]'); } catch (e) {} }
-    }
-    const tag = String(el.tagName || '').toUpperCase();
-    const type = String((el.getAttribute && el.getAttribute('type')) || '').toLowerCase();
-    if (tag === 'INPUT' && type === 'password') {
-      try { el.setAttribute('value', '[redacted]'); } catch (e) {}
-    }
-  };
-  const clone = element.cloneNode(true);
-  redact(clone);
-  if (clone.querySelectorAll) { for (const d of clone.querySelectorAll('*')) { redact(d); } }
-  return {
-    tagName: element.tagName,
-    attrs: attrs,
-    rect: { x: r.x, y: r.y, width: r.width, height: r.height },
-    style: { display: s.display, visibility: s.visibility, position: s.position, color: s.color, backgroundColor: s.backgroundColor, fontSize: s.fontSize },
-    outerHTML: String(clone.outerHTML || '').slice(0, 32768)
-  };
-}"#;
-
-pub(crate) const PERFORMANCE_FUNCTION: &str = "() => ({navigation: performance.getEntriesByType('navigation').map(e=>({name:e.name,duration:e.duration,domContentLoadedEventEnd:e.domContentLoadedEventEnd,loadEventEnd:e.loadEventEnd})), resources: performance.getEntriesByType('resource').slice(-100).map(e=>({name:e.name,initiatorType:e.initiatorType,duration:e.duration,transferSize:e.transferSize}))})";
-
 struct RunningPlaywright {
     client: RunningService<RoleClient, ()>,
     _job: JobHandle,
@@ -660,37 +622,10 @@ mod tests {
     }
 
     #[test]
-    fn dom_inspection_sanitizes_outerhtml_from_a_clone() {
-        let f = DOM_INSPECT_FUNCTION;
-        // Sanitization must happen on a clone, not the live element.
-        assert!(
-            f.contains("cloneNode(true)"),
-            "must clone before serializing"
-        );
-        // Sensitive attributes/password values are redacted before serialization.
-        assert!(f.contains("[redacted]"), "must redact sensitive values");
-        assert!(
-            f.contains("setAttribute"),
-            "must overwrite sensitive attributes"
-        );
-        // The serialized markup must come from the clone, never the live element.
-        assert!(f.contains("clone.outerHTML"), "must serialize the clone");
-        assert!(
-            !f.contains("element.outerHTML"),
-            "must not serialize the live element's outerHTML directly"
-        );
-    }
-
-    #[test]
     fn fixed_expressions_have_no_interpolation_points() {
-        for f in [
-            DOM_INSPECT_FUNCTION,
-            PERFORMANCE_FUNCTION,
-            CHROMIUM_PERFORMANCE_CODE,
-        ] {
-            assert!(!f.contains("{0}"), "fixed expression has a format slot");
-            assert!(!f.contains("${"), "fixed expression has a template slot");
-        }
+        let f = CHROMIUM_PERFORMANCE_CODE;
+        assert!(!f.contains("{0}"), "fixed expression has a format slot");
+        assert!(!f.contains("${"), "fixed expression has a template slot");
     }
 
     #[test]
