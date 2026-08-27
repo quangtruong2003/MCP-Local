@@ -34,7 +34,8 @@
     ],
     "resources": [
       "binaries/TAILSCALE-LICENSE.txt",
-      "browser-runtime/**/*"
+      "browser-runtime/**/*",
+      "resources/lightpanda-runtime-manifest.json"
     ]
   }
 }

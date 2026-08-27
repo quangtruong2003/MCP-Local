@@ -1,0 +1,12 @@
+{
+  "schema_version":  1,
+  "runtime_family":  "lightpanda-wsl",
+  "lightpanda_version":  "0.3.7",
+  "lightpanda_arch":  "x86_64-linux",
+  "lightpanda_asset_url":  "https://github.com/lightpanda-io/browser/releases/download/0.3.7/lightpanda-x86_64-linux",
+  "lightpanda_sha256":  "895339b02205171a181dde743ae0068bb4564884076feac8482baca9c212aa5a",
+  "distro_image_version":  "lwsl-ubuntu-noble-minbase-v1",
+  "distro_arch":  "amd64",
+  "distro_image_url":  "https://github.com/quangtruong2003/MCP-Local/releases/download/runtime-lwsl-ubuntu-noble-minbase-v1/lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz",
+  "distro_image_sha256":  "3ba9db8ab987834c2f0e60de5d72c628f30d8d019e148d68066165698202b7c6"
+}

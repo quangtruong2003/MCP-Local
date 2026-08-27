@@ -1,0 +1,67 @@
+# Builds the immutable Ubuntu 24.04 minbase rootfs for the managed WSL2
+# Lightpanda runtime and publishes it as an immutable runtime release.
+#
+# The release tag is the distro image version itself; the workflow refuses to
+# overwrite an existing release, so app releases can pin a stable URL + SHA-256.
+# No app release may consume a floating "latest" rootfs.
+name: lightpanda-runtime
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "runtime-lwsl-ubuntu-noble-minbase-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    env:
+      DISTRO_IMAGE_VERSION: lwsl-ubuntu-noble-minbase-v1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build deterministic rootfs
+        run: |
+          sudo bash scripts/build-lightpanda-rootfs.sh
+        env:
+          OUT_DIR: ${{ github.workspace }}/dist/lightpanda-rootfs
+
+      - name: Verify manifest artifacts exist
+        run: |
+          cd dist/lightpanda-rootfs
+          test -s lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz
+          test -s lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz.sha256
+          test -s lightpanda-rootfs-packages.txt
+          test -s lightpanda-rootfs-sbom.spdx.json
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightpanda-rootfs-${{ env.DISTRO_IMAGE_VERSION }}
+          path: |
+            dist/lightpanda-rootfs/lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz
+            dist/lightpanda-rootfs/lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz.sha256
+            dist/lightpanda-rootfs/lightpanda-rootfs-packages.txt
+            dist/lightpanda-rootfs/lightpanda-rootfs-sbom.spdx.json
+
+      - name: Publish immutable runtime release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd dist/lightpanda-rootfs
+          TAG="runtime-${DISTRO_IMAGE_VERSION}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "::error::Release $TAG already exists. Runtime releases are immutable; bump the distro image version instead."
+            exit 1
+          fi
+          gh release create "$TAG" \
+            --title "Lightpanda WSL rootfs ${DISTRO_IMAGE_VERSION}" \
+            --notes "Immutable Ubuntu 24.04 minbase rootfs for the managed WSL2 Lightpanda runtime. SHA-256: $(cat lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz.sha256)" \
+            lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz \
+            lightpanda-rootfs-ubuntu-noble-minbase-amd64.tar.gz.sha256 \
+            lightpanda-rootfs-packages.txt \
+            lightpanda-rootfs-sbom.spdx.json

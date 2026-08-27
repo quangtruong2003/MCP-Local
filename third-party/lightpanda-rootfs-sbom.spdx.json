@@ -1,0 +1,1117 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "lightpanda-rootfs-ubuntu-noble-minbase-amd64",
+  "documentNamespace": "urn:lwsl:rootfs:amd64:1787990400",
+  "creationInfo": {
+    "created": "2026-08-29T08:00:00Z",
+    "creators": ["Tool: build-lightpanda-rootfs.sh"]
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-pkg-apt",
+      "name": "apt",
+      "versionInfo": "2.7.14build2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/apt@2.7.14build2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-base-files",
+      "name": "base-files",
+      "versionInfo": "13ubuntu10",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/base-files@13ubuntu10?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-base-passwd",
+      "name": "base-passwd",
+      "versionInfo": "3.6.3build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/base-passwd@3.6.3build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-bash",
+      "name": "bash",
+      "versionInfo": "5.2.21-2ubuntu4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/bash@5.2.21-2ubuntu4?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-bsdutils",
+      "name": "bsdutils",
+      "versionInfo": "1:2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/bsdutils@1:2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-ca-certificates",
+      "name": "ca-certificates",
+      "versionInfo": "20240203",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/ca-certificates@20240203?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-coreutils",
+      "name": "coreutils",
+      "versionInfo": "9.4-3ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/coreutils@9.4-3ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-dash",
+      "name": "dash",
+      "versionInfo": "0.5.12-6ubuntu5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/dash@0.5.12-6ubuntu5?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-debconf",
+      "name": "debconf",
+      "versionInfo": "1.5.86ubuntu1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/debconf@1.5.86ubuntu1?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-debianutils",
+      "name": "debianutils",
+      "versionInfo": "5.17build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/debianutils@5.17build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-diffutils",
+      "name": "diffutils",
+      "versionInfo": "1:3.10-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/diffutils@1:3.10-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-dpkg",
+      "name": "dpkg",
+      "versionInfo": "1.22.6ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/dpkg@1.22.6ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-e2fsprogs",
+      "name": "e2fsprogs",
+      "versionInfo": "1.47.0-2.4~exp1ubuntu4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/e2fsprogs@1.47.0-2.4~exp1ubuntu4?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-findutils",
+      "name": "findutils",
+      "versionInfo": "4.9.0-5build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/findutils@4.9.0-5build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-gcc-14-base",
+      "name": "gcc-14-base",
+      "versionInfo": "14-20240412-0ubuntu1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/gcc-14-base@14-20240412-0ubuntu1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-gpgv",
+      "name": "gpgv",
+      "versionInfo": "2.4.4-2ubuntu17",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/gpgv@2.4.4-2ubuntu17?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-grep",
+      "name": "grep",
+      "versionInfo": "3.11-4build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/grep@3.11-4build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-gzip",
+      "name": "gzip",
+      "versionInfo": "1.12-1ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/gzip@1.12-1ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-hostname",
+      "name": "hostname",
+      "versionInfo": "3.23+nmu2ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/hostname@3.23+nmu2ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-init-system-helpers",
+      "name": "init-system-helpers",
+      "versionInfo": "1.66ubuntu1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/init-system-helpers@1.66ubuntu1?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libacl1",
+      "name": "libacl1",
+      "versionInfo": "2.3.2-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libacl1@2.3.2-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libapt-pkg6.0t64",
+      "name": "libapt-pkg6.0t64",
+      "versionInfo": "2.7.14build2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libapt-pkg6.0t64@2.7.14build2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libassuan0",
+      "name": "libassuan0",
+      "versionInfo": "2.5.6-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libassuan0@2.5.6-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libattr1",
+      "name": "libattr1",
+      "versionInfo": "1:2.5.2-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libattr1@1:2.5.2-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libaudit-common",
+      "name": "libaudit-common",
+      "versionInfo": "1:3.1.2-2.1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libaudit-common@1:3.1.2-2.1build1?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libaudit1",
+      "name": "libaudit1",
+      "versionInfo": "1:3.1.2-2.1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libaudit1@1:3.1.2-2.1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libblkid1",
+      "name": "libblkid1",
+      "versionInfo": "2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libblkid1@2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libbz2-1.0",
+      "name": "libbz2-1.0",
+      "versionInfo": "1.0.8-5.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libbz2-1.0@1.0.8-5.1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libc-bin",
+      "name": "libc-bin",
+      "versionInfo": "2.39-0ubuntu8",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libc-bin@2.39-0ubuntu8?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libc6",
+      "name": "libc6",
+      "versionInfo": "2.39-0ubuntu8",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libc6@2.39-0ubuntu8?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libcap-ng0",
+      "name": "libcap-ng0",
+      "versionInfo": "0.8.4-2build2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libcap-ng0@0.8.4-2build2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libcap2",
+      "name": "libcap2",
+      "versionInfo": "1:2.66-5ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libcap2@1:2.66-5ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libcom-err2",
+      "name": "libcom-err2",
+      "versionInfo": "1.47.0-2.4~exp1ubuntu4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libcom-err2@1.47.0-2.4~exp1ubuntu4?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libcrypt1",
+      "name": "libcrypt1",
+      "versionInfo": "1:4.4.36-4build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libcrypt1@1:4.4.36-4build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libdebconfclient0",
+      "name": "libdebconfclient0",
+      "versionInfo": "0.271ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libdebconfclient0@0.271ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libext2fs2t64",
+      "name": "libext2fs2t64",
+      "versionInfo": "1.47.0-2.4~exp1ubuntu4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libext2fs2t64@1.47.0-2.4~exp1ubuntu4?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libffi8",
+      "name": "libffi8",
+      "versionInfo": "3.4.6-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libffi8@3.4.6-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libgcc-s1",
+      "name": "libgcc-s1",
+      "versionInfo": "14-20240412-0ubuntu1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libgcc-s1@14-20240412-0ubuntu1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libgcrypt20",
+      "name": "libgcrypt20",
+      "versionInfo": "1.10.3-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libgcrypt20@1.10.3-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libgmp10",
+      "name": "libgmp10",
+      "versionInfo": "2:6.3.0+dfsg-2ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libgmp10@2:6.3.0+dfsg-2ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libgnutls30t64",
+      "name": "libgnutls30t64",
+      "versionInfo": "3.8.3-1.1ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libgnutls30t64@3.8.3-1.1ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libgpg-error0",
+      "name": "libgpg-error0",
+      "versionInfo": "1.47-3build2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libgpg-error0@1.47-3build2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libhogweed6t64",
+      "name": "libhogweed6t64",
+      "versionInfo": "3.9.1-2.2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libhogweed6t64@3.9.1-2.2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libidn2-0",
+      "name": "libidn2-0",
+      "versionInfo": "2.3.7-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libidn2-0@2.3.7-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-liblz4-1",
+      "name": "liblz4-1",
+      "versionInfo": "1.9.4-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/liblz4-1@1.9.4-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-liblzma5",
+      "name": "liblzma5",
+      "versionInfo": "5.6.1+really5.4.5-1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/liblzma5@5.6.1+really5.4.5-1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libmd0",
+      "name": "libmd0",
+      "versionInfo": "1.1.0-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libmd0@1.1.0-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libmount1",
+      "name": "libmount1",
+      "versionInfo": "2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libmount1@2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libncursesw6",
+      "name": "libncursesw6",
+      "versionInfo": "6.4+20240113-1ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libncursesw6@6.4+20240113-1ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libnettle8t64",
+      "name": "libnettle8t64",
+      "versionInfo": "3.9.1-2.2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libnettle8t64@3.9.1-2.2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libnpth0t64",
+      "name": "libnpth0t64",
+      "versionInfo": "1.6-3.1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libnpth0t64@1.6-3.1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libp11-kit0",
+      "name": "libp11-kit0",
+      "versionInfo": "0.25.3-4ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libp11-kit0@0.25.3-4ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libpam-modules",
+      "name": "libpam-modules",
+      "versionInfo": "1.5.3-5ubuntu5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libpam-modules@1.5.3-5ubuntu5?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libpam-modules-bin",
+      "name": "libpam-modules-bin",
+      "versionInfo": "1.5.3-5ubuntu5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libpam-modules-bin@1.5.3-5ubuntu5?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libpam-runtime",
+      "name": "libpam-runtime",
+      "versionInfo": "1.5.3-5ubuntu5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libpam-runtime@1.5.3-5ubuntu5?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libpam0g",
+      "name": "libpam0g",
+      "versionInfo": "1.5.3-5ubuntu5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libpam0g@1.5.3-5ubuntu5?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libpcre2-8-0",
+      "name": "libpcre2-8-0",
+      "versionInfo": "10.42-4ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libpcre2-8-0@10.42-4ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libproc2-0",
+      "name": "libproc2-0",
+      "versionInfo": "2:4.0.4-4ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libproc2-0@2:4.0.4-4ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libseccomp2",
+      "name": "libseccomp2",
+      "versionInfo": "2.5.5-1ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libseccomp2@2.5.5-1ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libselinux1",
+      "name": "libselinux1",
+      "versionInfo": "3.5-2ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libselinux1@3.5-2ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libsemanage-common",
+      "name": "libsemanage-common",
+      "versionInfo": "3.5-1build5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libsemanage-common@3.5-1build5?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libsemanage2",
+      "name": "libsemanage2",
+      "versionInfo": "3.5-1build5",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libsemanage2@3.5-1build5?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libsepol2",
+      "name": "libsepol2",
+      "versionInfo": "3.5-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libsepol2@3.5-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libsmartcols1",
+      "name": "libsmartcols1",
+      "versionInfo": "2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libsmartcols1@2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libss2",
+      "name": "libss2",
+      "versionInfo": "1.47.0-2.4~exp1ubuntu4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libss2@1.47.0-2.4~exp1ubuntu4?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libssl3t64",
+      "name": "libssl3t64",
+      "versionInfo": "3.0.13-0ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libssl3t64@3.0.13-0ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libstdc++6",
+      "name": "libstdc++6",
+      "versionInfo": "14-20240412-0ubuntu1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libstdc++6@14-20240412-0ubuntu1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libsystemd0",
+      "name": "libsystemd0",
+      "versionInfo": "255.4-1ubuntu8",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libsystemd0@255.4-1ubuntu8?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libtasn1-6",
+      "name": "libtasn1-6",
+      "versionInfo": "4.19.0-3build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libtasn1-6@4.19.0-3build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libtinfo6",
+      "name": "libtinfo6",
+      "versionInfo": "6.4+20240113-1ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libtinfo6@6.4+20240113-1ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libudev1",
+      "name": "libudev1",
+      "versionInfo": "255.4-1ubuntu8",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libudev1@255.4-1ubuntu8?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libunistring5",
+      "name": "libunistring5",
+      "versionInfo": "1.1-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libunistring5@1.1-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libuuid1",
+      "name": "libuuid1",
+      "versionInfo": "2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libuuid1@2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libxxhash0",
+      "name": "libxxhash0",
+      "versionInfo": "0.8.2-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libxxhash0@0.8.2-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-libzstd1",
+      "name": "libzstd1",
+      "versionInfo": "1.5.5+dfsg2-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/libzstd1@1.5.5+dfsg2-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-login",
+      "name": "login",
+      "versionInfo": "1:4.13+dfsg1-4ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/login@1:4.13+dfsg1-4ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-logsave",
+      "name": "logsave",
+      "versionInfo": "1.47.0-2.4~exp1ubuntu4",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/logsave@1.47.0-2.4~exp1ubuntu4?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-mawk",
+      "name": "mawk",
+      "versionInfo": "1.3.4.20240123-1build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/mawk@1.3.4.20240123-1build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-mount",
+      "name": "mount",
+      "versionInfo": "2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/mount@2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-ncurses-base",
+      "name": "ncurses-base",
+      "versionInfo": "6.4+20240113-1ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/ncurses-base@6.4+20240113-1ubuntu2?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-ncurses-bin",
+      "name": "ncurses-bin",
+      "versionInfo": "6.4+20240113-1ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/ncurses-bin@6.4+20240113-1ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-openssl",
+      "name": "openssl",
+      "versionInfo": "3.0.13-0ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/openssl@3.0.13-0ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-passwd",
+      "name": "passwd",
+      "versionInfo": "1:4.13+dfsg1-4ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/passwd@1:4.13+dfsg1-4ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-perl-base",
+      "name": "perl-base",
+      "versionInfo": "5.38.2-3.2build2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/perl-base@5.38.2-3.2build2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-procps",
+      "name": "procps",
+      "versionInfo": "2:4.0.4-4ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/procps@2:4.0.4-4ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-sed",
+      "name": "sed",
+      "versionInfo": "4.9-2build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/sed@4.9-2build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-sensible-utils",
+      "name": "sensible-utils",
+      "versionInfo": "0.0.22",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/sensible-utils@0.0.22?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-sysvinit-utils",
+      "name": "sysvinit-utils",
+      "versionInfo": "3.08-6ubuntu3",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/sysvinit-utils@3.08-6ubuntu3?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-tar",
+      "name": "tar",
+      "versionInfo": "1.35+dfsg-3build1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/tar@1.35+dfsg-3build1?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-ubuntu-keyring",
+      "name": "ubuntu-keyring",
+      "versionInfo": "2023.11.28.1",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/ubuntu-keyring@2023.11.28.1?arch=all&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-util-linux",
+      "name": "util-linux",
+      "versionInfo": "2.39.3-9ubuntu6",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/util-linux@2.39.3-9ubuntu6?arch=amd64&distro=ubuntu-24.04"
+      }]
+    },
+    {
+      "SPDXID": "SPDXRef-pkg-zlib1g",
+      "name": "zlib1g",
+      "versionInfo": "1:1.3.dfsg-3.1ubuntu2",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "externalRefs": [{
+        "referenceCategory": "PACKAGE-MANAGER",
+        "referenceType": "purl",
+        "referenceLocator": "pkg:deb/ubuntu/zlib1g@1:1.3.dfsg-3.1ubuntu2?arch=amd64&distro=ubuntu-24.04"
+      }]
+    }
+  ]
+}
