@@ -40,11 +40,14 @@ const FORBIDDEN_PROCESS_CODE_TOOLS: &[&str] = &["browser_run_code", "browser_run
 /// Upstream methods Local Workspaces intentionally composes. Storage/cookies,
 /// routes, arbitrary network bodies, coordinate input, and unsafe code are not
 /// exposed by this adapter.
+///
+/// Note: `browser_navigate_forward` and `browser_reload` are intentionally NOT
+/// listed. The pinned upstream runtime (@playwright/mcp 0.0.79) marks them
+/// `skillOnly`, so they are never exposed over MCP; requiring/forwarding them
+/// would fail startup and mid-session respectively.
 pub const GENERIC_TOOL_ALLOWLIST: &[&str] = &[
     "browser_navigate",
     "browser_navigate_back",
-    "browser_navigate_forward",
-    "browser_reload",
     "browser_snapshot",
     "browser_click",
     "browser_hover",
@@ -126,6 +129,9 @@ struct RunningPlaywright {
     client: RunningService<RoleClient, ()>,
     _job: JobHandle,
     engine: BrowserEngine,
+    /// OS pid of the Playwright MCP child process, when the transport reported
+    /// one. Retained for diagnostics and test-only crash simulation.
+    child_pid: Option<u32>,
 }
 
 pub struct PlaywrightMcpDriver {
@@ -149,6 +155,28 @@ impl PlaywrightMcpDriver {
 
     pub async fn diagnostics_snapshot(&self) -> Vec<String> {
         self.diagnostics.lock().await.iter().cloned().collect()
+    }
+
+    /// Test-only: OS pid of the running Playwright MCP child process, if known.
+    /// Integration tests use it to walk the browser process tree and to prove
+    /// Background launches create no visible top-level windows.
+    pub async fn test_child_pid(&self) -> Option<u32> {
+        self.running.lock().await.as_ref().and_then(|r| r.child_pid)
+    }
+
+    /// Test-only: forcefully terminate the Playwright MCP child process tree
+    /// WITHOUT clearing driver state, simulating an unexpected browser crash. The
+    /// next tool call must then surface `BROWSER_PROCESS_LOST` instead of a
+    /// graceful stop. Returns the terminated pid.
+    pub async fn test_terminate_child(&self) -> Result<u32, CoreError> {
+        let pid = self.test_child_pid().await.ok_or_else(|| {
+            CoreError::new(
+                ErrorCode::BrowserNotRunning,
+                "browser child process pid is unknown",
+            )
+        })?;
+        kill_process_tree(pid);
+        Ok(pid)
     }
 
     pub(crate) fn is_generic_tool_allowed(tool: &str) -> bool {
@@ -236,12 +264,14 @@ impl PlaywrightMcpDriver {
     /// forward, plus the fixed Chromium performance primitive. Validated at
     /// startup so a mismatched/incomplete bundled runtime fails fast instead of
     /// erroring mid-session. Must stay a superset of `GENERIC_TOOL_ALLOWLIST`.
+    ///
+    /// `browser_navigate_forward` and `browser_reload` are omitted because the
+    /// pinned upstream runtime (0.0.79) marks them `skillOnly` and never exposes
+    /// them over MCP; requiring them would block every browser launch.
     fn required_upstream_tools() -> &'static [&'static str] {
         &[
             "browser_navigate",
             "browser_navigate_back",
-            "browser_navigate_forward",
-            "browser_reload",
             "browser_snapshot",
             "browser_click",
             "browser_hover",
@@ -472,6 +502,7 @@ impl BrowserDriver for PlaywrightMcpDriver {
             client,
             _job: job,
             engine: spec.engine,
+            child_pid: pid,
         });
         Ok(status)
     }
@@ -562,6 +593,25 @@ impl BrowserDriver for PlaywrightMcpDriver {
             )
         })
     }
+}
+
+/// Test-only helper: best-effort kill of a process and its descendants. On
+/// Windows `taskkill /T` terminates the whole tree (node MCP + browser child
+/// processes); elsewhere a plain SIGKILL is used.
+#[cfg(windows)]
+fn kill_process_tree(pid: u32) {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid.to_string()])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+}
+
+#[cfg(not(windows))]
+fn kill_process_tree(pid: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
 }
 
 #[cfg(test)]
