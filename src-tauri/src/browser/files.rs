@@ -22,6 +22,14 @@ pub struct BrowserDownloadInfo {
     pub sha256: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct BrowserSavedDownloadOutput {
+    pub workspace_id: String,
+    pub path: String,
+    pub bytes: usize,
+    pub sha256: String,
+}
+
 /// Files Local Workspaces itself places in the session artifact root. These are
 /// never downloads and must not be staged into `downloads/` or exposed as such.
 const INTERNAL_ROOT_FILES: &[&str] = &["playwright-mcp-config.json"];
@@ -281,7 +289,7 @@ pub fn save_download_to_workspace(
     workspace_id: &str,
     id: &str,
     destination: &str,
-) -> Result<serde_json::Value, CoreError> {
+) -> Result<BrowserSavedDownloadOutput, CoreError> {
     let ws = require_workspace(core, workspace_id, true)?;
     stage_completed_downloads(artifact_dir)?;
     let downloads = artifact_dir.join("downloads");
@@ -327,12 +335,12 @@ pub fn save_download_to_workspace(
         fs::create_dir_all(parent).map_err(CoreError::io)?;
     }
     lc_core::ops::write_file::atomic_write(&target, &bytes).map_err(CoreError::io)?;
-    Ok(serde_json::json!({
-        "workspace_id": workspace_id,
-        "path": destination,
-        "bytes": bytes.len(),
-        "sha256": sha256_hex(&bytes),
-    }))
+    Ok(BrowserSavedDownloadOutput {
+        workspace_id: workspace_id.to_string(),
+        path: destination.to_string(),
+        bytes: bytes.len(),
+        sha256: sha256_hex(&bytes),
+    })
 }
 
 #[cfg(test)]

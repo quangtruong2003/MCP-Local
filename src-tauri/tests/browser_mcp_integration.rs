@@ -401,10 +401,18 @@ fn matching_audit(core: &lc_core::CoreServices, op: &str) -> Vec<lc_core::models
 async fn browser_discovery_exposes_exactly_29_public_browser_tools() {
     let (port, _dir, _core, _driver) = spawn(AppSettings::default()).await;
     let client = client(port).await;
-    let names: std::collections::BTreeSet<String> = client
-        .list_all_tools()
-        .await
-        .unwrap()
+    let tools = client.list_all_tools().await.unwrap();
+    let missing_output_schema: Vec<String> = tools
+        .iter()
+        .filter(|tool| tool.name.starts_with("browser_"))
+        .filter(|tool| tool.output_schema.is_none())
+        .map(|tool| tool.name.to_string())
+        .collect();
+    assert!(
+        missing_output_schema.is_empty(),
+        "every browser tool must declare an outputSchema: {missing_output_schema:?}"
+    );
+    let names: std::collections::BTreeSet<String> = tools
         .into_iter()
         .map(|tool| tool.name.to_string())
         .filter(|name| name.starts_with("browser_"))

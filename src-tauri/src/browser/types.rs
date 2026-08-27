@@ -39,7 +39,7 @@ impl From<&crate::settings::AppSettings> for BrowserRuntimeSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct BrowserEmulation {
     pub width: u32,
     pub height: u32,
@@ -62,7 +62,7 @@ pub struct BrowserLaunchSpec {
     pub emulation: Option<BrowserEmulation>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct BrowserPageStatus {
     pub page_id: String,
     pub url: String,
@@ -71,7 +71,7 @@ pub struct BrowserPageStatus {
     pub viewport_height: Option<u32>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 pub struct BrowserSessionStatus {
     pub enabled: bool,
     pub paused: bool,

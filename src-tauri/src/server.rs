@@ -8,17 +8,22 @@
 
 use crate::{
     browser::{
+        files::{BrowserDownloadInfo, BrowserSavedDownloadOutput},
         mcp::{
             call_result_text, parse_tabs_markdown, truncate_utf8, BrowserConsoleArgs,
-            BrowserDialogArgs, BrowserDomArgs, BrowserDragArgs, BrowserEmulateArgs,
-            BrowserEmulationRequest, BrowserEvaluateArgs, BrowserFillArgs, BrowserLoadState,
-            BrowserNavigateArgs, BrowserNavigationAction, BrowserNetworkArgs, BrowserOpenArgs,
-            BrowserOrientation, BrowserPageSummary, BrowserPressArgs, BrowserRunStepsArgs,
-            BrowserSaveDownloadArgs, BrowserScreenshotArgs, BrowserScreenshotMetadata,
-            BrowserScreenshotMode, BrowserSearchArgs, BrowserSelectArgs, BrowserStep,
-            BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs, BrowserTraceAction,
-            BrowserTraceArgs, BrowserUploadArgs, BrowserUploadSource, BrowserViewportArgs,
-            BrowserWaitArgs, BrowserWaitCondition,
+            BrowserConsoleOutput, BrowserDevtoolsOutput, BrowserDialogArgs, BrowserDomArgs,
+            BrowserDomOutput, BrowserDragArgs, BrowserEmulateArgs, BrowserEmulationRequest,
+            BrowserEvaluateArgs, BrowserEvaluateOutput, BrowserFillArgs, BrowserLoadState,
+            BrowserNavigateArgs, BrowserNavigationAction, BrowserNavigationOutput,
+            BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput, BrowserOpenArgs,
+            BrowserOpenOutput, BrowserOrientation, BrowserPageSummary, BrowserPerformanceOutput,
+            BrowserPressArgs, BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
+            BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScreenshotMode,
+            BrowserSearchArgs, BrowserSelectArgs, BrowserSnapshotOutput, BrowserStep,
+            BrowserStepError, BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs,
+            BrowserTextOutput, BrowserTextTruncatedOutput, BrowserTraceAction, BrowserTraceArgs,
+            BrowserTraceOutput, BrowserUploadArgs, BrowserUploadOutput, BrowserUploadSource,
+            BrowserViewportArgs, BrowserViewportOutput, BrowserWaitArgs, BrowserWaitCondition,
         },
         playwright::{
             DOM_INSPECT_FUNCTION, PERFORMANCE_FUNCTION, WAIT_READY_FUNCTION, WAIT_URL_FUNCTION,
@@ -28,7 +33,10 @@ use crate::{
             bounded_event_limit, redacted_origin, validate_batch_step_count,
             validate_navigation_url, validate_timeout, validate_viewport,
         },
-        types::{DEFAULT_SCREENSHOT_MAX_EDGE, MAX_SCREENSHOT_ENCODED_BYTES, MAX_SCREENSHOT_PIXELS},
+        types::{
+            BrowserSessionStatus, DEFAULT_SCREENSHOT_MAX_EDGE, MAX_SCREENSHOT_ENCODED_BYTES,
+            MAX_SCREENSHOT_PIXELS,
+        },
     },
     screen_capture::{
         filter_targets_for_scope, CaptureTarget, CapturedImage, ScreenCaptureProvider,
@@ -380,13 +388,13 @@ fn paginate_lines(
 
 /// Histogram of console message levels in a returned page. Audit stores only
 /// these counts, never message text.
-fn console_level_histogram(text: &str) -> serde_json::Value {
+fn console_level_histogram(text: &str) -> std::collections::BTreeMap<String, u64> {
     let mut levels = std::collections::BTreeMap::<String, u64>::new();
     for line in text.lines() {
         let level = console_line_level(line);
         *levels.entry(level).or_default() += 1;
     }
-    serde_json::to_value(&levels).unwrap_or(serde_json::json!({}))
+    levels
 }
 
 /// Level of one console line. Pinned upstream 0.0.79 renders messages as
@@ -459,7 +467,7 @@ async fn browser_wait_internal(
     browser: &crate::browser::manager::BrowserManager,
     condition: BrowserWaitCondition,
     requested_timeout: Option<u64>,
-) -> Result<serde_json::Value, CoreError> {
+) -> Result<BrowserOkOutput, CoreError> {
     let timeout_ms = validate_timeout(requested_timeout, false)?;
     match condition {
         BrowserWaitCondition::TextPresent { text } => {
@@ -546,7 +554,7 @@ async fn browser_wait_internal(
             }
         }
     }
-    Ok(serde_json::json!({ "ok": true }))
+    Ok(BrowserOkOutput { ok: true })
 }
 
 /// Reads width/height from the PNG IHDR chunk so the pixel budget can be
@@ -680,7 +688,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Read Browser Automation state without starting a browser. This remains readable when Browser Automation is disabled so the agent can report the blocker. Pause still wins.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserSessionStatus>()
     )]
     async fn browser_get_status(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = if self.core.pause.is_paused() {
@@ -704,7 +713,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Start the dedicated Local Workspaces browser session, optionally navigating to an initial http(s) URL. Uses the configured engine and Background/Visible Debug mode.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserOpenOutput>()
     )]
     async fn browser_open(&self, Parameters(a): Parameters<BrowserOpenArgs>) -> CallToolResult {
         let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
@@ -720,7 +730,7 @@ impl WorkspaceServer {
                 args.insert("url".into(), serde_json::Value::String(url.to_string()));
                 self.browser.call_upstream("browser_navigate", args).await?;
             }
-            Ok::<_, CoreError>(serde_json::json!({ "status": status, "pages": pages }))
+            Ok::<_, CoreError>(BrowserOpenOutput { status, pages })
         }
         .await;
         browser_outcome(
@@ -733,7 +743,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Close the active Local Workspaces browser session. The dedicated profile remains on disk for future automation sessions.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserSessionStatus>()
     )]
     async fn browser_close(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = self.browser.close().await;
@@ -742,7 +753,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "List, create, select, or close browser tabs. Local Workspaces returns session-scoped opaque page_id values; pass page_id for select/close instead of Playwright tab indices.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<Vec<BrowserPageSummary>>()
     )]
     async fn browser_tabs(&self, Parameters(a): Parameters<BrowserTabsArgs>) -> CallToolResult {
         let action_name = match a.action {
@@ -804,7 +816,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Navigate the active page to an http(s) URL, go back, go forward, or reload. file:// and non-http(s) schemes are rejected before Playwright is called.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserNavigationOutput>()
     )]
     async fn browser_navigate(
         &self,
@@ -838,11 +851,11 @@ impl WorkspaceServer {
             let response = self.browser.call_upstream(upstream, args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
             let pages = refresh_browser_tabs(&self.browser).await?;
-            Ok::<_, CoreError>(serde_json::json!({
-                "text": text,
-                "truncated": truncated,
-                "pages": pages,
-            }))
+            Ok::<_, CoreError>(BrowserNavigationOutput {
+                text,
+                truncated,
+                pages,
+            })
         }
         .await;
         browser_outcome(
@@ -855,7 +868,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Search the web in the active browser using Google Search. The query is URL-encoded and is never written to the audit log.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserNavigationOutput>()
     )]
     async fn browser_search(&self, Parameters(a): Parameters<BrowserSearchArgs>) -> CallToolResult {
         let result = async {
@@ -872,11 +886,11 @@ impl WorkspaceServer {
             let response = self.browser.call_upstream("browser_navigate", args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
             let pages = refresh_browser_tabs(&self.browser).await?;
-            Ok::<_, CoreError>(serde_json::json!({
-                "text": text,
-                "truncated": truncated,
-                "pages": pages,
-            }))
+            Ok::<_, CoreError>(BrowserNavigationOutput {
+                text,
+                truncated,
+                pages,
+            })
         }
         .await;
         browser_outcome(
@@ -889,7 +903,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Return a bounded semantic accessibility/DOM snapshot of the active page. Use returned target references for element interactions.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserSnapshotOutput>()
     )]
     async fn browser_snapshot(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = async {
@@ -902,20 +917,24 @@ impl WorkspaceServer {
                 crate::browser::types::MAX_SNAPSHOT_BYTES,
             );
             let bytes = text.len();
-            Ok::<_, CoreError>(
-                serde_json::json!({"snapshot": text, "bytes": bytes, "truncated": truncated}),
-            )
+            Ok::<_, CoreError>(BrowserSnapshotOutput {
+                snapshot: text,
+                bytes,
+                truncated,
+            })
         }
         .await;
-        let detail = result.as_ref().ok().map(
-            |v| serde_json::json!({"returned_bytes": v["bytes"], "truncated": v["truncated"]}),
-        );
+        let detail = result
+            .as_ref()
+            .ok()
+            .map(|v| serde_json::json!({"returned_bytes": v.bytes, "truncated": v.truncated}));
         browser_outcome(&self.core, "browser_snapshot", result, detail)
     }
 
     #[tool(
         description = "Click an element target from the current browser snapshot.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
     )]
     async fn browser_click(&self, Parameters(a): Parameters<BrowserTargetArgs>) -> CallToolResult {
         let result = async {
@@ -923,7 +942,7 @@ impl WorkspaceServer {
             args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
             let r = self.browser.call_upstream("browser_click", args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&r), 64 * 1024);
-            Ok::<_, CoreError>(serde_json::json!({"text":text,"truncated":truncated}))
+            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
         }
         .await;
         browser_outcome(
@@ -936,7 +955,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Fill/type text into an element target. Audit records length only and never the supplied text.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTextOutput>()
     )]
     async fn browser_fill(&self, Parameters(a): Parameters<BrowserFillArgs>) -> CallToolResult {
         let result = async {
@@ -946,9 +966,9 @@ impl WorkspaceServer {
             args.insert("submit".into(), serde_json::Value::Bool(a.submit));
             args.insert("slowly".into(), serde_json::Value::Bool(a.slowly));
             let r = self.browser.call_upstream("browser_type", args).await?;
-            Ok::<_, CoreError>(
-                serde_json::json!({"text": truncate_utf8(call_result_text(&r), 64*1024).0}),
-            )
+            Ok::<_, CoreError>(BrowserTextOutput {
+                text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
+            })
         }
         .await;
         browser_outcome(
@@ -963,7 +983,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Press a keyboard key in the active page, such as Enter or Escape.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTextOutput>()
     )]
     async fn browser_press(&self, Parameters(a): Parameters<BrowserPressArgs>) -> CallToolResult {
         let result = async {
@@ -979,9 +1000,9 @@ impl WorkspaceServer {
                 .browser
                 .call_upstream("browser_press_key", args)
                 .await?;
-            Ok::<_, CoreError>(
-                serde_json::json!({"text":truncate_utf8(call_result_text(&r),64*1024).0}),
-            )
+            Ok::<_, CoreError>(BrowserTextOutput {
+                text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
+            })
         }
         .await;
         browser_outcome(
@@ -994,7 +1015,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Select one or more values in a select element target.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTextOutput>()
     )]
     async fn browser_select(&self, Parameters(a): Parameters<BrowserSelectArgs>) -> CallToolResult {
         let result = async {
@@ -1011,9 +1033,9 @@ impl WorkspaceServer {
                 .browser
                 .call_upstream("browser_select_option", args)
                 .await?;
-            Ok::<_, CoreError>(
-                serde_json::json!({"text":truncate_utf8(call_result_text(&r),64*1024).0}),
-            )
+            Ok::<_, CoreError>(BrowserTextOutput {
+                text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
+            })
         }
         .await;
         browser_outcome(
@@ -1026,14 +1048,15 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Hover an element target from the current browser snapshot.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserOkOutput>()
     )]
     async fn browser_hover(&self, Parameters(a): Parameters<BrowserTargetArgs>) -> CallToolResult {
         let result = async {
             let mut args = serde_json::Map::new();
             args.insert("target".into(), serde_json::Value::String(a.ref_id.clone()));
             self.browser.call_upstream("browser_hover", args).await?;
-            Ok::<_, CoreError>(serde_json::json!({"ok":true}))
+            Ok::<_, CoreError>(BrowserOkOutput { ok: true })
         }
         .await;
         browser_outcome(
@@ -1046,7 +1069,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Drag from one semantic element target to another.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserOkOutput>()
     )]
     async fn browser_drag(&self, Parameters(a): Parameters<BrowserDragArgs>) -> CallToolResult {
         let result = async {
@@ -1060,7 +1084,7 @@ impl WorkspaceServer {
                 serde_json::Value::String(a.end_ref.clone()),
             );
             self.browser.call_upstream("browser_drag", args).await?;
-            Ok::<_, CoreError>(serde_json::json!({"ok":true}))
+            Ok::<_, CoreError>(BrowserOkOutput { ok: true })
         }
         .await;
         browser_outcome(
@@ -1073,7 +1097,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Wait for text, element visibility, URL, load state, or a bounded delay. Pause/disable is checked while polling.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserOkOutput>()
     )]
     async fn browser_wait(&self, Parameters(a): Parameters<BrowserWaitArgs>) -> CallToolResult {
         let kind = match &a.condition {
@@ -1096,7 +1121,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Accept or dismiss the active browser dialog; optional prompt text is never written to audit.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserOkOutput>()
     )]
     async fn browser_dialog(&self, Parameters(a): Parameters<BrowserDialogArgs>) -> CallToolResult {
         let result = async {
@@ -1108,7 +1134,7 @@ impl WorkspaceServer {
             self.browser
                 .call_upstream("browser_handle_dialog", args)
                 .await?;
-            Ok::<_, CoreError>(serde_json::json!({"ok":true}))
+            Ok::<_, CoreError>(BrowserOkOutput { ok: true })
         }
         .await;
         browser_outcome(
@@ -1123,7 +1149,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Resize the active browser viewport to exact CSS pixel dimensions, bounded to 1..8192 on each edge.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserViewportOutput>()
     )]
     async fn browser_set_viewport(
         &self,
@@ -1135,7 +1162,10 @@ impl WorkspaceServer {
             args.insert("width".into(), serde_json::json!(a.width));
             args.insert("height".into(), serde_json::json!(a.height));
             self.browser.call_upstream("browser_resize", args).await?;
-            Ok::<_, CoreError>(serde_json::json!({"width":a.width,"height":a.height}))
+            Ok::<_, CoreError>(BrowserViewportOutput {
+                width: a.width,
+                height: a.height,
+            })
         }
         .await;
         browser_outcome(
@@ -1148,7 +1178,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Apply a Playwright device preset or explicit mobile/touch emulation. A running browser is restarted into a new session while reusing its dedicated engine profile.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserSessionStatus>()
     )]
     async fn browser_emulate_device(
         &self,
@@ -1229,7 +1260,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Capture the active page as PNG (viewport, full page, or element). Returns an MCP image block and safe metadata; independent of desktop Screen Capture permission.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserScreenshotMetadata>()
     )]
     async fn browser_screenshot(
         &self,
@@ -1285,31 +1317,54 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Read bounded browser console messages. Message text is returned to the caller but audit stores only level/count metadata.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserConsoleOutput>()
     )]
     async fn browser_console(
         &self,
         Parameters(a): Parameters<BrowserConsoleArgs>,
     ) -> CallToolResult {
-        let result=async {
-            let limit=bounded_event_limit(a.limit)?;
-            let level=a.level.clone().unwrap_or_else(||"info".into());
-            if !matches!(level.as_str(),"error"|"warning"|"info"|"debug") { return Err(CoreError::new(ErrorCode::InvalidArgument,"browser console level must be error, warning, info, or debug")); }
-            let mut args=serde_json::Map::new(); args.insert("level".into(),serde_json::Value::String(level.clone())); args.insert("all".into(),serde_json::Value::Bool(true));
-            let response=self.browser.call_upstream("browser_console_messages",args).await?;
-            let raw=call_result_text(&response);
-            let (text,next_cursor)=paginate_lines(strip_console_header(&raw),a.cursor.as_deref(),limit)?;
-            let count=text.lines().count();
-            let levels=console_level_histogram(&text);
-            Ok::<_,CoreError>(serde_json::json!({"level":level,"count":count,"levels":levels,"messages":text,"next_cursor":next_cursor}))
-        }.await;
-        let detail=result.as_ref().ok().map(|v|serde_json::json!({"count":v["count"],"levels":v["levels"],"cursor":v["next_cursor"]}));
+        let result = async {
+            let limit = bounded_event_limit(a.limit)?;
+            let level = a.level.clone().unwrap_or_else(|| "info".into());
+            if !matches!(level.as_str(), "error" | "warning" | "info" | "debug") {
+                return Err(CoreError::new(
+                    ErrorCode::InvalidArgument,
+                    "browser console level must be error, warning, info, or debug",
+                ));
+            }
+            let mut args = serde_json::Map::new();
+            args.insert("level".into(), serde_json::Value::String(level.clone()));
+            args.insert("all".into(), serde_json::Value::Bool(true));
+            let response = self
+                .browser
+                .call_upstream("browser_console_messages", args)
+                .await?;
+            let raw = call_result_text(&response);
+            let (text, next_cursor) =
+                paginate_lines(strip_console_header(&raw), a.cursor.as_deref(), limit)?;
+            let count = text.lines().count();
+            let levels = console_level_histogram(&text);
+            Ok::<_, CoreError>(BrowserConsoleOutput {
+                level,
+                count,
+                levels,
+                messages: text,
+                next_cursor,
+            })
+        }
+        .await;
+        let detail = result
+            .as_ref()
+            .ok()
+            .map(|v| serde_json::json!({"count":v.count,"levels":v.levels,"cursor":v.next_cursor}));
         browser_outcome(&self.core, "browser_console", result, detail)
     }
 
     #[tool(
         description = "Read bounded browser network request metadata. The optional filter is a regular expression matched against request URLs (e.g. \"/api/.*user\"). Sensitive authorization/cookie/API-key header lines are redacted and response bodies are never fetched.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserNetworkOutput>()
     )]
     async fn browser_network(
         &self,
@@ -1338,21 +1393,24 @@ impl WorkspaceServer {
             let safe = redact_network_text(call_result_text(&response));
             let (text, next_cursor) = paginate_lines(&safe, a.cursor.as_deref(), limit)?;
             let count = text.lines().count();
-            Ok::<_, CoreError>(
-                serde_json::json!({"count":count,"requests":text,"next_cursor":next_cursor}),
-            )
+            Ok::<_, CoreError>(BrowserNetworkOutput {
+                count,
+                requests: text,
+                next_cursor,
+            })
         }
         .await;
         let detail = result
             .as_ref()
             .ok()
-            .map(|v| serde_json::json!({"count":v["count"],"cursor":v["next_cursor"]}));
+            .map(|v| serde_json::json!({"count":v.count,"cursor":v.next_cursor}));
         browser_outcome(&self.core, "browser_network", result, detail)
     }
 
     #[tool(
         description = "Inspect one element target with app-owned DOM/computed-style JavaScript. Sensitive value/token/password-like attributes are redacted.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserDomOutput>()
     )]
     async fn browser_dom(&self, Parameters(a): Parameters<BrowserDomArgs>) -> CallToolResult {
         let result = async {
@@ -1364,9 +1422,11 @@ impl WorkspaceServer {
             );
             let response = self.browser.call_upstream("browser_evaluate", args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&response), 64 * 1024);
-            Ok::<_, CoreError>(
-                serde_json::json!({"target":a.ref_id,"result":text,"truncated":truncated}),
-            )
+            Ok::<_, CoreError>(BrowserDomOutput {
+                target: a.ref_id.clone(),
+                result: text,
+                truncated,
+            })
         }
         .await;
         browser_outcome(
@@ -1379,7 +1439,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Evaluate JavaScript inside the active page context, optionally against an element target. This never routes through Playwright process-level code execution.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserEvaluateOutput>()
     )]
     async fn browser_evaluate(
         &self,
@@ -1402,7 +1463,10 @@ impl WorkspaceServer {
             }
             let response = self.browser.call_upstream("browser_evaluate", args).await?;
             let (text, truncated) = truncate_utf8(call_result_text(&response), 256 * 1024);
-            Ok::<_, CoreError>(serde_json::json!({"result":text,"truncated":truncated}))
+            Ok::<_, CoreError>(BrowserEvaluateOutput {
+                result: text,
+                truncated,
+            })
         }
         .await;
         browser_outcome(
@@ -1417,24 +1481,45 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Read browser performance timing/resource data. Chromium-family engines additionally merge app-owned CDP Performance.getMetrics output; Firefox returns page metrics without CDP.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserPerformanceOutput>()
     )]
     async fn browser_performance(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result=async {
-            let mut args=serde_json::Map::new(); args.insert("function".into(),serde_json::Value::String(PERFORMANCE_FUNCTION.into()));
-            let page=self.browser.call_upstream("browser_evaluate",args).await?;
-            let (page_text,page_truncated)=truncate_utf8(call_result_text(&page),256*1024);
-            let engine=self.browser.active_engine().await.ok_or_else(||CoreError::new(ErrorCode::BrowserNotRunning,"browser is not running"))?;
-            let (cdp_supported,cdp)=if engine.is_chromium_family(){(true,Some(self.browser.chromium_performance_metrics().await?))}else{(false,None)};
-            Ok::<_,CoreError>(serde_json::json!({"page":page_text,"page_truncated":page_truncated,"cdp_supported":cdp_supported,"cdp":cdp}))
-        }.await;
-        let detail=result.as_ref().ok().map(|v|serde_json::json!({"cdp_supported":v["cdp_supported"],"page_truncated":v["page_truncated"]}));
+        let result = async {
+            let mut args = serde_json::Map::new();
+            args.insert(
+                "function".into(),
+                serde_json::Value::String(PERFORMANCE_FUNCTION.into()),
+            );
+            let page = self.browser.call_upstream("browser_evaluate", args).await?;
+            let (page_text, page_truncated) = truncate_utf8(call_result_text(&page), 256 * 1024);
+            let engine = self.browser.active_engine().await.ok_or_else(|| {
+                CoreError::new(ErrorCode::BrowserNotRunning, "browser is not running")
+            })?;
+            let (cdp_supported, cdp) = if engine.is_chromium_family() {
+                (
+                    true,
+                    Some(self.browser.chromium_performance_metrics().await?),
+                )
+            } else {
+                (false, None)
+            };
+            Ok::<_, CoreError>(BrowserPerformanceOutput {
+                page: page_text,
+                page_truncated,
+                cdp_supported,
+                cdp,
+            })
+        }
+        .await;
+        let detail=result.as_ref().ok().map(|v|serde_json::json!({"cdp_supported":v.cdp_supported,"page_truncated":v.page_truncated}));
         browser_outcome(&self.core, "browser_performance", result, detail)
     }
 
     #[tool(
         description = "Start, stop, or read status of Playwright tracing for the active browser session. Trace artifacts stay inside the session sandbox and are returned only as opaque metadata.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserTraceOutput>()
     )]
     async fn browser_trace(&self, Parameters(a): Parameters<BrowserTraceArgs>) -> CallToolResult {
         let action = match a.action {
@@ -1442,57 +1527,144 @@ impl WorkspaceServer {
             BrowserTraceAction::Stop => "stop",
             BrowserTraceAction::Status => "status",
         };
-        let result=async {
+        let result = async {
             self.browser.guard_page_operation().await?;
             match a.action {
-                BrowserTraceAction::Status=>Ok::<_,CoreError>(serde_json::json!({"tracing":self.browser.is_tracing().await})),
-                BrowserTraceAction::Start=>{
-                    if self.browser.is_tracing().await{return Err(CoreError::new(ErrorCode::InvalidArgument,"browser trace is already running"));}
-                    self.browser.call_upstream("browser_start_tracing",serde_json::Map::new()).await?; self.browser.set_tracing(true).await;
-                    Ok(serde_json::json!({"tracing":true}))
+                BrowserTraceAction::Status => Ok::<_, CoreError>(BrowserTraceOutput {
+                    tracing: self.browser.is_tracing().await,
+                    artifact_id: None,
+                    files: None,
+                    bytes: None,
+                }),
+                BrowserTraceAction::Start => {
+                    if self.browser.is_tracing().await {
+                        return Err(CoreError::new(
+                            ErrorCode::InvalidArgument,
+                            "browser trace is already running",
+                        ));
+                    }
+                    self.browser
+                        .call_upstream("browser_start_tracing", serde_json::Map::new())
+                        .await?;
+                    self.browser.set_tracing(true).await;
+                    Ok(BrowserTraceOutput {
+                        tracing: true,
+                        artifact_id: None,
+                        files: None,
+                        bytes: None,
+                    })
                 }
-                BrowserTraceAction::Stop=>{
-                    if !self.browser.is_tracing().await{return Err(CoreError::new(ErrorCode::InvalidArgument,"browser trace is not running"));}
-                    self.browser.call_upstream("browser_stop_tracing",serde_json::Map::new()).await?; self.browser.set_tracing(false).await;
-                    let trace_dir=self.browser.active_artifact_dir().await?.join("traces");
-                    let mut files=0usize; let mut total=0u64;
-                    let mut records: Vec<(String,String)>=Vec::new();
-                    let mut stack=vec![trace_dir.clone()];
-                    while let Some(dir)=stack.pop(){ for entry in std::fs::read_dir(&dir).map_err(CoreError::io)?{let entry=entry.map_err(CoreError::io)?;let p=entry.path();if p.is_dir(){stack.push(p);}else if p.is_file(){let rel=p.strip_prefix(&trace_dir).map_err(|_|CoreError::new(ErrorCode::BrowserArtifactFailed,"browser trace escaped the active trace directory"))?.to_string_lossy().replace('\\',"/");let bytes=std::fs::read(&p).map_err(CoreError::io)?;total=total.saturating_add(bytes.len() as u64);files+=1;records.push((rel,lc_core::ops::sha256_hex(&bytes)));}}}
+                BrowserTraceAction::Stop => {
+                    if !self.browser.is_tracing().await {
+                        return Err(CoreError::new(
+                            ErrorCode::InvalidArgument,
+                            "browser trace is not running",
+                        ));
+                    }
+                    self.browser
+                        .call_upstream("browser_stop_tracing", serde_json::Map::new())
+                        .await?;
+                    self.browser.set_tracing(false).await;
+                    let trace_dir = self.browser.active_artifact_dir().await?.join("traces");
+                    let mut files = 0usize;
+                    let mut total = 0u64;
+                    let mut records: Vec<(String, String)> = Vec::new();
+                    let mut stack = vec![trace_dir.clone()];
+                    while let Some(dir) = stack.pop() {
+                        for entry in std::fs::read_dir(&dir).map_err(CoreError::io)? {
+                            let entry = entry.map_err(CoreError::io)?;
+                            let p = entry.path();
+                            if p.is_dir() {
+                                stack.push(p);
+                            } else if p.is_file() {
+                                let rel = p
+                                    .strip_prefix(&trace_dir)
+                                    .map_err(|_| {
+                                        CoreError::new(
+                                            ErrorCode::BrowserArtifactFailed,
+                                            "browser trace escaped the active trace directory",
+                                        )
+                                    })?
+                                    .to_string_lossy()
+                                    .replace('\\', "/");
+                                let bytes = std::fs::read(&p).map_err(CoreError::io)?;
+                                total = total.saturating_add(bytes.len() as u64);
+                                files += 1;
+                                records.push((rel, lc_core::ops::sha256_hex(&bytes)));
+                            }
+                        }
+                    }
                     // Brief, opaque stop metadata: one artifact id fingerprinting the whole
                     // trace set (sorted rel-path + per-file sha256), a file count, and total
                     // bytes. No filenames, per-file hashes, or paths are returned.
                     records.sort();
-                    let fingerprint: String=records.iter().map(|(rel,hash)|format!("{rel}:{hash}\n")).collect();
-                    let artifact_id=format!("a-{}",&lc_core::ops::sha256_hex(fingerprint.as_bytes())[..16]);
-                    Ok(serde_json::json!({"tracing":false,"artifact_id":artifact_id,"files":files,"bytes":total}))
+                    let fingerprint: String = records
+                        .iter()
+                        .map(|(rel, hash)| format!("{rel}:{hash}\n"))
+                        .collect();
+                    let artifact_id = format!(
+                        "a-{}",
+                        &lc_core::ops::sha256_hex(fingerprint.as_bytes())[..16]
+                    );
+                    Ok(BrowserTraceOutput {
+                        tracing: false,
+                        artifact_id: Some(artifact_id),
+                        files: Some(files),
+                        bytes: Some(total),
+                    })
                 }
             }
-        }.await;
+        }
+        .await;
         let detail = Some(serde_json::json!({"action":action}));
         browser_outcome(&self.core, "browser_trace", result, detail)
     }
 
     #[tool(
         description = "Report Visible Debug DevTools support for the current browser. DevTools UI is available only when configured Visible Debug on Chromium/Chrome/Edge; this tool never launches a second browser.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<BrowserDevtoolsOutput>()
     )]
     async fn browser_devtools(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result=async {
+        let result = async {
             self.browser.guard_page_operation().await?;
-            let launch=self.browser.active_launch().await.ok_or_else(||CoreError::new(ErrorCode::BrowserNotRunning,"browser is not running"))?;
-            if launch.run_mode!=crate::settings::BrowserRunMode::VisibleDebug{return Err(CoreError::new(ErrorCode::BrowserFeatureUnsupportedInMode,"visible DevTools requires Visible Debug run mode"));}
-            if !launch.engine.is_chromium_family(){return Err(CoreError::new(ErrorCode::BrowserFeatureUnsupported,"visible DevTools is supported only by Chromium-family engines"));}
-            let auto_open=self.browser.devtools_auto_open().await.unwrap_or(false);
-            if !auto_open{return Err(CoreError::new(ErrorCode::BrowserFeatureUnsupported,"DevTools auto-open was not part of the browser launch"));}
-            Ok::<_,CoreError>(serde_json::json!({"supported":true,"mode":"visible_debug","engine":launch.engine,"auto_open":auto_open}))
-        }.await;
+            let launch = self.browser.active_launch().await.ok_or_else(|| {
+                CoreError::new(ErrorCode::BrowserNotRunning, "browser is not running")
+            })?;
+            if launch.run_mode != crate::settings::BrowserRunMode::VisibleDebug {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserFeatureUnsupportedInMode,
+                    "visible DevTools requires Visible Debug run mode",
+                ));
+            }
+            if !launch.engine.is_chromium_family() {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserFeatureUnsupported,
+                    "visible DevTools is supported only by Chromium-family engines",
+                ));
+            }
+            let auto_open = self.browser.devtools_auto_open().await.unwrap_or(false);
+            if !auto_open {
+                return Err(CoreError::new(
+                    ErrorCode::BrowserFeatureUnsupported,
+                    "DevTools auto-open was not part of the browser launch",
+                ));
+            }
+            Ok::<_, CoreError>(BrowserDevtoolsOutput {
+                supported: true,
+                mode: "visible_debug".to_string(),
+                engine: launch.engine,
+                auto_open,
+            })
+        }
+        .await;
         browser_outcome(&self.core, "browser_devtools", result, None)
     }
 
     #[tool(
         description = "Stage approved workspace files into the active browser sandbox and upload them through Playwright. Upstream never receives original workspace paths.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserUploadOutput>()
     )]
     async fn browser_upload(&self, Parameters(a): Parameters<BrowserUploadArgs>) -> CallToolResult {
         let sources: Vec<serde_json::Value> = a
@@ -1539,7 +1711,10 @@ impl WorkspaceServer {
                 let _ = std::fs::remove_file(path);
             }
             upload?;
-            Ok::<_, CoreError>(serde_json::json!({"file_count":staged.len(),"bytes":total}))
+            Ok::<_, CoreError>(BrowserUploadOutput {
+                file_count: staged.len(),
+                bytes: total,
+            })
         }
         .await;
         let mut detail = serde_json::json!({
@@ -1548,14 +1723,15 @@ impl WorkspaceServer {
             "file_count": a.sources.len(),
         });
         if let Ok(value) = &result {
-            detail["bytes"] = value["bytes"].clone();
+            detail["bytes"] = serde_json::json!(value.bytes);
         }
         browser_outcome(&self.core, "browser_upload", result, Some(detail))
     }
 
     #[tool(
         description = "List completed downloads in the active browser session sandbox using opaque download ids; absolute filesystem paths are never returned.",
-        annotations(read_only_hint = true)
+        annotations(read_only_hint = true),
+        output_schema = schema_for_output::<Vec<BrowserDownloadInfo>>()
     )]
     async fn browser_downloads(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
         let result = async {
@@ -1572,7 +1748,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Copy one opaque browser download into an approved workspace-relative destination. Requires workspace Write permission and canonical path confinement.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserSavedDownloadOutput>()
     )]
     async fn browser_save_download_to_workspace(
         &self,
@@ -1591,8 +1768,8 @@ impl WorkspaceServer {
         .await;
         let mut detail = serde_json::json!({"workspace_id":a.workspace_id,"download_id":a.download_id,"path":a.path});
         if let Ok(value) = &result {
-            detail["bytes"] = value["bytes"].clone();
-            detail["sha256"] = value["sha256"].clone();
+            detail["bytes"] = serde_json::json!(value.bytes);
+            detail["sha256"] = serde_json::json!(value.sha256);
         }
         browser_outcome(
             &self.core,
@@ -1604,7 +1781,8 @@ impl WorkspaceServer {
 
     #[tool(
         description = "Run up to 20 safe browser steps sequentially using the same Local Workspaces validation/policy paths. Stops on first failure and never replays a side-effecting step after process loss.",
-        annotations(read_only_hint = false)
+        annotations(read_only_hint = false),
+        output_schema = schema_for_output::<BrowserRunStepsOutput>()
     )]
     async fn browser_run_steps(
         &self,
@@ -1640,7 +1818,7 @@ impl WorkspaceServer {
                         BrowserStep::Fill{ref_id,text}=>{let mut args=serde_json::Map::new();args.insert("target".into(),serde_json::Value::String(ref_id));args.insert("text".into(),serde_json::Value::String(text));args.insert("submit".into(),serde_json::Value::Bool(false));args.insert("slowly".into(),serde_json::Value::Bool(false));self.browser.call_upstream("browser_type",args).await?;Ok(serde_json::json!({"ok":true}))}
                         BrowserStep::Press{key}=>{let mut args=serde_json::Map::new();args.insert("key".into(),serde_json::Value::String(key));self.browser.call_upstream("browser_press_key",args).await?;Ok(serde_json::json!({"ok":true}))}
                         BrowserStep::Select{ref_id,values}=>{let mut args=serde_json::Map::new();args.insert("target".into(),serde_json::Value::String(ref_id));args.insert("values".into(),serde_json::json!(values));self.browser.call_upstream("browser_select_option",args).await?;Ok(serde_json::json!({"ok":true}))}
-                        BrowserStep::Wait{condition,timeout_ms}=>browser_wait_internal(&self.browser,condition,timeout_ms).await,
+                        BrowserStep::Wait{condition,timeout_ms}=>{let ok=browser_wait_internal(&self.browser,condition,timeout_ms).await?;Ok(serde_json::to_value(ok).unwrap_or_default())}
                         BrowserStep::SetViewport{width,height}=>{validate_viewport(width,height)?;let mut args=serde_json::Map::new();args.insert("width".into(),serde_json::json!(width));args.insert("height".into(),serde_json::json!(height));self.browser.call_upstream("browser_resize",args).await?;Ok(serde_json::json!({"width":width,"height":height}))}
                         BrowserStep::Screenshot{mode,ref_id,max_edge}=>{if matches!(mode,BrowserScreenshotMode::Element)&&ref_id.is_none(){return Err(CoreError::new(ErrorCode::InvalidArgument,"element screenshot requires ref"));} else if !matches!(mode,BrowserScreenshotMode::Element)&&ref_id.is_some(){return Err(CoreError::new(ErrorCode::InvalidArgument,"ref is only valid for element screenshots"));}let mut args=serde_json::Map::new();args.insert("type".into(),serde_json::Value::String("png".into()));args.insert("scale".into(),serde_json::Value::String("css".into()));args.insert("fullPage".into(),serde_json::Value::Bool(matches!(mode,BrowserScreenshotMode::FullPage)));if matches!(mode,BrowserScreenshotMode::Element){if let Some(t)=ref_id{args.insert("target".into(),serde_json::Value::String(t));}}let r=self.browser.call_upstream("browser_take_screenshot",args).await?;let (_bytes,metadata)=browser_screenshot_payload(&r,mode,max_edge)?;Ok(serde_json::json!({"metadata":metadata}))}
                     }
@@ -1649,11 +1827,17 @@ impl WorkspaceServer {
                     Ok(v)=>results.push(serde_json::json!({"index":index,"ok":true,"result":v})),
                     Err(e)=>{
                         step_failure=Some(e.clone());
-                        return Ok::<_,CoreError>(serde_json::json!({"ok":false,"failed_index":index,"status":"failed","error":{"code":e.code.as_str(),"message":e.message},"results":results}));
+                        return Ok::<_,CoreError>(BrowserRunStepsOutput {
+                            ok:false,
+                            results,
+                            failed_index:Some(index),
+                            status:Some("failed".to_string()),
+                            error:Some(BrowserStepError { code: e.code.as_str().to_string(), message: e.message }),
+                        });
                     }
                 }
             }
-            Ok::<_,CoreError>(serde_json::json!({"ok":true,"results":results}))
+            Ok::<_,CoreError>(BrowserRunStepsOutput { ok:true, results, failed_index:None, status:None, error:None })
         }.await;
         // A failed step must never audit as allow: record failed_index/status
         // and the error decision while still returning per-step results to the
@@ -1668,7 +1852,7 @@ impl WorkspaceServer {
                 "step_count": step_count,
                 "step_types": types,
                 "status": "failed",
-                "failed_index": result.as_ref().ok().and_then(|v| v.get("failed_index").cloned()),
+                "failed_index": result.as_ref().ok().and_then(|v| v.failed_index),
                 "error": step_failure.as_ref().map(|e| serde_json::json!({"code": e.code.as_str(), "message": e.message})),
             }),
             Ok(_) => serde_json::json!({
