@@ -106,7 +106,9 @@ def verify_mappings() -> None:
     if not match:
         fail("NATIVE_TOOL_MAPPINGS constant not found in contract.rs")
 
-    pairs = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', match.group(1))
+    # Optional trailing comma: rustfmt wraps long tuples across lines and
+    # keeps the trailing comma.
+    pairs = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*,?\s*\)', match.group(1))
     if len(pairs) != EXPECTED_TOOL_COUNT:
         fail(f"NATIVE_TOOL_MAPPINGS must hold {EXPECTED_TOOL_COUNT} pairs, found {len(pairs)}")
 

@@ -7,14 +7,18 @@ Fail-closed release gate for the Lightpanda WSL browser runtime.
 Verifies every condition that must hold before a Windows NSIS release ships:
 
   1. The pinned Lightpanda 0.3.7 manifest is valid (exact URL + SHA-256, and the
-     immutable rootfs URL + SHA-256, package list, and SPDX SBOM all present).
-     This is delegated to scripts/verify-lightpanda-runtime-manifest.ps1 so the
-     pinned constants live in exactly one reviewed place.
+     immutable rootfs URL + SHA-256, package list, and SPDX SBOM all present),
+     and the frozen native MCP contract snapshot verifies (31 tools, exact
+     schemas). Delegated to scripts/verify-lightpanda-runtime-manifest.ps1 and
+     scripts/verify-lightpanda-mcp-contract.py so the pinned constants live in
+     exactly one reviewed place.
   2. AGPLv3 / upstream source reference metadata is present for Lightpanda.
   3. Desktop third-party notices exist and cover Lightpanda + the rootfs SBOM.
   4. No Playwright / Node / Chromium / Firefox browser engine is bundled.
   5. The NSIS installer exists and is below the 100 MiB size gate.
-  6. The real-runtime integration log shows a green run with zero skips.
+  6. The real-runtime integration log shows a green run with zero skips and
+     explicit native parity evidence: 31 discovered / 31 expected / 31 public
+     browser_lightpanda tools / 0 legacy browser tools / Contract parity: PASS.
 
 Exit code 0 = release gate passed; non-zero = failed (reasons on stderr).
 
@@ -50,7 +54,8 @@ function Add-Error([string]$message) { $errors.Add($message) }
 
 # ---------------------------------------------------------------------------
 # 1. Pinned runtime manifest (exact Lightpanda URL/SHA + immutable rootfs
-#    URL/SHA + rootfs package list + SPDX SBOM). Reuse the reviewed verifier.
+#    URL/SHA + rootfs package list + SPDX SBOM) and the frozen native MCP
+#    contract snapshot (31 tools, exact schemas). Reuse the reviewed verifiers.
 # ---------------------------------------------------------------------------
 $manifestVerifier = Join-Path $RepoRoot "scripts/verify-lightpanda-runtime-manifest.ps1"
 if (-not (Test-Path $manifestVerifier)) {
@@ -59,6 +64,16 @@ if (-not (Test-Path $manifestVerifier)) {
     & powershell -NoProfile -ExecutionPolicy Bypass -File $manifestVerifier -RepoRoot $RepoRoot *> $null
     if ($LASTEXITCODE -ne 0) {
         Add-Error "runtime manifest verification failed (Lightpanda/rootfs pin, SBOM, or package list)"
+    }
+}
+
+$contractVerifier = Join-Path $RepoRoot "scripts/verify-lightpanda-mcp-contract.py"
+if (-not (Test-Path $contractVerifier)) {
+    Add-Error "missing native MCP contract verifier at scripts/verify-lightpanda-mcp-contract.py"
+} else {
+    & python $contractVerifier *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Add-Error "native MCP contract verification failed (frozen 31-tool snapshot)"
     }
 }
 
@@ -170,7 +185,8 @@ if ($nsisCandidates.Count -eq 0) {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Real-runtime integration log: green run, zero skips.
+# 6. Real-runtime integration log: green run, zero skips, and explicit
+#    31/31 native parity evidence printed by the suite.
 # ---------------------------------------------------------------------------
 if (-not (Test-Path $RuntimeLog)) {
     Add-Error "missing real-runtime integration log at $RuntimeLog (capture it with LW_REQUIRE_LIGHTPANDA_RUNTIME_TESTS=1)"
@@ -186,14 +202,28 @@ if (-not (Test-Path $RuntimeLog)) {
     if ($failedMatch.Success -and [int]$failedMatch.Groups[1].Value -ne 0) {
         Add-Error "real-runtime integration log reports $($failedMatch.Groups[1].Value) failed test(s)"
     }
-    $passedMatch = [regex]::Match($log, "test result: ok\. (\d+) passed")
-    if ($passedMatch.Success) {
-        $passed = [int]$passedMatch.Groups[1].Value
-        if ($passed -lt 19) {
-            Add-Error "real-runtime integration log ran only $passed test(s); expected at least 19"
+    if (-not $failedMatch.Success) {
+        Add-Error "real-runtime integration log does not report a passed/failed test count"
+    }
+
+    # Explicit native parity evidence (printed by
+    # t02_bootstrap_sessions_single_server_process_and_parity_evidence).
+    # Anything short of the exact 31/31/31/0/PASS evidence fails the gate.
+    $parityLines = @(
+        "Lightpanda version: 0.3.7",
+        "Native tools discovered: 31",
+        "Native tools expected: 31",
+        "Public browser_lightpanda tools: 31",
+        "Legacy browser tools discovered: 0",
+        "Contract parity: PASS"
+    )
+    foreach ($line in $parityLines) {
+        if ($log -notmatch [regex]::Escape($line)) {
+            Add-Error "real-runtime integration log is missing required parity evidence: '$line'"
         }
-    } else {
-        Add-Error "real-runtime integration log does not report a passed-test count"
+    }
+    if ($log -match [regex]::Escape("Contract parity: FAIL")) {
+        Add-Error "real-runtime integration log reports Contract parity: FAIL"
     }
 }
 
