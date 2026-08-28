@@ -27,14 +27,13 @@ Use this operating loop:
 7. REPORT — State what was actually changed, what verification ran, and any remaining blocker. Distinguish completed work from unverified assumptions.
 
 Browser evidence workflow (when the task involves a web UI):
-1. Call browser_get_status before relying on browser evidence; it stays readable when Browser Automation is disabled so you can report the exact blocker. Pause still wins.
-2. Start or navigate the browser (browser_open/browser_navigate) only when the task actually needs a page; do not open a browser merely because the tools exist.
-3. Call browser_snapshot before any ref-based interaction (click, fill, select, hover); refs come from the latest snapshot. On BROWSER_STALE_REF the page changed underneath you — re-snapshot and re-resolve the ref before retrying.
-4. Verify UI work with real evidence — DOM/URL state from browser_snapshot, browser_console messages, browser_network request metadata, and browser_screenshot visuals — not assumptions.
-5. Prefer background debug data (console, network, performance, trace tools) over visible DevTools; the DevTools UI is only available when the user configured Visible Debug.
-6. For layout work, check the responsive matrix with browser_set_viewport/browser_emulate_device instead of trusting a single viewport.
-7. Never bypass disabled Browser Automation or Pause with run_command, run_powershell, scripts, or OS utilities, and never drive a separate browser instance behind the managed session. On BROWSER_AUTOMATION_DISABLED, report the user-controlled blocker instead.
-8. Never send model-authored code to process-level Playwright code-execution tooling; use browser_evaluate for page-context JavaScript and browser_run_steps for bounded, validated step sequences.
+1. Call the relevant browser_lightpanda_* tool directly; disabled Browser Automation, Pause, and runtime errors are the authoritative blockers — report them instead of working around them.
+2. Use browser_lightpanda_goto for navigation and browser_lightpanda_tree, browser_lightpanda_find_element, and browser_lightpanda_node_details for semantic evidence.
+3. Target elements by raw backendNodeId when convenient; prefer CSS selectors for actions intended to become replayable PandaScripts (browser_lightpanda_save).
+4. Use browser_lightpanda_console_logs, browser_lightpanda_get_url, browser_lightpanda_structured_data, browser_lightpanda_detect_forms, browser_lightpanda_evaluate, and the browser_lightpanda_wait_for_* tools as relevant.
+5. Use browser_lightpanda_session_new, browser_lightpanda_session_list, and browser_lightpanda_session_close plus the session_id argument for isolated browsing contexts.
+6. For visual evidence, use the separate list_capture_targets / capture_screen tools; Lightpanda itself is non-visual and provides no screenshots.
+7. Never bypass disabled Browser Automation or Pause with run_command, run_powershell, scripts, OS utilities, or another browser.
 
 Safety and autonomy rules:
 - Pause and workspace Read/Write/Execute settings are user-controlled authority. Never bypass, weaken, evade, or work around ACCESS_PAUSED, capability errors, path confinement, sensitive-file policy, or execution policy. Never use run_command, run_powershell, scripts, or OS utilities to work around disabled screen capture. Explain the blocking setting when user action is required.
@@ -150,7 +149,7 @@ impl WorkspaceServer {
         vec![PromptMessage::new_text(
             Role::User,
             format!(
-                "Diagnose and fix this web issue: {}\n\nWork as a browser-driven debugging agent using the Local Workspaces browser tools.\n1. REPRODUCE — Call browser_get_status first. If Browser Automation is available, open or navigate to the affected page and reproduce the reported behavior; capture a browser_snapshot plus browser_console, browser_network, and browser_screenshot evidence around the failure.\n2. LOCALIZE — Trace the failing behavior through the semantic snapshot (DOM/URL state), console errors, and network metadata; distinguish root cause from symptoms. Re-snapshot after any BROWSER_STALE_REF instead of reusing stale refs.\n3. FIX — Make code changes only through workspace tools: read the relevant files, then apply_patch with the revision from your latest read (create_file only for genuinely new files). Preserve unrelated changes.\n4. RERUN — Rerun the browser flow by reloading or replaying the same steps, then re-capture the same snapshot/console/network/screenshot evidence.\n5. REPORT — State the root cause, the files changed, and exactly which evidence changed between the failing and fixed runs. If browser_get_status reports BROWSER_AUTOMATION_DISABLED, or the session is blocked because the agent is paused, report that user-controlled blocker instead of working around it.",
+                "Diagnose and fix this web issue: {}\n\nWork as a browser-driven debugging agent using the Local Workspaces browser_lightpanda_* tools.\n1. REPRODUCE — If Browser Automation is available, use browser_lightpanda_goto to open the affected page and reproduce the reported behavior; capture browser_lightpanda_tree plus browser_lightpanda_console_logs and browser_lightpanda_get_url evidence around the failure.\n2. LOCALIZE — Trace the failing behavior through the semantic tree (DOM/URL state), console errors, and browser_lightpanda_structured_data / browser_lightpanda_detect_forms output; distinguish root cause from symptoms. Re-read the tree after page changes instead of reusing stale backendNodeId values.\n3. FIX — Make code changes only through workspace tools: read the relevant files, then apply_patch with the revision from your latest read (create_file only for genuinely new files). Preserve unrelated changes.\n4. RERUN — Rerun the browser flow by reloading or replaying the same steps, then re-capture the same tree/console/URL evidence.\n5. REPORT — State the root cause, the files changed, and exactly which evidence changed between the failing and fixed runs. If Browser Automation is disabled, or the agent is paused, report that user-controlled blocker instead of working around it; Lightpanda is non-visual, so use list_capture_targets/capture_screen separately when visual evidence is required and allowed.",
                 a.problem
             ),
         )]
@@ -171,5 +170,37 @@ impl WorkspaceServer {
                 a.scope
             ),
         )]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// First-party prompt text must only reference the current public browser
+    /// tool family. If this fails, a prompt still points at a removed
+    /// compatibility-era tool.
+    #[test]
+    fn prompts_never_reference_removed_browser_tools() {
+        let source = include_str!("agent_skills.rs");
+        let removed_suffixes = [
+            "get_status",
+            "open",
+            "navigate",
+            "snapshot",
+            "tabs",
+            "screenshot",
+            "network",
+            "performance",
+            "trace",
+            "set_viewport",
+            "emulate_device",
+            "run_steps",
+        ];
+        for suffix in removed_suffixes {
+            let removed = format!("browser_{suffix}");
+            assert!(
+                !source.contains(&removed),
+                "first-party prompt text still references removed tool {removed}"
+            );
+        }
     }
 }

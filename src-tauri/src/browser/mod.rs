@@ -1,11 +1,7 @@
-pub mod artifacts;
 pub mod audit;
 pub mod contract;
-pub mod driver;
-pub mod files;
 pub mod http;
 pub mod lightpanda;
-pub mod manager;
 pub mod mcp;
 pub mod policy;
 pub mod runtime;

@@ -1514,22 +1514,18 @@ async fn server_instructions_define_the_agent_operating_loop() {
         "visual evidence",
         "disabled screen capture",
         "Never bypass",
-        // Task 12: browser evidence/recovery guidance semantics.
-        "browser_get_status",
-        "browser_snapshot",
-        "browser_console",
-        "browser_network",
-        "browser_screenshot",
-        "BROWSER_STALE_REF",
-        "BROWSER_AUTOMATION_DISABLED",
-        // Never shell around a disabled/paused browser.
+        // Native Lightpanda browser evidence/tooling guidance.
+        "browser_lightpanda_goto",
+        "browser_lightpanda_tree",
+        "browser_lightpanda_console_logs",
+        "browser_lightpanda_session_new",
+        "backendNodeId",
+        "PandaScript",
+        "non-visual",
+        // Never shell out around a disabled/paused browser.
         "disabled Browser Automation",
         "run_command",
         "run_powershell",
-        // Background debug data by default; Visible Debug is user-configured.
-        "Visible Debug",
-        // Never send model code to process-level Playwright code execution.
-        "process-level Playwright",
     ] {
         assert!(
             instructions.contains(required),
@@ -1568,7 +1564,7 @@ async fn prompt_discovery_exposes_the_agent_skill_pack() {
         ]
     );
 
-    // Task 12: the debug-web prompt teaches the browser evidence loop.
+    // The debug-web prompt teaches the native browser evidence loop.
     let result = client
         .get_prompt(
             GetPromptRequestParams::new("debug-web").with_arguments(
@@ -1588,18 +1584,15 @@ async fn prompt_discovery_exposes_the_agent_skill_pack() {
         .unwrap_or_default();
     assert!(text.contains("checkout button does nothing"), "{text}");
     for required in [
-        // Reproduce and capture semantic/browser-debug evidence.
-        "browser_get_status",
-        "browser_snapshot",
-        "browser_console",
-        "browser_network",
-        "browser_screenshot",
+        // Reproduce and capture semantic/console/URL evidence.
+        "browser_lightpanda_goto",
+        "browser_lightpanda_tree",
+        "browser_lightpanda_console_logs",
         // Fix through workspace tools, then rerun the browser flow.
         "apply_patch",
         // Report the evidence that changed.
         "evidence changed",
         // Report user-controlled blockers instead of working around them.
-        "BROWSER_AUTOMATION_DISABLED",
         "paused",
     ] {
         assert!(

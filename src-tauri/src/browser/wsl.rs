@@ -437,41 +437,6 @@ pub fn build_lightpanda_http_command(
     Ok(cmd)
 }
 
-/// Builds the fixed `wsl.exe` child command that runs a Lightpanda MCP process
-/// as the unprivileged runtime user. No console window; telemetry and core
-/// dumps disabled; `--log-level warn` enforced.
-pub fn build_lightpanda_command(
-    wsl_exe: &Path,
-    distro_name: &str,
-    extra_args: &[String],
-) -> Result<std::process::Command, CoreError> {
-    validate_distro_name(distro_name)?;
-    // Fixed argv list; nothing here is ever passed through a shell.
-    let mut argv: Vec<String> = vec![
-        "-d".to_string(),
-        distro_name.to_string(),
-        "-u".to_string(),
-        RUNTIME_USER.to_string(),
-        "--".to_string(),
-        LIGHTPANDA_BIN.to_string(),
-        "mcp".to_string(),
-        "--log-level".to_string(),
-        "warn".to_string(),
-    ];
-    argv.extend(extra_args.iter().cloned());
-    let mut cmd = std::process::Command::new(wsl_exe);
-    cmd.args(argv);
-    cmd.env("LIGHTPANDA_DISABLE_TELEMETRY", "true");
-    cmd.env("LIGHTPANDA_DISABLE_CORE_DUMP", "1");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    Ok(cmd)
-}
-
 /// Sanitized public error for a failed `wsl.exe` call. Never includes raw
 /// stdout/stderr content.
 fn sanitized_wsl_error(code: ErrorCode, context: &str, exit_code: i32) -> CoreError {
@@ -809,41 +774,6 @@ impl<R: WslCommandRunner> WslHostAdapter<R> {
                 output.exit_code,
             ))
         }
-    }
-
-    /// Spawns a Lightpanda MCP child for one logical page.
-    pub fn spawn_lightpanda_child(
-        &self,
-        distro_name: &str,
-        extra_args: &[String],
-    ) -> Result<std::process::Child, CoreError> {
-        let mut cmd = build_lightpanda_command(&self.wsl_exe, distro_name, extra_args)?;
-        cmd.spawn().map_err(|e| {
-            CoreError::new(
-                ErrorCode::BrowserWslUnavailable,
-                format!("failed to spawn lightpanda child: {e}"),
-            )
-        })
-    }
-
-    /// Spawns the shared Lightpanda MCP HTTP server child on the WSL-side
-    /// loopback. The caller owns the returned child and must terminate it on
-    /// shutdown; the server is never exposed beyond loopback.
-    pub fn spawn_lightpanda_http_server(
-        &self,
-        distro_name: &str,
-        port: u16,
-    ) -> Result<std::process::Child, CoreError> {
-        let mut cmd = build_lightpanda_http_command(&self.wsl_exe, distro_name, port)?;
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        cmd.spawn().map_err(|e| {
-            CoreError::new(
-                ErrorCode::BrowserWslUnavailable,
-                format!("failed to spawn lightpanda http server: {e}"),
-            )
-        })
     }
 
     /// Stops any Lightpanda server process inside the owned distro. Exit code
@@ -1323,62 +1253,6 @@ mod tests {
     }
 
     // --- lightpanda child command ----------------------------------------------
-
-    #[test]
-    fn lightpanda_command_is_fixed_shape_and_hardened() {
-        let cmd = build_lightpanda_command(
-            Path::new("wsl.exe"),
-            "LocalWorkspaces-Lightpanda",
-            &[
-                "--user-data-dir".to_string(),
-                "/var/lib/local-workspaces/browser/profile".to_string(),
-            ],
-        )
-        .unwrap();
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(
-            args,
-            vec![
-                "-d",
-                "LocalWorkspaces-Lightpanda",
-                "-u",
-                "localworkspaces",
-                "--",
-                "/opt/local-workspaces/lightpanda/current/lightpanda",
-                "mcp",
-                "--log-level",
-                "warn",
-                "--user-data-dir",
-                "/var/lib/local-workspaces/browser/profile",
-            ]
-        );
-        let envs: HashMap<String, String> = cmd
-            .get_envs()
-            .filter_map(|(k, v)| {
-                Some((
-                    k.to_string_lossy().into_owned(),
-                    v?.to_string_lossy().into_owned(),
-                ))
-            })
-            .collect();
-        assert_eq!(
-            envs.get("LIGHTPANDA_DISABLE_TELEMETRY").map(String::as_str),
-            Some("true")
-        );
-        assert_eq!(
-            envs.get("LIGHTPANDA_DISABLE_CORE_DUMP").map(String::as_str),
-            Some("1")
-        );
-    }
-
-    #[test]
-    fn lightpanda_command_rejects_invalid_distro_name() {
-        let err = build_lightpanda_command(Path::new("wsl.exe"), "bad name", &[]).unwrap_err();
-        assert_eq!(err.code, ErrorCode::BrowserWslUnavailable);
-    }
 
     #[test]
     fn lightpanda_http_command_matches_planned_argv() {
