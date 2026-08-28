@@ -387,7 +387,7 @@ impl RuntimeContractVerifier for RealRuntimeContractVerifier {
 /// Picks a free loopback port selected by the OS. The temporary listener is
 /// dropped immediately; a rare port race is surfaced as a fail-closed spawn
 /// or reachability error by the caller.
-fn pick_loopback_port() -> Result<u16, CoreError> {
+pub(crate) fn pick_loopback_port() -> Result<u16, CoreError> {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
         CoreError::new(
             ErrorCode::BrowserWslUnavailable,
@@ -406,7 +406,7 @@ fn pick_loopback_port() -> Result<u16, CoreError> {
 /// Polls Windows loopback reachability for the WSL-side server until the
 /// deadline. Mirrored networking makes the private bind reachable from the
 /// host; a server that never becomes reachable is a fail-closed timeout.
-async fn wait_for_loopback(port: u16) -> Result<(), CoreError> {
+pub(crate) async fn wait_for_loopback(port: u16) -> Result<(), CoreError> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         if tokio::net::TcpStream::connect(("127.0.0.1", port))
@@ -430,7 +430,9 @@ async fn wait_for_loopback(port: u16) -> Result<(), CoreError> {
 /// with the pinned contract snapshot, and require that the bootstrap created
 /// no session beyond `default`. `serverInfo.version` is captured by the
 /// client but never gates verification.
-async fn verify_http_contract(client: &super::http::LightpandaHttpClient) -> Result<(), CoreError> {
+pub(crate) async fn verify_http_contract(
+    client: &super::http::LightpandaHttpClient,
+) -> Result<(), CoreError> {
     let _metadata = client.initialize_default().await?;
     client.notify_initialized_default().await?;
     let tools = client.list_tools_default().await?;
