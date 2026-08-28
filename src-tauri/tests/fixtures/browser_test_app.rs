@@ -2,21 +2,24 @@
 //! tests (`tests/browser_runtime_integration.rs`).
 //!
 //! The fixture is a tiny axum server that serves one interactive page plus a
-//! handful of API/download routes. Every byte it serves is static so DOM,
-//! console, network, screenshot, upload and download assertions stay stable
-//! across runs.
+//! small set of supporting routes. Every byte it serves is static (apart from
+//! the action counter) so tree/console/cookie/extract assertions stay stable
+//! across runs. All elements carry fixed ids/classes so selector-based and
+//! backendNodeId-based replay tests are deterministic.
 //!
 //! Routes:
 //! ```text
-//! /             -> interactive page (input, select, buttons, dialog trigger,
-//!                  rerender/stale-ref trigger, responsive marker, upload input,
-//!                  download link, console output)
+//! /             -> interactive page (headings/links, text input, select,
+//!                  checkbox, radios, buttons, hover target, keyboard target,
+//!                  scrollable page, delayed element + delayed script state,
+//!                  console output, JSON-LD/OpenGraph/Twitter/canonical
+//!                  metadata, extract-friendly elements)
+//! /plain        -> minimal second page (link navigation target)
+//! /cookie       -> sets `fixture-cookie=chocolate` via Set-Cookie
 //! /api/ping     -> JSON 200; the page logs "api-ping-complete" when it resolves
-//! /api/fail     -> JSON 500
-//! /download.txt -> deterministic text attachment
 //! /api/count    -> POST increments a server-side action counter; GET reads it.
 //!                  The counter lets tests prove a side-effecting click was never
-//!                  replayed after a simulated browser crash.
+//!                  replayed after a simulated server crash.
 //! ```
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -24,14 +27,11 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{header, StatusCode},
-    response::{Html, IntoResponse, Json, Response},
+    http::header,
+    response::{Html, IntoResponse, Json},
     routing::get,
     Router,
 };
-
-/// Deterministic bytes served by `/download.txt`.
-pub const DOWNLOAD_BODY: &[u8] = b"deterministic-download-body\n";
 
 /// Shared fixture state. The action counter is bumped by `POST /api/count`
 /// (fired from the page's Count button) so a test can verify, out-of-band of
@@ -54,87 +54,99 @@ impl Fixture {
     }
 }
 
-const INDEX_HTML: &str = r#"<!doctype html>
+const INDEX_HTML: &str = r##"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Browser Test App</title>
-<style>
-  body { font-family: sans-serif; margin: 16px; }
-  #responsive-marker { padding: 8px; border: 1px solid #000; }
-  @media (max-width: 479px) { #responsive-marker { background: #ffcccc; } }
-  @media (min-width: 480px) and (max-width: 1023px) { #responsive-marker { background: #ccffcc; } }
-  @media (min-width: 1024px) { #responsive-marker { background: #ccccff; } }
-</style>
+<link rel="canonical" href="https://fixture.example/">
+<meta property="og:title" content="Fixture OpenGraph Title">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Fixture Twitter Title">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"WebPage","name":"Fixture JsonLd Page"}
+</script>
 </head>
 <body>
-  <h1>Browser Test App</h1>
-  <div id="responsive-marker" data-mode="unknown">responsive:unknown</div>
-  <div id="viewport-info">viewport:0x0</div>
+  <h1 id="main-heading">Browser Test App</h1>
 
-  <label for="name-input">Name</label>
-  <input id="name-input" type="text">
+  <nav id="link-section">
+    <h2>Links</h2>
+    <a id="plain-link" href="/plain">PlainPage</a>
+    <a id="section-link" href="#forms-section">FormsAnchor</a>
+  </nav>
 
-  <label for="color-select">Color</label>
-  <select id="color-select">
-    <option value="red">Red</option>
-    <option value="green">Green</option>
-    <option value="blue">Blue</option>
-  </select>
+  <section id="forms-section">
+    <h2>Forms</h2>
+    <form id="main-form">
+      <label for="name-input">Name</label>
+      <input id="name-input" type="text">
 
-  <label for="agree-checkbox">Agree</label>
-  <input id="agree-checkbox" type="checkbox">
+      <label for="color-select">Color</label>
+      <select id="color-select">
+        <option value="red">Red</option>
+        <option value="green">Green</option>
+        <option value="blue">Blue</option>
+      </select>
 
-  <button id="submit-btn">Submit</button>
-  <div id="result" aria-live="polite">result:none</div>
+      <label for="agree-checkbox">Agree</label>
+      <input id="agree-checkbox" type="checkbox">
 
-  <button id="dialog-btn">OpenDialog</button>
-  <div id="dialog-result">dialog:none</div>
+      <span>Size</span>
+      <label for="size-small">Small</label>
+      <input type="radio" name="size" id="size-small" value="small">
+      <label for="size-large">Large</label>
+      <input type="radio" name="size" id="size-large" value="large">
 
-  <button id="count-btn">Count</button>
-  <div id="count-value">count:0</div>
+      <button id="submit-btn" type="button">Submit</button>
+      <div id="result" aria-live="polite">result:none</div>
 
-  <button id="rerender-btn">Rerender</button>
-  <div id="rerender-target"><button id="inner-btn">Inner</button></div>
+      <button id="count-btn" type="button">Count</button>
+      <div id="count-value">count:0</div>
+    </form>
+  </section>
 
-  <label for="upload-input">Upload</label>
-  <input id="upload-input" type="file">
-  <div id="upload-result">upload:none</div>
+  <section id="interaction-section">
+    <h2>Interaction</h2>
+    <div id="hover-target">hover:idle</div>
+    <label for="keyboard-target">Keyboard</label>
+    <input id="keyboard-target" type="text">
+    <div id="keyboard-log">keys:</div>
+    <div id="extract-target" data-sku="SKU-42">ExtractItem</div>
+  </section>
 
-  <a id="download-link" href="/download.txt" download>DownloadFile</a>
+  <div id="scroll-spacer" style="height:3000px">scroll-spacer</div>
+  <div id="scroll-bottom">scroll-bottom</div>
 
 <script>
 (function () {
   // Known console output used by test assertions.
+  console.log("known-console-log");
   console.warn("known-console-warning");
   console.error("known-console-error");
 
-  function updateResponsive() {
-    var w = window.innerWidth, h = window.innerHeight;
-    var mode = w < 480 ? "mobile" : (w < 1024 ? "tablet" : "desktop");
-    var marker = document.getElementById("responsive-marker");
-    marker.setAttribute("data-mode", mode);
-    marker.textContent = "responsive:" + mode;
-    document.getElementById("viewport-info").textContent = "viewport:" + w + "x" + h;
-  }
-  updateResponsive();
-  window.addEventListener("resize", updateResponsive);
-
-  // Success and failure network requests recorded by the page.
+  // Successful network request recorded by the page.
   fetch("/api/ping").then(function (r) { return r.json(); }).then(function () {
     console.log("api-ping-complete");
   }).catch(function () {});
-  fetch("/api/fail").catch(function () {});
+
+  document.getElementById("hover-target").addEventListener("mouseover", function () {
+    document.getElementById("hover-target").textContent = "hover:hovered";
+  });
+  document.getElementById("hover-target").addEventListener("mouseenter", function () {
+    document.getElementById("hover-target").textContent = "hover:hovered";
+  });
+
+  document.getElementById("keyboard-target").addEventListener("keydown", function (e) {
+    var log = document.getElementById("keyboard-log");
+    log.textContent = log.textContent + e.key;
+  });
 
   document.getElementById("submit-btn").addEventListener("click", function () {
     var name = document.getElementById("name-input").value;
     var color = document.getElementById("color-select").value;
     document.getElementById("result").textContent = "result:name=" + name + ",color=" + color;
-  });
-
-  document.getElementById("dialog-btn").addEventListener("click", function () {
-    var ok = window.confirm("dialog-prompt");
-    document.getElementById("dialog-result").textContent = "dialog:" + (ok ? "accepted" : "dismissed");
   });
 
   document.getElementById("count-btn").addEventListener("click", function () {
@@ -143,20 +155,42 @@ const INDEX_HTML: &str = r#"<!doctype html>
     });
   });
 
-  // Rerender/stale-ref trigger: replaces the subtree so previously resolved
-  // element references become stale.
-  document.getElementById("rerender-btn").addEventListener("click", function () {
-    document.getElementById("rerender-target").innerHTML =
-      '<button id="inner-btn">InnerReplaced</button>';
-  });
+  // Makes the scroll-bottom marker an interactive element so tests can
+  // resolve its backendNodeId through interactiveElements.
+  document.getElementById("scroll-bottom").addEventListener("click", function () {});
 
-  document.getElementById("upload-input").addEventListener("change", function (e) {
-    var f = e.target.files && e.target.files[0];
-    document.getElementById("upload-result").textContent = "upload:" + (f ? f.name : "none");
-  });
+  // Dynamic delayed element for waitForSelector.
+  setTimeout(function () {
+    var el = document.createElement("div");
+    el.id = "delayed-element";
+    el.textContent = "delayed-ready";
+    document.body.appendChild(el);
+  }, 300);
+
+  // Dynamic delayed script state for waitForScript.
+  setTimeout(function () {
+    window.__delayedState = "ready";
+  }, 500);
 })();
 </script>
 </body>
+</html>
+"##;
+
+const PLAIN_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Plain Page</title></head>
+<body>
+  <h1 id="plain-heading">Plain Page</h1>
+  <a id="home-link" href="/">Home</a>
+</body>
+</html>
+"#;
+
+const COOKIE_HTML: &str = r#"<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Cookie Page</title></head>
+<body><h1 id="cookie-heading">Cookie Page</h1></body>
 </html>
 "#;
 
@@ -170,9 +204,9 @@ pub async fn spawn() -> Fixture {
     let state = FixtureState::default();
     let app = Router::new()
         .route("/", get(index))
+        .route("/plain", get(plain))
+        .route("/cookie", get(cookie))
         .route("/api/ping", get(ping))
-        .route("/api/fail", get(fail))
-        .route("/download.txt", get(download))
         .route("/api/count", get(count_get).post(count_post))
         .with_state(state);
 
@@ -190,31 +224,22 @@ async fn index() -> Html<&'static str> {
     Html(INDEX_HTML)
 }
 
+async fn plain() -> Html<&'static str> {
+    Html(PLAIN_HTML)
+}
+
+async fn cookie() -> impl IntoResponse {
+    (
+        [(
+            header::SET_COOKIE,
+            "fixture-cookie=chocolate; Path=/",
+        )],
+        Html(COOKIE_HTML),
+    )
+}
+
 async fn ping() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
-}
-
-async fn fail() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(serde_json::json!({ "error": "intentional-failure" })),
-    )
-        .into_response()
-}
-
-async fn download() -> Response {
-    (
-        StatusCode::OK,
-        [
-            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
-            (
-                header::CONTENT_DISPOSITION,
-                "attachment; filename=\"download.txt\"",
-            ),
-        ],
-        DOWNLOAD_BODY,
-    )
-        .into_response()
 }
 
 async fn count_post(State(state): State<FixtureState>) -> Json<serde_json::Value> {

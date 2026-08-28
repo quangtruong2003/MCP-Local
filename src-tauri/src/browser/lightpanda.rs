@@ -259,6 +259,17 @@ impl LightpandaNativeService {
         // Dropping the JobHandle completes containment cleanup.
     }
 
+    /// PID of the running server child, if one is spawned. Test observability
+    /// for the real-runtime integration suite (single-process lifecycle and
+    /// induced process-loss proofs); `None` when stopped.
+    pub async fn server_child_pid(&self) -> Option<u32> {
+        let instance = self.instance.lock().await;
+        instance
+            .as_ref()
+            .and_then(|i| i.child.as_ref())
+            .and_then(tokio::process::Child::id)
+    }
+
     /// Test-only seam: pre-seeds a fake running instance so lifecycle stops
     /// become observable without a real WSL server. The injected client
     /// points at a discard port and is never used.

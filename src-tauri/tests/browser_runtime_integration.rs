@@ -1,12 +1,13 @@
-//! Real Lightpanda-in-managed-WSL2 runtime integration tests (Task 14).
+//! Real Lightpanda-in-managed-WSL2 runtime integration tests.
 //!
-//! Unlike `browser_mcp_integration.rs` (which drives a fake driver), this suite
-//! drives the REAL production path end-to-end:
+//! Unlike `browser_mcp_integration.rs` (which drives a fake native caller),
+//! this suite drives the REAL production path end-to-end:
 //!
 //! ```text
-//! MCP client -> WorkspaceServer handlers -> BrowserManager
-//!   -> LightpandaPageDriver -> one `wsl.exe` child per page
-//!   -> Lightpanda native MCP inside the app-owned WSL2 distro
+//! MCP client -> WorkspaceServer -> BrowserNativeCaller
+//!   -> one LightpandaNativeService HTTP server
+//!   -> native Lightpanda sessions via Mcp-Session-Id
+//!   -> managed WSL2 Lightpanda 0.3.7
 //! ```
 //!
 //! The deterministic localhost fixture lives in `tests/fixtures/browser_test_app.rs`.
@@ -27,14 +28,26 @@
 //! The first run provisions the real runtime (downloads the pinned rootfs and
 //! Lightpanda 0.3.7, imports the app-owned distro) and can take several
 //! minutes. Later runs reuse the persisted Ready state. Test names are
-//! prefixed `t01_`..`t19_` so the serialized order is deterministic.
+//! prefixed `t01_`..`t10_`; the suite serializes on a shared mutex because
+//! every browser test touches the one managed distro.
+//!
+//! # 31-tool coverage proof
+//!
+//! Every public `browser_lightpanda_*` tool call goes through `tc`, which
+//! records the tool name in `COVERAGE`. `t10` asserts the recorded set equals
+//! the exact 31 expected public names — coverage is proven by actual calls,
+//! never inferred from tool discovery alone.
 
 #[path = "fixtures/browser_test_app.rs"]
 mod browser_test_app;
 
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
     time::{Duration, Instant},
 };
 
@@ -43,13 +56,11 @@ use serde_json::{json, Value};
 use lc_core::{error::ErrorCode, CoreServices};
 use local_workspace_mcp_manager::{
     browser::{
-        manager::BrowserManager,
-        runtime::{
-            BrowserRuntimeManager, HttpsRuntimeDownloader, RealRuntimeContractVerifier,
-            RuntimeManifest, RuntimeProvisionState, RUNTIME_STATE_FILE,
-        },
+        contract::{EXPECTED_NATIVE_TOOL_COUNT, NATIVE_TOOL_MAPPINGS, PINNED_LIGHTPANDA_VERSION},
+        lightpanda::{LightpandaNativeService, NativeRuntimeManagerGate, WslNativeServerLauncher},
+        runtime::{BrowserRuntimeManager, RuntimeProvisionState},
         types::BrowserRuntimeSettings,
-        wsl::{decode_wsl_output, RealWslCommandRunner},
+        wsl::decode_wsl_output,
     },
     screen_capture::{CaptureTarget, CapturedImage, ScreenCaptureProvider},
     server::WorkspaceServer,
@@ -66,14 +77,30 @@ use browser_test_app::Fixture;
 
 type Client = RunningService<RoleClient, ()>;
 
-/// Serialize real-browser tests. Each launches actual WSL-backed page
-/// processes against one shared managed distro; running them in parallel would
-/// contend for the runtime and make process-tree assertions noisy. `--jobs 1`
-/// serializes test *binaries*, not the threads inside one binary, so we
-/// serialize explicitly here. The `tNN_` name prefixes make the lock order
-/// deterministic.
+/// Serialize real-browser tests. Each launches an actual WSL-backed server
+/// against the one shared managed distro; running them in parallel would
+/// contend for the runtime. `--jobs 1` serializes test *binaries*, not the
+/// threads inside one binary, so we serialize explicitly here.
 static SERIAL: std::sync::LazyLock<tokio::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
+/// Public tool names actually called by this suite (see `tc`).
+static COVERAGE: std::sync::LazyLock<std::sync::Mutex<BTreeSet<&'static str>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(BTreeSet::new()));
+
+/// Number of runtime-touching tests (t01..t09). `t10` waits for all of them
+/// to finish before asserting the coverage table, independent of the order in
+/// which libtest schedules the serialized tests.
+const RUNTIME_TEST_COUNT: usize = 9;
+static RUNTIME_TESTS_DONE: AtomicUsize = AtomicUsize::new(0);
+
+/// Increments the done-counter even when the test panics.
+struct DoneGuard;
+impl Drop for DoneGuard {
+    fn drop(&mut self) {
+        RUNTIME_TESTS_DONE.fetch_add(1, Ordering::SeqCst);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Runtime gate: skip with a printed reason, fail closed under the release env
@@ -196,7 +223,7 @@ server.listen(0, "0.0.0.0", () => console.log("PROXY_PORT=" + server.address().p
 
 /// Deterministic fixture plus its WSL-side reachability bridge.
 ///
-/// The browser child runs inside the WSL2 VM. It cannot reach the
+/// The browser server runs inside the WSL2 VM. It cannot reach the
 /// Windows-side loopback fixture directly: WSL2 NAT has no VM->host
 /// loopback forwarding, and Windows Firewall blocks inbound connections to
 /// the freshly compiled test binary (the rule it creates is bound to one
@@ -206,7 +233,6 @@ struct WslFixture {
     fixture: Fixture,
     /// Fixture URL reachable from inside the WSL2 VM (gateway host + proxy port).
     url: String,
-    proxy_port: u16,
     proxy: tokio::process::Child,
     script_path: PathBuf,
 }
@@ -254,7 +280,6 @@ async fn spawn_wsl_fixture() -> WslFixture {
     WslFixture {
         fixture,
         url,
-        proxy_port,
         proxy: child,
         script_path,
     }
@@ -298,6 +323,19 @@ async fn wait_process_dead(pid: u32, what: &str) {
     panic!("{what} (pid {pid}) is still alive after termination");
 }
 
+/// Force-kills a process tree root by PID (Windows `taskkill`).
+fn kill_pid(pid: u32) {
+    let output = std::process::Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .output()
+        .expect("taskkill executes");
+    assert!(
+        output.status.success(),
+        "taskkill /F /PID {pid} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Screen-capture stub (browser tests never use desktop screen capture)
 // ---------------------------------------------------------------------------
@@ -323,20 +361,17 @@ impl ScreenCaptureProvider for EmptyCapture {
 
 struct RealEnv {
     client: Client,
-    browser: Arc<BrowserManager>,
+    browser: Arc<LightpandaNativeService>,
     runtime: Arc<BrowserRuntimeManager>,
-    core: Arc<CoreServices>,
-    app_data_dir: PathBuf,
     _dir: tempfile::TempDir,
 }
 
 /// Spawns the full production MCP HTTP server wired exactly like the desktop
-/// app: production runtime manager (real LocalAppData root) plus the
-/// Lightpanda page-child manager. Nothing is provisioned until the first page
-/// operation passes the runtime gate.
+/// app: production runtime manager (real LocalAppData root) plus the single
+/// native Lightpanda service. Nothing is provisioned or started until the
+/// first native call passes the runtime gate.
 async fn spawn_real(settings: AppSettings) -> RealEnv {
     let dir = tempfile::tempdir().expect("tempdir");
-    let app_data_dir = dir.path().to_path_buf();
     save_app_settings(dir.path(), &settings).expect("save app settings");
     let core = Arc::new(CoreServices::open(&dir.path().join("test.db")).expect("open core"));
     let policy = Arc::new(AgentPolicyState::from_settings(&settings));
@@ -345,14 +380,12 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
         policy.clone(),
     ));
     let runtime = production_runtime();
-    let browser = Arc::new(
-        BrowserManager::with_lightpanda(
-            core.clone(),
-            app_data_dir.clone(),
-            &settings,
-            runtime.clone(),
-        )
-        .expect("browser manager"),
+    let gate = Arc::new(NativeRuntimeManagerGate::new(runtime.clone()));
+    let launcher = Arc::new(WslNativeServerLauncher::new(PathBuf::from("wsl.exe")));
+    let browser = LightpandaNativeService::new(
+        gate,
+        launcher,
+        BrowserRuntimeSettings::from(&settings),
     );
     let capture: Arc<dyn ScreenCaptureProvider> = Arc::new(EmptyCapture);
 
@@ -361,7 +394,8 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
         .expect("bind mcp listener");
     let port = listener.local_addr().expect("mcp addr").port();
     let core_for_server = core.clone();
-    let browser_for_server = browser.clone();
+    let browser_for_server: Arc<dyn local_workspace_mcp_manager::browser::lightpanda::BrowserNativeCaller> =
+        browser.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
             Ok(WorkspaceServer::new(
@@ -393,15 +427,11 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
         client,
         browser,
         runtime,
-        core,
-        app_data_dir,
         _dir: dir,
     }
 }
 
-/// v6 settings removed the user-owned engine/run-mode choice: every real
-/// session runs the fixed Lightpanda backend in the background.
-fn background_settings() -> AppSettings {
+fn enabled_settings() -> AppSettings {
     AppSettings {
         browser_automation_enabled: true,
         ..AppSettings::default()
@@ -424,6 +454,15 @@ async fn call(client: &Client, tool: &str, args: Value) -> CallToolResult {
         .expect("mcp transport call failed")
 }
 
+/// Tracked call: records the public tool name for the 31-tool coverage proof.
+async fn tc(env: &RealEnv, tool: &'static str, args: Value) -> CallToolResult {
+    COVERAGE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(tool);
+    call(&env.client, tool, args).await
+}
+
 fn is_ok(result: &CallToolResult) -> bool {
     !result.is_error.unwrap_or(false)
 }
@@ -432,11 +471,16 @@ fn result_text(result: &CallToolResult) -> String {
     serde_json::to_string(result).unwrap_or_default()
 }
 
-fn structured(result: &CallToolResult) -> Value {
-    result
-        .structured_content
-        .clone()
-        .expect("structured content present")
+/// Concatenated text content of a native result.
+fn first_text(result: &CallToolResult) -> String {
+    let mut out = String::new();
+    for block in result.content.iter() {
+        if let Some(text) = block.as_text() {
+            out.push_str(&text.text);
+            out.push('\n');
+        }
+    }
+    out
 }
 
 fn assert_ok(result: &CallToolResult, context: &str) {
@@ -461,149 +505,40 @@ fn assert_error_code(result: &CallToolResult, code: ErrorCode, context: &str) {
     );
 }
 
-/// Extracts the leading `eN` ref token from the first snapshot line
-/// containing `needle`. Interactive lines (marked `[i]`) win over plain text
-/// nodes so action helpers target the control, not its label.
-fn find_ref(snapshot: &str, needle: &str) -> String {
-    let mut fallback: Option<String> = None;
-    for line in snapshot.lines() {
-        if !line.contains(needle) {
-            continue;
-        }
-        let token = line.split_whitespace().next().unwrap_or_default();
-        let is_ref = token.len() > 1
-            && token.starts_with('e')
-            && token[1..].chars().all(|c| c.is_ascii_digit());
-        if !is_ref {
-            continue;
-        }
-        if line.contains("[i]") {
-            return token.to_string();
-        }
-        if fallback.is_none() {
-            fallback = Some(token.to_string());
+/// Adds `session_id` to an args object when routing to a named session.
+fn with_session(args: Value, session: Option<&str>) -> Value {
+    match session {
+        None => args,
+        Some(id) => {
+            let mut map = args.as_object().expect("object args").clone();
+            map.insert("session_id".into(), json!(id));
+            Value::Object(map)
         }
     }
-    match fallback {
-        Some(found) => found,
-        None => panic!("ref for {needle:?} not found in snapshot:\n{snapshot}"),
-    }
 }
 
-async fn take_snapshot(client: &Client) -> String {
-    let result = call(client, "browser_snapshot", json!({})).await;
-    assert_ok(&result, "browser_snapshot");
-    structured(&result)["snapshot"]
-        .as_str()
-        .expect("snapshot text")
-        .to_string()
-}
-
-/// Lightpanda's native `evaluate` tool renders the return value as plain
-/// text: objects and arrays as JSON, `null`/booleans/numbers as their bare
-/// literals, strings unquoted, and `undefined` as the literal word. Parse
-/// JSON when the text is JSON; map `undefined` to null; otherwise keep the
-/// raw string. (Bare numbers are ambiguous with numeric strings; tests that
-/// need string fidelity wrap the expression in `JSON.stringify`.)
-fn parse_evaluate_result(raw: &str) -> Value {
-    let body = raw.trim();
-    if body == "undefined" {
-        return Value::Null;
-    }
-    serde_json::from_str(body).unwrap_or_else(|_| Value::String(body.to_string()))
-}
-
-async fn evaluate(client: &Client, expression: &str) -> Value {
-    let result = call(
-        client,
-        "browser_evaluate",
-        json!({ "expression": expression }),
+async fn goto(env: &RealEnv, url: &str, session: Option<&str>) {
+    let result = tc(
+        env,
+        "browser_lightpanda_goto",
+        with_session(json!({ "url": url }), session),
     )
     .await;
-    assert_ok(&result, "browser_evaluate");
-    let content = structured(&result);
-    let raw = content["result"].as_str().expect("evaluate result text");
-    parse_evaluate_result(raw)
+    assert_ok(&result, &format!("goto {url}"));
 }
 
-/// Convenience for expressions that return a JS string.
-async fn evaluate_str(client: &Client, expression: &str) -> String {
-    let value = evaluate(client, expression).await;
-    value
-        .as_str()
-        .unwrap_or_else(|| panic!("evaluate result is not a string: {value}"))
-        .to_string()
-}
-
-/// Opens the browser and navigates to `url`; returns the structured payload.
-async fn open_url(client: &Client, url: &str) -> Value {
-    let result = call(client, "browser_open", json!({ "url": url })).await;
-    assert_ok(&result, "browser_open");
-    structured(&result)
-}
-
-async fn close_browser(client: &Client, context: &str) {
-    let result = call(client, "browser_close", json!({})).await;
-    assert_ok(&result, context);
-}
-
-async fn current_session_id(client: &Client) -> String {
-    let result = call(client, "browser_get_status", json!({})).await;
-    assert_ok(&result, "browser_get_status");
-    structured(&result)["session_id"]
-        .as_str()
-        .expect("session_id")
-        .to_string()
-}
-
-/// Returns the `browser_tabs` list as JSON array of page summaries.
-async fn tabs_list(client: &Client) -> Vec<Value> {
-    let result = call(client, "browser_tabs", json!({ "action": "list" })).await;
-    assert_ok(&result, "browser_tabs list");
-    structured(&result)
-        .as_array()
-        .expect("tabs list array")
-        .clone()
-}
-
-/// Creates a new page navigated to `url` and returns its page_id.
-async fn tabs_new(client: &Client, url: &str) -> String {
-    let result = call(
-        client,
-        "browser_tabs",
-        json!({ "action": "new", "url": url }),
+/// Evaluates page-context JavaScript and returns the native text output
+/// (strings arrive bare/unquoted; wrap in JSON.stringify when structure is
+/// needed).
+async fn evaluate(env: &RealEnv, session: Option<&str>, script: &str) -> String {
+    let result = tc(
+        env,
+        "browser_lightpanda_evaluate",
+        with_session(json!({ "script": script }), session),
     )
     .await;
-    assert_ok(&result, "browser_tabs new");
-    let pages = structured(&result);
-    let active = pages
-        .as_array()
-        .expect("tabs new array")
-        .iter()
-        .find(|p| p["active"].as_bool().unwrap_or(false))
-        .expect("new page is active")
-        .clone();
-    active["page_id"].as_str().expect("page_id").to_string()
-}
-
-async fn tabs_select(client: &Client, page_id: &str) {
-    let result = call(
-        client,
-        "browser_tabs",
-        json!({ "action": "select", "page_id": page_id }),
-    )
-    .await;
-    assert_ok(&result, "browser_tabs select");
-}
-
-async fn tabs_close(client: &Client, page_id: &str) {
-    let result = call(
-        client,
-        "browser_tabs",
-        json!({ "action": "close", "page_id": page_id }),
-    )
-    .await;
-    assert_ok(&result, "browser_tabs close");
+    assert_ok(&result, &format!("evaluate {script}"));
+    first_text(&result).trim().to_string()
 }
 
 async fn wait_fixture_ready(fixture: &Fixture) {
@@ -642,91 +577,158 @@ async fn fixture_count(fixture: &Fixture) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Win32 helpers for the no-visible-window test
+// Native output parsing helpers (tolerant of native text shapes)
 // ---------------------------------------------------------------------------
 
-#[cfg(windows)]
-mod win32 {
-    use std::collections::HashSet;
-
-    use windows::{
-        core::BOOL,
-        Win32::{
-            Foundation::{CloseHandle, HWND, LPARAM, TRUE},
-            System::Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-                TH32CS_SNAPPROCESS,
-            },
-            UI::WindowsAndMessaging::{EnumWindows, GetWindowThreadProcessId, IsWindowVisible},
-        },
-    };
-
-    /// Collects `root` plus every descendant pid by walking a system process
-    /// snapshot (parent-pid chain).
-    pub fn process_tree_pids(root: u32) -> HashSet<u32> {
-        let mut pairs: Vec<(u32, u32)> = Vec::new(); // (pid, parent_pid)
-        unsafe {
-            if let Ok(snapshot) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) {
-                let mut entry = PROCESSENTRY32W {
-                    dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
-                    ..Default::default()
-                };
-                if Process32FirstW(snapshot, &mut entry).is_ok() {
-                    loop {
-                        pairs.push((entry.th32ProcessID, entry.th32ParentProcessID));
-                        if Process32NextW(snapshot, &mut entry).is_err() {
-                            break;
-                        }
-                    }
-                }
-                let _ = CloseHandle(snapshot);
+/// Recursively finds a `backendNodeId` in a JSON value whose sibling string
+/// fields mention `needle`.
+fn find_node_id_json(value: &Value, needle: &str) -> Option<i64> {
+    match value {
+        Value::Object(map) => {
+            let id = map.get("backendNodeId").and_then(Value::as_i64);
+            let hit = map
+                .values()
+                .any(|v| v.as_str().is_some_and(|s| s.contains(needle)));
+            if let (Some(id), true) = (id, hit) {
+                return Some(id);
             }
+            map.values().find_map(|v| find_node_id_json(v, needle))
         }
-        let mut tree: HashSet<u32> = HashSet::new();
-        tree.insert(root);
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for &(pid, ppid) in &pairs {
-                if tree.contains(&ppid) && tree.insert(pid) {
-                    changed = true;
-                }
-            }
-        }
-        tree
-    }
-
-    /// Pids that own at least one visible top-level window right now.
-    pub fn visible_top_level_window_pids() -> HashSet<u32> {
-        let mut pids: Vec<u32> = Vec::new();
-        unsafe {
-            let param = LPARAM(&mut pids as *mut Vec<u32> as isize);
-            let _ = EnumWindows(Some(enum_windows_cb), param);
-        }
-        pids.into_iter().collect()
-    }
-
-    unsafe extern "system" fn enum_windows_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let pids = &mut *(lparam.0 as *mut Vec<u32>);
-        if IsWindowVisible(hwnd).as_bool() {
-            let mut pid: u32 = 0;
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            if pid != 0 {
-                pids.push(pid);
-            }
-        }
-        TRUE
+        Value::Array(items) => items.iter().find_map(|v| find_node_id_json(v, needle)),
+        _ => None,
     }
 }
 
+/// Extracts the first integer following a backendNodeId-ish key on `line`.
+fn extract_id_from_line(line: &str) -> Option<i64> {
+    for key in ["backendNodeId", "backend_node_id", "backend node id"] {
+        let Some(idx) = line.find(key) else { continue };
+        let rest = &line[idx + key.len()..];
+        let mut digits = String::new();
+        let mut separators = 0;
+        for c in rest.chars() {
+            if c.is_ascii_digit() {
+                digits.push(c);
+            } else if !digits.is_empty() {
+                break;
+            } else {
+                separators += 1;
+                if separators > 4 {
+                    break;
+                }
+            }
+        }
+        if let Ok(id) = digits.parse::<i64>() {
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Resolves the backendNodeId of the element described by `needle`, from
+/// either JSON-shaped native output or line-oriented text where the id and
+/// the element description share a line.
+fn try_node_id_near(text: &str, needle: &str) -> Option<i64> {
+    if let Ok(value) = serde_json::from_str::<Value>(text.trim()) {
+        if let Some(id) = find_node_id_json(&value, needle) {
+            return Some(id);
+        }
+    }
+    for line in text.lines() {
+        if line.contains(needle) {
+            if let Some(id) = extract_id_from_line(line) {
+                return Some(id);
+            }
+        }
+    }
+    None
+}
+
+/// Extracts the backendNodeId (leading token) from the semantic tree line
+/// containing `needle`. Native tree lines look like `3 [i] textbox 'Name'`.
+fn tree_node_id(tree_text: &str, needle: &str) -> i64 {
+    for line in tree_text.lines() {
+        if !line.contains(needle) {
+            continue;
+        }
+        let digits: String = line
+            .trim_start()
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(id) = digits.parse::<i64>() {
+            return id;
+        }
+    }
+    panic!("no tree node found near {needle:?} in native tree output:\n{tree_text}");
+}
+
+/// Resolves the backendNodeId of the element with the given DOM id through
+/// the native interactiveElements tool. Used for listener-attached elements
+/// (like the hover target) that are listed there but not named in the
+/// semantic tree.
+async fn interactive_element_id_by_dom_id(env: &RealEnv, dom_id: &str) -> i64 {
+    let result = tc(env, "browser_lightpanda_interactive_elements", json!({})).await;
+    assert_ok(&result, "interactiveElements");
+    let text = first_text(&result);
+    let value: Value = serde_json::from_str(text.trim())
+        .unwrap_or_else(|e| panic!("interactiveElements must be JSON: {e}\n{text}"));
+    for item in value.as_array().expect("interactiveElements array") {
+        if item.get("id").and_then(Value::as_str) == Some(dom_id) {
+            if let Some(id) = item.get("backendNodeId").and_then(Value::as_i64) {
+                return id;
+            }
+        }
+    }
+    panic!("no interactive element with DOM id {dom_id:?} in: {text}");
+}
+
+/// Like `try_node_id_near`, but panics with the full text when the id cannot
+/// be found, so format drift is visible in test output.
+fn node_id_near(text: &str, needle: &str) -> i64 {
+    try_node_id_near(text, needle)
+        .unwrap_or_else(|| panic!("no backendNodeId found near {needle:?} in native output:\n{text}"))
+}
+
 // ---------------------------------------------------------------------------
-// t01: already-provisioned runtime -> ready
+// Release evidence (consumed by scripts/verify-browser-release.ps1)
+// ---------------------------------------------------------------------------
+
+/// Prints the explicit parity evidence lines for the release gate and asserts
+/// they are all PASS. Called once, after the first native server start.
+async fn print_parity_evidence(env: &RealEnv) {
+    let status = env.browser.status().await;
+    let tools = env.client.list_all_tools().await.expect("outer discovery");
+    let public = tools
+        .iter()
+        .filter(|t| t.name.starts_with("browser_lightpanda_"))
+        .count();
+    let legacy = tools
+        .iter()
+        .filter(|t| t.name.starts_with("browser_") && !t.name.starts_with("browser_lightpanda_"))
+        .count();
+    println!("Lightpanda version: {PINNED_LIGHTPANDA_VERSION}");
+    println!("Native tools discovered: {}", status.native_tool_count);
+    println!("Native tools expected: {EXPECTED_NATIVE_TOOL_COUNT}");
+    println!("Public browser_lightpanda tools: {public}");
+    println!("Legacy browser tools discovered: {legacy}");
+    let pass = status.contract_verified
+        && status.native_tool_count == EXPECTED_NATIVE_TOOL_COUNT
+        && public == EXPECTED_NATIVE_TOOL_COUNT
+        && legacy == 0;
+    println!("Contract parity: {}", if pass { "PASS" } else { "FAIL" });
+    assert!(pass, "contract parity evidence must be PASS");
+}
+
+// ---------------------------------------------------------------------------
+// t01: provisioning reports the pinned binary version (not serverInfo)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t01_already_provisioned_runtime_is_ready() {
+async fn t01_runtime_provisioning_reports_pinned_binary_version() {
+    let _done = DoneGuard;
     let _guard = SERIAL.lock().await;
-    if !require_runtime("already_provisioned_runtime_is_ready") {
+    if !require_runtime("runtime_provisioning_reports_pinned_binary_version") {
         return;
     }
 
@@ -762,10 +764,15 @@ async fn t01_already_provisioned_runtime_is_ready() {
         distro.distro_name
     );
     assert_eq!(distro.install_id, snapshot.install_id);
+    // The binary pin comes from the runtime manager's in-distro
+    // `lightpanda version` verification, persisted into the state file.
+    // Regression guard: the MCP protocol's initialize serverInfo is NEVER
+    // the binary pin — contract verification compares tools/list against the
+    // frozen snapshot, and this suite never asserts serverInfo.version.
     assert_eq!(
         snapshot.lightpanda_version.as_deref(),
-        Some("0.3.7"),
-        "Lightpanda must stay pinned to 0.3.7"
+        Some(PINNED_LIGHTPANDA_VERSION),
+        "Lightpanda must stay pinned to {PINNED_LIGHTPANDA_VERSION}"
     );
     assert!(
         wsl_distro_registered(&distro.distro_name),
@@ -775,1325 +782,859 @@ async fn t01_already_provisioned_runtime_is_ready() {
 }
 
 // ---------------------------------------------------------------------------
-// t02: background launch with no visible browser UI
+// t02: bootstrap session list, named-session isolation, one server process
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t02_background_launch_no_visible_window() {
+async fn t02_bootstrap_sessions_single_server_process_and_parity_evidence() {
+    let _done = DoneGuard;
     let _guard = SERIAL.lock().await;
-    if !require_runtime("background_launch_no_visible_window") {
+    if !require_runtime("bootstrap_sessions_single_server_process") {
         return;
     }
 
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
 
-    let opened = open_url(client, &wf.url).await;
-    assert_eq!(opened["status"]["run_mode"], "background");
-    assert!(opened["status"]["running"].as_bool().unwrap());
-
-    // Give the page child a moment to settle its process tree.
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-    let pid = env
-        .browser
-        .test_page_child_pid(None)
-        .await
-        .expect("page child pid");
-
-    #[cfg(windows)]
-    {
-        let tree = win32::process_tree_pids(pid);
-        assert!(tree.contains(&pid), "tree must contain its root pid");
-        let visible = win32::visible_top_level_window_pids();
-        let leaked: Vec<u32> = tree.intersection(&visible).copied().collect();
-        assert!(
-            leaked.is_empty(),
-            "background browser tree (root {pid}, {} processes) owns visible top-level windows: {leaked:?}",
-            tree.len()
-        );
-    }
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t03: navigation + verified final URL
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t03_navigation_verifies_final_url() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("navigation_verifies_final_url") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-
-    open_url(client, &base).await;
-    let target = format!("{base}/download.txt");
-
-    // goto success alone is insufficient: the handler validates the URL via a
-    // follow-up getUrl, and the page summary must agree.
-    let nav = call(
-        client,
-        "browser_navigate",
-        json!({ "action": "url", "url": target }),
-    )
-    .await;
-    assert_ok(&nav, "browser_navigate url");
-    let nav_out = structured(&nav);
-    assert_eq!(
-        nav_out["text"].as_str().unwrap(),
-        target,
-        "verified final URL"
-    );
-    let active = nav_out["pages"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|p| p["active"].as_bool().unwrap_or(false))
-        .expect("active page summary")
-        .clone();
-    assert_eq!(active["url"].as_str().unwrap(), target);
-
-    // Reload keeps the verified URL.
-    let reload = call(client, "browser_navigate", json!({ "action": "reload" })).await;
-    assert_ok(&reload, "browser_navigate reload");
-    assert_eq!(structured(&reload)["text"].as_str().unwrap(), target);
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t04: tree -> opaque ref -> selector-resolved fill/select/click
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t04_tree_ref_selector_fill_select_click() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("tree_ref_selector_fill_select_click") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    // Each side-effecting action invalidates the current ref generation, so a
-    // fresh snapshot is taken before every action (the intended model usage).
-    let snap = take_snapshot(client).await;
-    let name_ref = find_ref(&snap, "Name");
-    let fill = call(
-        client,
-        "browser_fill",
-        json!({ "ref": name_ref, "text": "honey" }),
-    )
-    .await;
-    assert_ok(&fill, "browser_fill");
-
-    let snap = take_snapshot(client).await;
-    let color_ref = find_ref(&snap, "Color");
-    let select = call(
-        client,
-        "browser_select",
-        json!({ "ref": color_ref, "values": ["green"] }),
-    )
-    .await;
-    assert_ok(&select, "browser_select");
-
-    let snap = take_snapshot(client).await;
-    let submit_ref = find_ref(&snap, "Submit");
-    let click = call(client, "browser_click", json!({ "ref": submit_ref })).await;
-    assert_ok(&click, "browser_click");
-
-    let result_text = evaluate_str(
-        client,
-        "() => document.getElementById('result').textContent",
-    )
-    .await;
-    assert_eq!(result_text, "result:name=honey,color=green");
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t05: all ten native-first wrapper tools
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t05_all_ten_native_first_wrappers() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("all_ten_native_first_wrappers") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    // 1. browser_markdown: whole page render.
-    let md = call(client, "browser_markdown", json!({})).await;
-    assert_ok(&md, "browser_markdown");
-    let md_text = structured(&md)["text"].as_str().unwrap().to_string();
+    // The very first native call: only `default` may exist. This proves
+    // initialization did not leak an internal `s1` session.
+    let list = tc(&env, "browser_lightpanda_session_list", json!({})).await;
+    assert_ok(&list, "bootstrap session_list");
+    let list_text = first_text(&list);
     assert!(
-        md_text.contains("Browser Test App"),
-        "markdown must contain the page heading:\n{md_text}"
+        list_text.contains("default"),
+        "session_list must report the default session: {list_text}"
+    );
+    assert!(
+        !list_text.contains("alpha") && !list_text.contains("s1"),
+        "bootstrap session_list leaked a non-default session: {list_text}"
+    );
+    let pid_after_start = env
+        .browser
+        .server_child_pid()
+        .await
+        .expect("server child running after first native call");
+
+    // Create two named sessions and navigate them independently.
+    let alpha = tc(&env, "browser_lightpanda_session_new", json!({ "name": "alpha" })).await;
+    assert_ok(&alpha, "session_new alpha");
+    assert!(
+        first_text(&alpha).contains("alpha"),
+        "session_new must return the session id: {}",
+        first_text(&alpha)
+    );
+    let beta = tc(&env, "browser_lightpanda_session_new", json!({ "name": "beta" })).await;
+    assert_ok(&beta, "session_new beta");
+
+    goto(&env, &wsl_fixture.url, Some("alpha")).await;
+    goto(&env, &format!("{}/plain", wsl_fixture.url), Some("beta")).await;
+
+    let url_alpha = tc(
+        &env,
+        "browser_lightpanda_get_url",
+        with_session(json!({}), Some("alpha")),
+    )
+    .await;
+    assert_ok(&url_alpha, "get_url alpha");
+    let url_alpha = first_text(&url_alpha);
+    assert!(
+        url_alpha.trim().starts_with(&wsl_fixture.url)
+            && !url_alpha.contains("/plain"),
+        "alpha must stay on the fixture root: {url_alpha}"
     );
 
-    // 2. browser_html: whole document dump.
-    let html = call(client, "browser_html", json!({})).await;
-    assert_ok(&html, "browser_html");
-    let html_text = structured(&html)["text"].as_str().unwrap().to_string();
+    let url_beta = tc(
+        &env,
+        "browser_lightpanda_get_url",
+        with_session(json!({}), Some("beta")),
+    )
+    .await;
+    assert_ok(&url_beta, "get_url beta");
+    let url_beta = first_text(&url_beta);
+    assert!(
+        url_beta.trim().ends_with("/plain"),
+        "beta must be on /plain independently of alpha: {url_beta}"
+    );
+
+    // One shared server process serves every session: the child PID never
+    // changes across session control and per-session navigation calls.
+    let pid_now = env
+        .browser
+        .server_child_pid()
+        .await
+        .expect("server child still running");
+    assert_eq!(
+        pid_after_start, pid_now,
+        "exactly one server process must serve all named sessions"
+    );
+
+    // Release evidence for the Task 10 gate.
+    print_parity_evidence(&env).await;
+
+    // Closing a named session removes it from the list.
+    let close = tc(&env, "browser_lightpanda_session_close", json!({ "id": "beta" })).await;
+    assert_ok(&close, "session_close beta");
+    let list = tc(&env, "browser_lightpanda_session_list", json!({})).await;
+    let list_text = first_text(&list);
+    assert!(
+        list_text.contains("alpha") && !list_text.contains("beta"),
+        "beta must be gone after session_close: {list_text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// t03: content/metadata tools on the fixture (default session)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t03_content_and_metadata_tools_on_fixture() {
+    let _done = DoneGuard;
+    let _guard = SERIAL.lock().await;
+    if !require_runtime("content_and_metadata_tools_on_fixture") {
+        return;
+    }
+
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
+    goto(&env, &wsl_fixture.url, None).await;
+
+    let markdown = tc(&env, "browser_lightpanda_markdown", json!({})).await;
+    assert_ok(&markdown, "markdown");
+    let markdown_text = first_text(&markdown);
+    assert!(
+        markdown_text.contains("Browser Test App"),
+        "markdown must contain the page heading: {markdown_text}"
+    );
+
+    let html = tc(&env, "browser_lightpanda_html", json!({})).await;
+    assert_ok(&html, "html");
+    let html_text = first_text(&html);
     assert!(
         html_text.contains("name-input"),
-        "html must contain the page markup"
+        "html must contain the fixture markup: {html_text}"
     );
 
-    // 3. browser_html scoped to one snapshot ref. Targets the Name textbox
-    // (an element with a stable id/selector); a text-only node has no usable
-    // selector under the pinned runtime. The result must be that element's
-    // outerHTML, not the whole document.
-    let snap = take_snapshot(client).await;
-    let name_ref = find_ref(&snap, "Name");
-    let scoped = call(client, "browser_html", json!({ "ref": name_ref })).await;
-    assert_ok(&scoped, "browser_html scoped");
-    let scoped_text = structured(&scoped)["text"].as_str().unwrap().to_string();
+    let links = tc(&env, "browser_lightpanda_links", json!({})).await;
+    assert_ok(&links, "links");
+    let links_text = first_text(&links);
     assert!(
-        scoped_text.contains("name-input"),
-        "scoped html must be the referenced element's outerHTML:\n{scoped_text}"
+        links_text.contains("PlainPage") && links_text.contains("/plain"),
+        "links must include the /plain anchor: {links_text}"
     );
+    // Links carry raw backendNodeIds usable for click/nodeDetails.
+    let plain_link_id = node_id_near(&links_text, "/plain");
+    assert!(plain_link_id > 0, "link backendNodeId must be positive");
+
+    let tree = tc(&env, "browser_lightpanda_tree", json!({})).await;
+    assert_ok(&tree, "tree");
+    let tree_text = first_text(&tree);
     assert!(
-        !scoped_text.contains("DownloadFile"),
-        "scoped html must not be the whole document:\n{scoped_text}"
+        tree_text.contains("Submit"),
+        "tree must include the Submit button: {tree_text}"
     );
 
-    // 4. browser_links.
-    let links = call(client, "browser_links", json!({})).await;
-    assert_ok(&links, "browser_links");
-    let links_text = structured(&links)["text"].as_str().unwrap().to_string();
+    let node = tc(
+        &env,
+        "browser_lightpanda_node_details",
+        json!({ "backendNodeId": plain_link_id }),
+    )
+    .await;
+    assert_ok(&node, "nodeDetails for the /plain link");
+    let node_text = first_text(&node);
     assert!(
-        links_text.contains("/download.txt"),
-        "links must include the download link:\n{links_text}"
+        node_text.contains("plain-link") || node_text.contains("/plain"),
+        "nodeDetails must describe the /plain anchor: {node_text}"
     );
 
-    // 5. browser_find_element by role + accessible name.
-    let found = call(
-        client,
-        "browser_find_element",
+    let interactive = tc(&env, "browser_lightpanda_interactive_elements", json!({})).await;
+    assert_ok(&interactive, "interactiveElements");
+    let interactive_text = first_text(&interactive);
+    assert!(
+        interactive_text.contains("Submit"),
+        "interactiveElements must list the Submit button: {interactive_text}"
+    );
+
+    let structured = tc(&env, "browser_lightpanda_structured_data", json!({})).await;
+    assert_ok(&structured, "structuredData");
+    let structured_text = first_text(&structured);
+    assert!(
+        structured_text.contains("Fixture JsonLd Page"),
+        "structuredData must include JSON-LD: {structured_text}"
+    );
+    assert!(
+        structured_text.contains("Fixture OpenGraph Title"),
+        "structuredData must include OpenGraph: {structured_text}"
+    );
+
+    let forms = tc(&env, "browser_lightpanda_detect_forms", json!({})).await;
+    assert_ok(&forms, "detectForms");
+    let forms_text = first_text(&forms);
+    assert!(
+        forms_text.contains("inputType") && forms_text.contains("options"),
+        "detectForms must describe the fixture form fields: {forms_text}"
+    );
+
+    let found = tc(
+        &env,
+        "browser_lightpanda_find_element",
         json!({ "role": "button", "name": "Submit" }),
     )
     .await;
-    assert_ok(&found, "browser_find_element");
-    let found_text = structured(&found)["text"].as_str().unwrap().to_string();
+    assert_ok(&found, "findElement Submit button");
+    let found_text = first_text(&found);
     assert!(
         found_text.contains("Submit"),
-        "find_element must match the Submit button:\n{found_text}"
+        "findElement must match the Submit button: {found_text}"
     );
-
-    // 6. browser_interactive_elements.
-    let interactive = call(client, "browser_interactive_elements", json!({})).await;
-    assert_ok(&interactive, "browser_interactive_elements");
-    let interactive_text = structured(&interactive)["text"]
-        .as_str()
-        .unwrap()
-        .to_string();
     assert!(
-        interactive_text.contains("Submit"),
-        "interactive elements must list the Submit button:\n{interactive_text}"
+        try_node_id_near(&found_text, "Submit").is_some(),
+        "findElement must return a backendNodeId: {found_text}"
     );
 
-    // 7. browser_extract with a validated CSS-selector schema.
-    let extract = call(
-        client,
-        "browser_extract",
-        json!({ "schema": { "title": "title", "result": "#result" } }),
+    // Console buffer is read-once: call it last in this session.
+    let logs = tc(&env, "browser_lightpanda_console_logs", json!({})).await;
+    assert_ok(&logs, "consoleLogs");
+    let logs_text = first_text(&logs);
+    assert!(
+        logs_text.contains("known-console-log"),
+        "consoleLogs must include the fixture console output: {logs_text}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// t04: raw backendNodeId action parity (no selector recovery)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t04_raw_backend_node_id_action_parity() {
+    let _done = DoneGuard;
+    let _guard = SERIAL.lock().await;
+    if !require_runtime("raw_backend_node_id_action_parity") {
+        return;
+    }
+
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
+    goto(&env, &wsl_fixture.url, None).await;
+
+    // Resolve raw backendNodeIds from the native semantic tree (leading
+    // token per line). Listener-attached elements are unnamed in the tree
+    // (or only listed by their text child), so they are resolved through
+    // interactiveElements by DOM id.
+    let tree = tc(&env, "browser_lightpanda_tree", json!({})).await;
+    assert_ok(&tree, "tree");
+    let tree_text = first_text(&tree);
+    let name_id = tree_node_id(&tree_text, "textbox 'Name'");
+    let color_id = tree_node_id(&tree_text, "combobox 'Color'");
+    let agree_id = tree_node_id(&tree_text, "checkbox 'Agree'");
+    let large_id = tree_node_id(&tree_text, "radio 'Large'");
+    let submit_id = tree_node_id(&tree_text, "button 'Submit'");
+    let keyboard_id = tree_node_id(&tree_text, "textbox 'Keyboard'");
+    let hover_id = interactive_element_id_by_dom_id(&env, "hover-target").await;
+    let bottom_id = interactive_element_id_by_dom_id(&env, "scroll-bottom").await;
+
+    // Raw ids remain present in native tree output (no id rewriting).
+    for id in [name_id, color_id, submit_id] {
+        assert!(
+            tree_text.contains(&id.to_string()),
+            "raw backendNodeId {id} must appear unchanged in native tree output"
+        );
+    }
+
+    // fill by raw id.
+    let fill = tc(
+        &env,
+        "browser_lightpanda_fill",
+        json!({ "backendNodeId": name_id, "value": "Lightpanda" }),
     )
     .await;
-    assert_ok(&extract, "browser_extract");
-    let data = structured(&extract)["data"].clone();
-    assert!(data.is_object(), "extract data must be an object: {data}");
-    assert!(
-        data.to_string().contains("Browser Test App"),
-        "extract must pull the title text: {data}"
+    assert_ok(&fill, "fill by backendNodeId");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('name-input').value").await,
+        "Lightpanda"
     );
 
-    // 8. browser_structured_data (fixture has no JSON-LD; shape must hold).
-    let structured_data = call(client, "browser_structured_data", json!({})).await;
-    assert_ok(&structured_data, "browser_structured_data");
-    assert!(structured(&structured_data)["text"].is_string());
-
-    // 9. browser_detect_forms (values are never included).
-    let forms = call(client, "browser_detect_forms", json!({})).await;
-    assert_ok(&forms, "browser_detect_forms");
-    let forms_text = structured(&forms)["text"].as_str().unwrap().to_string();
-    assert!(
-        !forms_text.contains("honey"),
-        "detect_forms must never include filled values:\n{forms_text}"
-    );
-
-    // 10a. browser_scroll on the window.
-    let scroll = call(client, "browser_scroll", json!({ "y": 120 })).await;
-    assert_ok(&scroll, "browser_scroll");
-
-    // 10b. browser_set_checked on the checkbox ref (check + uncheck).
-    let snap = take_snapshot(client).await;
-    let checkbox_ref = find_ref(&snap, "Agree");
-    let check = call(
-        client,
-        "browser_set_checked",
-        json!({ "ref": checkbox_ref, "checked": true }),
+    // selectOption by raw id.
+    let select = tc(
+        &env,
+        "browser_lightpanda_select_option",
+        json!({ "backendNodeId": color_id, "value": "green" }),
     )
     .await;
-    assert_ok(&check, "browser_set_checked true");
+    assert_ok(&select, "selectOption by backendNodeId");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('color-select').value").await,
+        "green"
+    );
+
+    // setChecked by raw id.
+    let check = tc(
+        &env,
+        "browser_lightpanda_set_checked",
+        json!({ "backendNodeId": agree_id, "checked": true }),
+    )
+    .await;
+    assert_ok(&check, "setChecked by backendNodeId");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('agree-checkbox').checked").await,
+        "true"
+    );
+
+    // click a radio by raw id.
+    let radio = tc(
+        &env,
+        "browser_lightpanda_click",
+        json!({ "backendNodeId": large_id }),
+    )
+    .await;
+    assert_ok(&radio, "click radio by backendNodeId");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('size-large').checked").await,
+        "true"
+    );
+
+    // hover by raw id.
+    let hover = tc(
+        &env,
+        "browser_lightpanda_hover",
+        json!({ "backendNodeId": hover_id }),
+    )
+    .await;
+    assert_ok(&hover, "hover by backendNodeId");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('hover-target').textContent").await,
+        "hover:hovered"
+    );
+
+    // press by raw id.
+    let press = tc(
+        &env,
+        "browser_lightpanda_press",
+        json!({ "key": "a", "backendNodeId": keyboard_id }),
+    )
+    .await;
+    assert_ok(&press, "press by backendNodeId");
+    assert!(
+        evaluate(&env, None, "document.getElementById('keyboard-log').textContent").await
+            .contains('a'),
+        "keyboard target must receive the pressed key"
+    );
+
+    // click the submit button by raw id; the page composes fill+select state.
+    let click = tc(
+        &env,
+        "browser_lightpanda_click",
+        json!({ "backendNodeId": submit_id }),
+    )
+    .await;
+    assert_ok(&click, "click submit by backendNodeId");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('result').textContent").await,
+        "result:name=Lightpanda,color=green"
+    );
+
+    // Page scroll, then scroll a specific node into view by raw id.
+    let scroll = tc(&env, "browser_lightpanda_scroll", json!({ "y": 2000 })).await;
+    assert_ok(&scroll, "scroll page by y offset");
+    let scroll_y: f64 = evaluate(&env, None, "window.scrollY")
+        .await
+        .parse()
+        .expect("scrollY is a number");
+    assert!(scroll_y >= 1500.0, "page must actually scroll: {scroll_y}");
+    let scroll_node = tc(
+        &env,
+        "browser_lightpanda_scroll",
+        json!({ "backendNodeId": bottom_id }),
+    )
+    .await;
+    assert_ok(&scroll_node, "scroll node by backendNodeId");
+    let scroll_node_text = first_text(&scroll_node);
+    assert!(
+        scroll_node_text.contains("Scrolled"),
+        "element scroll must report the native scroll position: {scroll_node_text}"
+    );
+
+    // Subtree calls scoped by raw backendNodeId.
+    let sub_markdown = tc(
+        &env,
+        "browser_lightpanda_markdown",
+        json!({ "backendNodeId": submit_id }),
+    )
+    .await;
+    assert_ok(&sub_markdown, "markdown subtree by backendNodeId");
+    assert!(first_text(&sub_markdown).contains("Submit"));
+    let sub_html = tc(
+        &env,
+        "browser_lightpanda_html",
+        json!({ "backendNodeId": submit_id }),
+    )
+    .await;
+    assert_ok(&sub_html, "html subtree by backendNodeId");
+    let sub_html_text = first_text(&sub_html);
+    assert!(
+        sub_html_text.contains("button") && sub_html_text.contains("Submit"),
+        "html subtree must be scoped to the button: {sub_html_text}"
+    );
+    let sub_tree = tc(
+        &env,
+        "browser_lightpanda_tree",
+        json!({ "backendNodeId": submit_id }),
+    )
+    .await;
+    assert_ok(&sub_tree, "tree subtree by backendNodeId");
+    assert!(first_text(&sub_tree).contains("Submit"));
+}
+
+// ---------------------------------------------------------------------------
+// t05: selector-based replay + PandaScript save (with escape rejection)
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t05_selector_actions_and_pandascript_save() {
+    let _done = DoneGuard;
+    let _guard = SERIAL.lock().await;
+    if !require_runtime("selector_actions_and_pandascript_save") {
+        return;
+    }
+
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
+    goto(&env, &wsl_fixture.url, None).await;
+
+    // Representative actions repeated with CSS selectors (replayable form).
+    let fill = tc(
+        &env,
+        "browser_lightpanda_fill",
+        json!({ "selector": "#name-input", "value": "Replayed" }),
+    )
+    .await;
+    assert_ok(&fill, "fill by selector");
+    let select = tc(
+        &env,
+        "browser_lightpanda_select_option",
+        json!({ "selector": "#color-select", "value": "blue" }),
+    )
+    .await;
+    assert_ok(&select, "selectOption by selector");
+    let click = tc(
+        &env,
+        "browser_lightpanda_click",
+        json!({ "selector": "#submit-btn" }),
+    )
+    .await;
+    assert_ok(&click, "click by selector");
+    assert_eq!(
+        evaluate(&env, None, "document.getElementById('result').textContent").await,
+        "result:name=Replayed,color=blue"
+    );
+
+    // Save a deterministic replayable PandaScript for this session.
+    let script = format!(
+        "const page = new Page();\nawait page.goto(\"{}\");\n\
+         await page.fill({{ selector: \"#name-input\", value: \"Replayed\" }});\n\
+         await page.selectOption({{ selector: \"#color-select\", value: \"blue\" }});\n\
+         await page.click({{ selector: \"#submit-btn\" }});\n",
+        wsl_fixture.url
+    );
+    // Lightpanda `save` does not create parent directories: pre-create the
+    // fixed integration subdirectory inside the PandaScript root first.
+    // Runs as the runtime user so the directory is writable by the server.
+    let distro = env
+        .runtime
+        .distro_identity()
+        .expect("distro identity")
+        .distro_name;
+    let mkdir = std::process::Command::new("wsl.exe")
+        .args([
+            "-d",
+            &distro,
+            "-u",
+            "localworkspaces",
+            "--",
+            "mkdir",
+            "-p",
+            "/var/lib/local-workspaces/browser/pandascripts/integration",
+        ])
+        .output()
+        .expect("wsl.exe mkdir");
+    assert!(
+        mkdir.status.success(),
+        "integration PandaScript subdirectory must be creatable"
+    );
+    let save = tc(
+        &env,
+        "browser_lightpanda_save",
+        json!({ "path": "integration/replayable.js", "script": script }),
+    )
+    .await;
+    assert_ok(&save, "save PandaScript");
+    let save_text = first_text(&save);
+    assert!(
+        save_text.contains("/var/lib/local-workspaces/browser/pandascripts"),
+        "save must report the fixed PandaScript directory: {save_text}"
+    );
+
+    // Path traversal must fail closed and never escape the fixed cwd.
+    let escape = tc(
+        &env,
+        "browser_lightpanda_save",
+        json!({ "path": "../escape.js", "script": "const page = new Page();\n" }),
+    )
+    .await;
+    assert!(
+        escape.is_error.unwrap_or(false),
+        "save with a ../ path must return isError: {}",
+        result_text(&escape)
+    );
+    let escaped = std::process::Command::new("wsl.exe")
+        .args([
+            "-d",
+            &distro,
+            "--",
+            "test",
+            "-f",
+            "/var/lib/local-workspaces/browser/escape.js",
+        ])
+        .output()
+        .expect("wsl.exe test")
+        .status
+        .success();
+    assert!(
+        !escaped,
+        "../escape.js must not land outside the PandaScript directory"
+    );
+
+    // App-owned cleanup through a fixed wsl.exe shape (no browser-tool
+    // filesystem access).
+    let _ = std::process::Command::new("wsl.exe")
+        .args([
+            "-d",
+            &distro,
+            "--",
+            "rm",
+            "-rf",
+            "/var/lib/local-workspaces/browser/pandascripts/integration",
+        ])
+        .output();
+}
+
+// ---------------------------------------------------------------------------
+// t06: wait tools, evaluate semantics, extract
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t06_wait_tools_evaluate_and_extract() {
+    let _done = DoneGuard;
+    let _guard = SERIAL.lock().await;
+    if !require_runtime("wait_tools_evaluate_and_extract") {
+        return;
+    }
+
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
+    goto(&env, &wsl_fixture.url, None).await;
+
+    // The fixture adds #delayed-element after 300ms and sets
+    // window.__delayedState after 500ms.
+    let wait_selector = tc(
+        &env,
+        "browser_lightpanda_wait_for_selector",
+        json!({ "selector": "#delayed-element", "timeout": 10000 }),
+    )
+    .await;
+    assert_ok(&wait_selector, "waitForSelector delayed element");
+
+    let wait_script = tc(
+        &env,
+        "browser_lightpanda_wait_for_script",
+        json!({ "script": "window.__delayedState === 'ready'", "timeout": 10000 }),
+    )
+    .await;
+    assert_ok(&wait_script, "waitForScript delayed state");
+
+    let wait_state = tc(
+        &env,
+        "browser_lightpanda_wait_for_state",
+        json!({ "state": "load" }),
+    )
+    .await;
+    assert_ok(&wait_state, "waitForState load");
+
+    // Native evaluate output shape: strings arrive bare/unquoted.
     assert_eq!(
         evaluate(
-            client,
-            "() => document.getElementById('agree-checkbox').checked"
+            &env,
+            None,
+            "document.getElementById('extract-target').getAttribute('data-sku')"
         )
         .await,
-        json!(true)
+        "SKU-42"
     );
-    let snap = take_snapshot(client).await;
-    let checkbox_ref = find_ref(&snap, "Agree");
-    let uncheck = call(
-        client,
-        "browser_set_checked",
-        json!({ "ref": checkbox_ref, "checked": false }),
+
+    let extract = tc(
+        &env,
+        "browser_lightpanda_extract",
+        json!({ "schema": "{\"item\":\"#extract-target\",\"heading\":\"#main-heading\"}" }),
     )
     .await;
-    assert_ok(&uncheck, "browser_set_checked false");
-    assert_eq!(
-        evaluate(
-            client,
-            "() => document.getElementById('agree-checkbox').checked"
-        )
-        .await,
-        json!(false)
+    assert_ok(&extract, "extract");
+    let extract_text = first_text(&extract);
+    assert!(
+        extract_text.contains("ExtractItem") && extract_text.contains("Browser Test App"),
+        "extract must follow the CSS-selector schema: {extract_text}"
     );
-
-    close_browser(client, "browser_close").await;
 }
 
 // ---------------------------------------------------------------------------
-// t06: page-context evaluate
+// t07: cookie isolation between native sessions
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t06_page_context_evaluate() {
+async fn t07_cookie_isolation_between_native_sessions() {
+    let _done = DoneGuard;
     let _guard = SERIAL.lock().await;
-    if !require_runtime("page_context_evaluate") {
+    if !require_runtime("cookie_isolation_between_native_sessions") {
         return;
     }
 
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
 
-    open_url(client, &wf.url).await;
+    let alpha = tc(&env, "browser_lightpanda_session_new", json!({ "name": "alpha" })).await;
+    assert_ok(&alpha, "session_new alpha");
+    let beta = tc(&env, "browser_lightpanda_session_new", json!({ "name": "beta" })).await;
+    assert_ok(&beta, "session_new beta");
 
-    assert_eq!(
-        evaluate_str(client, "() => document.title").await,
-        "Browser Test App"
-    );
-    assert_eq!(evaluate(client, "6 * 7").await, json!(42));
-    assert_eq!(
-        evaluate(client, "() => ({ ok: true, n: 3 })").await,
-        json!({ "ok": true, "n": 3 })
-    );
-    assert_eq!(evaluate(client, "() => [1, 2, 3]").await, json!([1, 2, 3]));
-
-    // Ref-scoped evaluate: the expression runs against the resolved element.
-    let snap = take_snapshot(client).await;
-    let name_ref = find_ref(&snap, "Name");
-    let scoped = call(
-        client,
-        "browser_evaluate",
-        json!({ "expression": "el.tagName", "ref": name_ref }),
+    // Alpha visits the cookie-setting page.
+    goto(&env, &format!("{}/cookie", wsl_fixture.url), Some("alpha")).await;
+    let cookies_alpha = tc(
+        &env,
+        "browser_lightpanda_get_cookies",
+        with_session(json!({}), Some("alpha")),
     )
     .await;
-    assert_ok(&scoped, "ref-scoped browser_evaluate");
-    let scoped_out = structured(&scoped);
-    let raw = scoped_out["result"].as_str().expect("result text");
-    assert_eq!(parse_evaluate_result(raw), json!("INPUT"));
+    assert_ok(&cookies_alpha, "getCookies in alpha");
+    let alpha_text = first_text(&cookies_alpha);
+    assert!(
+        alpha_text.contains("fixture-cookie=chocolate"),
+        "alpha must see the cookie set by its own navigation: {alpha_text}"
+    );
 
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t07: every wait condition and load-state value
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t07_every_wait_condition_and_load_state() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("every_wait_condition_and_load_state") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    for condition in [
-        json!({ "kind": "text_present", "text": "Browser Test App" }),
-        json!({ "kind": "text_absent", "text": "no-such-text-anywhere" }),
-        json!({ "kind": "url_contains", "value": format!(":{}", wf.proxy_port) }),
-        json!({ "kind": "load_state", "state": "complete" }),
-        json!({ "kind": "delay", "milliseconds": 200 }),
-    ] {
-        let wait = call(
-            client,
-            "browser_wait",
-            json!({ "condition": condition, "timeout_ms": 10000 }),
-        )
-        .await;
-        assert_ok(&wait, &format!("browser_wait {condition}"));
-    }
-
-    // RefVisible on a live ref.
-    let snap = take_snapshot(client).await;
-    let submit_ref = find_ref(&snap, "Submit");
-    let wait = call(
-        client,
-        "browser_wait",
-        json!({ "condition": { "kind": "ref_visible", "ref_id": submit_ref }, "timeout_ms": 10000 }),
+    // Beta browses the same host but must NOT see alpha's cookie: native
+    // sessions are isolated and Local Workspaces never merges cookies to
+    // emulate old tabs.
+    goto(&env, &wsl_fixture.url, Some("beta")).await;
+    let cookies_beta = tc(
+        &env,
+        "browser_lightpanda_get_cookies",
+        with_session(json!({}), Some("beta")),
     )
     .await;
-    assert_ok(&wait, "browser_wait ref_visible");
+    assert_ok(&cookies_beta, "getCookies in beta");
+    let beta_text = first_text(&cookies_beta);
+    assert!(
+        !beta_text.contains("fixture-cookie"),
+        "beta must not see alpha's cookie: {beta_text}"
+    );
+}
 
-    // `loading` and `interactive` can never hold on a fully loaded page; the
-    // conditions must time out deterministically with BROWSER_ACTION_TIMEOUT
-    // (proving they execute their real scripts rather than passing trivially).
-    for state in ["loading", "interactive"] {
-        let wait = call(
-            client,
-            "browser_wait",
-            json!({ "condition": { "kind": "load_state", "state": state }, "timeout_ms": 500 }),
-        )
-        .await;
-        assert_error_code(
-            &wait,
-            ErrorCode::BrowserActionTimeout,
-            &format!("load_state {state} on a loaded page"),
-        );
+// ---------------------------------------------------------------------------
+// t08: getEnv list mode + bounded search smoke
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t08_getenv_list_and_search_smoke() {
+    let _done = DoneGuard;
+    let _guard = SERIAL.lock().await;
+    if !require_runtime("getenv_list_and_search_smoke") {
+        return;
     }
 
-    // RefHidden: after a reload the old generation is stale, and hidden holds
-    // immediately (documented fail-closed behavior).
-    let reload = call(client, "browser_navigate", json!({ "action": "reload" })).await;
-    assert_ok(&reload, "reload before ref_hidden");
-    let wait = call(
-        client,
-        "browser_wait",
-        json!({ "condition": { "kind": "ref_hidden", "ref_id": submit_ref }, "timeout_ms": 10000 }),
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
+    goto(&env, &wsl_fixture.url, None).await;
+
+    // List mode: names of set LP_* variables only. No secret LP_* variable
+    // is required to exist; a successful (possibly empty) list is the
+    // assertion.
+    let env_result = tc(&env, "browser_lightpanda_get_env", json!({})).await;
+    assert_ok(&env_result, "getEnv list mode");
+
+    // Bounded smoke: the native search tool must answer with a valid native
+    // result or a native error (e.g. rate limiting) — never a transport
+    // failure. Ranking/content is deliberately not asserted.
+    let search = tc(
+        &env,
+        "browser_lightpanda_search",
+        json!({ "query": "lightpanda headless browser", "timeout": 20000 }),
     )
     .await;
-    assert_ok(&wait, "browser_wait ref_hidden after reload");
-
-    close_browser(client, "browser_close").await;
+    let search_text = first_text(&search);
+    assert!(
+        !search_text.trim().is_empty(),
+        "search must return native content on either path: {}",
+        result_text(&search)
+    );
+    println!(
+        "search smoke: is_error={:?} (valid native result/error path)",
+        search.is_error
+    );
 }
 
 // ---------------------------------------------------------------------------
-// t08: console ring with level filtering
+// t09: lifecycle — Pause, disable, re-enable, process loss without replay
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t08_console_ring_levels() {
+async fn t09_lifecycle_pause_disable_and_process_loss_no_replay() {
+    let _done = DoneGuard;
     let _guard = SERIAL.lock().await;
-    if !require_runtime("console_ring_levels") {
+    if !require_runtime("lifecycle_pause_disable_and_process_loss_no_replay") {
         return;
     }
 
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    // Poll until the page's /api/ping fetch has resolved and logged.
-    let mut messages;
-    let deadline = Instant::now() + Duration::from_secs(15);
-    loop {
-        let console = call(
-            client,
-            "browser_console",
-            json!({ "level": "info", "limit": 200 }),
-        )
-        .await;
-        assert_ok(&console, "browser_console info");
-        messages = structured(&console)["messages"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if messages.contains("api-ping-complete") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "api-ping-complete never appeared in console:\n{messages}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-    assert!(
-        messages.contains("known-console-warning"),
-        "missing known-console-warning:\n{messages}"
-    );
-    assert!(
-        messages.contains("known-console-error"),
-        "missing known-console-error:\n{messages}"
-    );
-
-    // Level filter: error shows only errors.
-    let console = call(client, "browser_console", json!({ "level": "error" })).await;
-    assert_ok(&console, "browser_console error");
-    let out = structured(&console);
-    let errors = out["messages"].as_str().unwrap_or_default().to_string();
-    assert!(
-        errors.contains("known-console-error"),
-        "error level must include the error line:\n{errors}"
-    );
-    assert!(
-        !errors.contains("known-console-warning") && !errors.contains("api-ping-complete"),
-        "error level must exclude warning/info lines:\n{errors}"
-    );
-    let levels = out["levels"].as_object().expect("levels histogram");
-    assert!(
-        levels.get("error").and_then(Value::as_u64).unwrap_or(0) >= 1,
-        "levels histogram must count the error line: {levels:?}"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t09: degraded network/performance shape (never fabricated)
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t09_degraded_network_performance_shape() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("degraded_network_performance_shape") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    // First prove the page's /api/ping fetch really happened by waiting for
-    // its completion log in the console ring.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut messages;
-    loop {
-        let console = call(
-            client,
-            "browser_console",
-            json!({ "level": "info", "limit": 200 }),
-        )
-        .await;
-        assert_ok(&console, "browser_console info");
-        messages = structured(&console)["messages"]
-            .as_str()
-            .unwrap_or_default()
-            .to_string();
-        if messages.contains("api-ping-complete") {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "api-ping-complete never appeared in console:\n{messages}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-
-    // The pinned Lightpanda 0.3.7 records no Performance Resource Timing
-    // entries (verified against the pinned binary for fetch, img, script and
-    // link resources), so the truthful network output is empty — even though
-    // the fetch above demonstrably completed. The adapter must report the
-    // degraded coverage note and never fabricate requests or status fields.
-    let network = call(client, "browser_network", json!({ "limit": 200 })).await;
-    assert_ok(&network, "browser_network");
-    let out = structured(&network);
-    let requests = out["requests"].as_str().unwrap_or_default().to_string();
-    assert!(
-        requests.is_empty(),
-        "pinned runtime records no resource timing; nothing may be fabricated:\n{requests}"
-    );
-    assert_eq!(
-        out["count"].as_u64(),
-        Some(0),
-        "count must match the empty request list"
-    );
-    let coverage = out["coverage"].as_str().unwrap_or_default().to_string();
-    assert!(
-        coverage.contains("performance-resource-timing"),
-        "coverage must name the real data source: {coverage}"
-    );
-    assert!(
-        coverage.contains("method, status, and headers are not available"),
-        "coverage must state what is unavailable: {coverage}"
-    );
-    assert!(
-        !requests.contains("status="),
-        "timing lines must not fabricate status fields:\n{requests}"
-    );
-
-    // Performance: Lightpanda navigation timing, CDP honestly unsupported.
-    let perf = call(client, "browser_performance", json!({})).await;
-    assert_ok(&perf, "browser_performance");
-    let out = structured(&perf);
-    assert_eq!(out["backend"].as_str(), Some("lightpanda"));
-    assert_eq!(out["cdp_supported"], json!(false));
-    assert!(out["cdp"].is_null(), "cdp must be null, never fabricated");
-    assert!(
-        out["page"].as_str().map(str::len).unwrap_or(0) > 0,
-        "page timing section must be present"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t10: local trace artifact on disk
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t10_local_trace_artifact_on_disk() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("local_trace_artifact_on_disk") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    let start = call(client, "browser_trace", json!({ "action": "start" })).await;
-    assert_ok(&start, "browser_trace start");
-    assert_eq!(structured(&start)["tracing"], json!(true));
-
-    // Generate traced activity.
-    let snap = take_snapshot(client).await;
-    let submit_ref = find_ref(&snap, "Submit");
-    let click = call(client, "browser_click", json!({ "ref": submit_ref })).await;
-    assert_ok(&click, "traced click");
-
-    let stop = call(client, "browser_trace", json!({ "action": "stop" })).await;
-    assert_ok(&stop, "browser_trace stop");
-    let out = structured(&stop);
-    assert_eq!(out["tracing"], json!(false));
-    let artifact_id = out["artifact_id"]
-        .as_str()
-        .expect("artifact_id")
-        .to_string();
-    assert!(
-        artifact_id.starts_with("a-"),
-        "opaque artifact id: {artifact_id}"
-    );
-    assert_eq!(out["files"], json!(2), "events.jsonl + manifest.json");
-    assert!(out["bytes"].as_u64().unwrap() > 0, "trace bytes recorded");
-
-    // The artifact must resolve inside the active session's trace directory.
-    let session_id = current_session_id(client).await;
-    let trace_dir = env
-        .app_data_dir
-        .join("browser")
-        .join("artifacts")
-        .join(&session_id)
-        .join("traces");
-    let events_path = trace_dir.join("events.jsonl");
-    let manifest_path = trace_dir.join("manifest.json");
-    assert!(
-        events_path.is_file(),
-        "events.jsonl must exist: {}",
-        events_path.display()
-    );
-    assert!(
-        manifest_path.is_file(),
-        "manifest.json must exist: {}",
-        manifest_path.display()
-    );
-    let events_body = std::fs::read_to_string(&events_path).expect("read events.jsonl");
-    let event_lines: Vec<&str> = events_body.lines().filter(|l| !l.is_empty()).collect();
-    assert!(!event_lines.is_empty(), "trace events recorded");
-    assert!(
-        event_lines.iter().any(|line| line.contains("\"click\"")),
-        "trace must include the click event:\n{events_body}"
-    );
-    let manifest: Value =
-        serde_json::from_str(&std::fs::read_to_string(&manifest_path).expect("read manifest"))
-            .expect("manifest json");
-    assert_eq!(manifest["schema"], json!("lc-trace-v1"));
-    assert_eq!(
-        manifest["event_count"].as_u64().unwrap(),
-        event_lines.len() as u64
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t11: two page children and isolated crash
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t11_two_page_children_isolated_crash() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("two_page_children_isolated_crash") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-
-    open_url(client, &base).await;
-    let pages = tabs_list(client).await;
-    assert_eq!(pages.len(), 1);
-    let first_page = pages[0]["page_id"].as_str().unwrap().to_string();
-
-    let second_page = tabs_new(client, &base).await;
-    assert_ne!(first_page, second_page);
-
-    // One Lightpanda child per logical page: distinct OS pids.
-    let pid_first = env
+    let env = spawn_real(enabled_settings()).await;
+    let wsl_fixture = spawn_wsl_fixture().await;
+    goto(&env, &wsl_fixture.url, None).await;
+    let pid1 = env
         .browser
-        .test_page_child_pid(Some(&first_page))
+        .server_child_pid()
         .await
-        .expect("first page child pid");
-    let pid_second = env
-        .browser
-        .test_page_child_pid(Some(&second_page))
-        .await
-        .expect("second page child pid");
-    assert_ne!(
-        pid_first, pid_second,
-        "each page must own a separate child process"
-    );
+        .expect("server running after first call");
 
-    // Crash only the second page.
-    let killed = env
-        .browser
-        .test_terminate_page_child(Some(&second_page))
-        .await
-        .expect("kill second page child");
-    println!("terminated second page child pid {killed}");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Pause is authoritative: it stops the single server.
+    env.browser.on_pause_changed(true).await;
+    let status = env.browser.status().await;
+    assert!(!status.running, "pause must stop the native server");
+    assert!(env.browser.server_child_pid().await.is_none());
+    wait_process_dead(pid1, "paused server child").await;
 
-    // The lost page surfaces BROWSER_PROCESS_LOST...
-    tabs_select(client, &second_page).await;
-    let snap = call(client, "browser_snapshot", json!({})).await;
-    assert_error_code(
-        &snap,
-        ErrorCode::BrowserProcessLost,
-        "snapshot on lost page",
-    );
+    let paused = tc(&env, "browser_lightpanda_get_url", json!({})).await;
+    assert_error_code(&paused, ErrorCode::BrowserAutomationDisabled, "call while paused");
 
-    // ...while the sibling page keeps working.
-    tabs_select(client, &first_page).await;
-    let snap = take_snapshot(client).await;
-    assert!(snap.contains("Submit"), "sibling page snapshot works");
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t12: multi-page Web Storage: per-page, isolated, volatile
-//
-// The pinned Lightpanda 0.3.7 `mcp` mode rejects `--storage-engine` and
-// `--storage-sqlite-path` (verified against the pinned binary: "unknown
-// argument"), so Web Storage cannot be shared through SQLite. This scenario
-// pins the truthful behavior instead: storage works per page, is isolated
-// between page children, and does not survive a session restart.
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t12_multipage_storage_isolated_and_volatile() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("multipage_storage_isolated_and_volatile") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-
-    open_url(client, &base).await;
-    let pages = tabs_list(client).await;
-    let page_a = pages[0]["page_id"].as_str().unwrap().to_string();
-
-    // Storage works on page A. Reads are wrapped in JSON.stringify so string
-    // values keep their type against Lightpanda's bare-text evaluate output.
-    evaluate(client, "localStorage.clear()").await;
-    evaluate(client, "localStorage.setItem('k_a', 'A')").await;
-    assert_eq!(
-        evaluate(client, "JSON.stringify(localStorage.getItem('k_a'))").await,
-        json!("A")
-    );
-
-    // A brand-new page child starts with its own storage: it does not inherit
-    // page A's keys.
-    let page_b = tabs_new(client, &base).await;
-    assert!(
-        evaluate(client, "localStorage.getItem('k_a')")
-            .await
-            .is_null(),
-        "page B storage must be isolated from page A"
-    );
-    evaluate(client, "localStorage.setItem('k_b', 'B')").await;
-    assert_eq!(
-        evaluate(client, "JSON.stringify(localStorage.getItem('k_b'))").await,
-        json!("B")
-    );
-
-    // Interleaved burst writes from BOTH page children. Public MCP routes
-    // evaluate through the active page, so the writes interleave by selecting
-    // pages; every write must succeed and stay in its own page's storage.
-    for i in 0..5 {
-        tabs_select(client, &page_a).await;
-        let w = evaluate(
-            client,
-            &format!("localStorage.setItem('k_a_{i}', '{i}'); 'ok'"),
-        )
-        .await;
-        assert_eq!(w, json!("ok"), "page A burst write {i}");
-        tabs_select(client, &page_b).await;
-        let w = evaluate(
-            client,
-            &format!("localStorage.setItem('k_b_{i}', '{i}'); 'ok'"),
-        )
-        .await;
-        assert_eq!(w, json!("ok"), "page B burst write {i}");
-    }
-
-    // Each page reads back its own writes and never sees the sibling's.
-    tabs_select(client, &page_a).await;
-    assert_eq!(
-        evaluate(client, "JSON.stringify(localStorage.getItem('k_a_4'))").await,
-        json!("4")
-    );
-    assert!(
-        evaluate(client, "localStorage.getItem('k_b_4')")
-            .await
-            .is_null(),
-        "page A must not see page B's keys"
-    );
-    tabs_select(client, &page_b).await;
-    assert_eq!(
-        evaluate(client, "JSON.stringify(localStorage.getItem('k_b_4'))").await,
-        json!("4")
-    );
-    assert!(
-        evaluate(client, "localStorage.getItem('k_a_4')")
-            .await
-            .is_null(),
-        "page B must not see page A's keys"
-    );
-
-    // Volatile: after a session restart, storage starts empty.
-    close_browser(client, "browser_close before reopen").await;
-    open_url(client, &base).await;
-    assert!(
-        evaluate(client, "localStorage.getItem('k_a')")
-            .await
-            .is_null(),
-        "storage must not persist across sessions on the pinned runtime"
-    );
-    assert!(
-        evaluate(client, "localStorage.getItem('k_b_4')")
-            .await
-            .is_null(),
-        "burst writes must not persist across sessions on the pinned runtime"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t13: cookie persistence and documented non-live sibling behavior
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t13_cookie_persistence_non_live_sibling() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("cookie_persistence_non_live_sibling") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-    let cookie = format!("live13_{}", std::process::id());
-
-    open_url(client, &base).await;
-    let pages = tabs_list(client).await;
-    let page_a = pages[0]["page_id"].as_str().unwrap().to_string();
-
-    // Page B is seeded from the canonical snapshot BEFORE the cookie exists.
-    let page_b = tabs_new(client, &base).await;
-
-    // Page A sets the cookie; it sees it immediately.
-    tabs_select(client, &page_a).await;
-    evaluate(
-        client,
-        &format!("document.cookie = '{cookie}=1; path=/'; 'set'"),
-    )
-    .await;
-    let visible = evaluate_str(client, "() => document.cookie").await;
-    assert!(
-        visible.contains(&cookie),
-        "page A must see its own cookie: {visible}"
-    );
-
-    // Documented non-live sibling behavior: the already-running page B keeps
-    // its spawn-time jar and does NOT see cookies set later by a sibling.
-    tabs_select(client, &page_b).await;
-    let sibling = evaluate_str(client, "() => document.cookie").await;
-    assert!(
-        !sibling.contains(&cookie),
-        "running sibling must not live-receive page A's cookie: {sibling}"
-    );
-
-    // Closing A merges its exit jar into the canonical snapshot...
-    tabs_close(client, &page_a).await;
-
-    // ...so a brand-new page C is seeded with the cookie.
-    let _page_c = tabs_new(client, &base).await;
-    let inherited = evaluate_str(client, "() => document.cookie").await;
-    assert!(
-        inherited.contains(&cookie),
-        "new page must inherit the merged canonical cookie jar: {inherited}"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t14: stale refs after navigation/reload and after DOM mutation
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t14_stale_refs_after_navigation_and_mutation() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("stale_refs_after_navigation_and_mutation") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-
-    // After a reload the generation bumps: old refs fail closed.
-    let snap = take_snapshot(client).await;
-    let submit_ref = find_ref(&snap, "Submit");
-    let reload = call(client, "browser_navigate", json!({ "action": "reload" })).await;
-    assert_ok(&reload, "reload");
-    let click = call(client, "browser_click", json!({ "ref": submit_ref })).await;
-    assert_error_code(&click, ErrorCode::BrowserStaleRef, "click after reload");
-
-    // DOM mutation without navigation: the rerender button replaces the
-    // subtree. Trigger it via evaluate so the ref table is untouched, then a
-    // ref to the replaced node must fail via nodeDetails-gone.
-    let snap = take_snapshot(client).await;
-    let inner_ref = find_ref(&snap, "Inner");
-    let rerender = evaluate(
-        client,
-        "() => { document.getElementById('rerender-btn').click(); return 'rerendered'; }",
-    )
-    .await;
-    assert_eq!(rerender, json!("rerendered"));
-    let markdown = call(client, "browser_markdown", json!({ "ref": inner_ref })).await;
-    assert_error_code(
-        &markdown,
-        ErrorCode::BrowserStaleRef,
-        "ref to a replaced node",
-    );
-
-    // The node-gone failure invalidates the whole generation: every older ref
-    // is now stale, even one pointing at a still-existing node.
-    let snap_before = snap.clone();
-    let rerender_ref = find_ref(&snap_before, "Rerender");
-    let click = call(client, "browser_click", json!({ "ref": rerender_ref })).await;
-    assert_error_code(
-        &click,
-        ErrorCode::BrowserStaleRef,
-        "generation invalidated after node-gone",
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t15: crash before an ambiguous click -> zero replay
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t15_crash_no_replay_side_effect_counter() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("crash_no_replay_side_effect_counter") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-
-    open_url(client, &wf.url).await;
-    let baseline = fixture_count(&wf.fixture).await;
-
-    // One real side-effecting click; the out-of-band counter proves it ran.
-    let snap = take_snapshot(client).await;
-    let count_ref = find_ref(&snap, "Count");
-    let click = call(client, "browser_click", json!({ "ref": count_ref })).await;
-    assert_ok(&click, "first count click");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && fixture_count(&wf.fixture).await < baseline + 1 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    assert_eq!(
-        fixture_count(&wf.fixture).await,
-        baseline + 1,
-        "first click executed exactly once"
-    );
-
-    // Fresh ref (the click invalidated the previous generation), then crash.
-    let snap = take_snapshot(client).await;
-    let count_ref = find_ref(&snap, "Count");
-    let killed = env
-        .browser
-        .test_terminate_page_child(None)
-        .await
-        .expect("kill active page child");
-    println!("terminated active page child pid {killed}");
-    tokio::time::sleep(Duration::from_millis(1000)).await;
-
-    // The ambiguous second click must fail with BROWSER_PROCESS_LOST...
-    let replayed = call(client, "browser_click", json!({ "ref": count_ref })).await;
-    assert_error_code(
-        &replayed,
-        ErrorCode::BrowserProcessLost,
-        "ambiguous click after crash",
-    );
-
-    // ...and must never be replayed against a restarted process.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(
-        fixture_count(&wf.fixture).await,
-        baseline + 1,
-        "side-effecting click must never be replayed after process loss"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t16: unsupported tools fail closed with zero side effects
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t16_unsupported_tools_zero_side_effects() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("unsupported_tools_zero_side_effects") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-
-    open_url(client, &base).await;
-    let count_before = fixture_count(&wf.fixture).await;
-    let url_before = tabs_list(client)
-        .await
-        .into_iter()
-        .find(|p| p["active"].as_bool().unwrap_or(false))
-        .expect("active page")["url"]
-        .as_str()
-        .unwrap()
-        .to_string();
-
-    let unsupported: [(&str, Value); 8] = [
-        ("browser_screenshot", json!({ "mode": "viewport" })),
-        (
-            "browser_set_viewport",
-            json!({ "width": 800, "height": 600 }),
-        ),
-        (
-            "browser_emulate_device",
-            json!({ "emulation": { "source": "preset", "name": "iphone-x" } }),
-        ),
-        ("browser_dialog", json!({ "accept": true })),
-        ("browser_upload", json!({ "sources": [] })),
-        ("browser_downloads", json!({})),
-        (
-            "browser_save_download_to_workspace",
-            json!({ "workspace_id": "w", "download_id": "d", "path": "p" }),
-        ),
-        ("browser_devtools", json!({})),
-    ];
-    for (tool, args) in unsupported {
-        let result = call(client, tool, args).await;
-        assert_error_code(
-            &result,
-            ErrorCode::BrowserFeatureUnsupported,
-            &format!("{tool} must fail closed"),
-        );
-    }
-
-    // Zero side effects: no fixture actions, no navigation, page still usable.
-    assert_eq!(
-        fixture_count(&wf.fixture).await,
-        count_before,
-        "unsupported tools must not trigger fixture side effects"
-    );
-    let url_after = tabs_list(client)
-        .await
-        .into_iter()
-        .find(|p| p["active"].as_bool().unwrap_or(false))
-        .expect("active page")["url"]
-        .as_str()
-        .unwrap()
-        .to_string();
-    assert_eq!(url_after, url_before, "unsupported tools must not navigate");
-    let snap = take_snapshot(client).await;
-    assert!(
-        snap.contains("Submit"),
-        "page remains usable after rejections"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t17: pause and disable terminate all page children
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t17_pause_and_disable_terminate_children() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("pause_and_disable_terminate_children") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-
-    // Two live pages.
-    open_url(client, &base).await;
-    let pages = tabs_list(client).await;
-    let first_page = pages[0]["page_id"].as_str().unwrap().to_string();
-    let second_page = tabs_new(client, &base).await;
-    let pid_first = env
-        .browser
-        .test_page_child_pid(Some(&first_page))
-        .await
-        .expect("first pid");
-    let pid_second = env
-        .browser
-        .test_page_child_pid(Some(&second_page))
-        .await
-        .expect("second pid");
-
-    // Pause: the desktop kill switch path (pause flag + on_pause_changed)
-    // must terminate EVERY page child.
-    env.core.pause.set(true);
-    env.browser
-        .on_pause_changed(true)
-        .await
-        .expect("pause shutdown");
-    wait_process_dead(pid_first, "first page child after pause").await;
-    wait_process_dead(pid_second, "second page child after pause").await;
-
-    // While paused, browser tools fail closed.
-    let snap = call(client, "browser_snapshot", json!({})).await;
-    assert_error_code(&snap, ErrorCode::AccessPaused, "snapshot while paused");
-
-    // Unpause and start a fresh session for the disable half.
-    env.core.pause.set(false);
-    env.browser.on_pause_changed(false).await.expect("resume");
-    open_url(client, &base).await;
-    let pid_third = env
-        .browser
-        .test_page_child_pid(None)
-        .await
-        .expect("third pid");
-
-    // Disable Browser Automation through the settings path: running children
-    // must be terminated.
+    // Unpaused but disabled: calls fail closed and never restart the server.
+    env.browser.on_pause_changed(false).await;
     env.browser
         .apply_settings(BrowserRuntimeSettings { enabled: false })
-        .await
-        .expect("disable settings");
-    wait_process_dead(pid_third, "page child after disable").await;
-
-    let open = call(client, "browser_open", json!({ "url": base })).await;
+        .await;
+    let disabled = tc(&env, "browser_lightpanda_get_url", json!({})).await;
     assert_error_code(
-        &open,
+        &disabled,
         ErrorCode::BrowserAutomationDisabled,
-        "open while disabled",
+        "call while disabled",
+    );
+    assert!(
+        !env.browser.status().await.running,
+        "disabled Browser Automation must not restart the server"
     );
 
-    // Re-enable so the environment ends in the default state.
+    // Re-enable allows a lazy restart on the next independent call.
     env.browser
         .apply_settings(BrowserRuntimeSettings { enabled: true })
+        .await;
+    goto(&env, &wsl_fixture.url, None).await;
+    let pid2 = env
+        .browser
+        .server_child_pid()
         .await
-        .expect("re-enable settings");
-    close_browser(client, "browser_close").await;
-}
+        .expect("server restarted after re-enable");
 
-// ---------------------------------------------------------------------------
-// t18: reset clears only owned browser data
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t18_reset_clears_only_owned_browser_data() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("reset_clears_only_owned_browser_data") {
-        return;
-    }
-
-    let wf = spawn_wsl_fixture().await;
-    let env = spawn_real(background_settings()).await;
-    let client = &env.client;
-    let base = wf.url.clone();
-
-    // Seed storage + cookies.
-    open_url(client, &base).await;
-    evaluate(client, "localStorage.setItem('reset_k', 'v')").await;
-    evaluate(client, "document.cookie = 'reset18=1; path=/'; 'set'").await;
-    close_browser(client, "browser_close before reset").await;
-
-    // Reset only the app-owned browser data directories.
-    env.runtime
-        .reset_browser_data()
-        .await
-        .expect("reset owned browser data");
-
-    // Distro, binary, and runtime state survive the reset.
-    let snapshot = env.runtime.state_snapshot().expect("state snapshot");
-    assert_eq!(snapshot.state, RuntimeProvisionState::Ready);
-    let distro = snapshot.distro.expect("distro survives reset");
-    assert!(
-        wsl_distro_registered(&distro.distro_name),
-        "distro must stay registered after reset"
-    );
-
-    // A fresh session starts with empty data (and proves the Lightpanda
-    // binary still runs).
-    open_url(client, &base).await;
-    assert!(
-        evaluate(client, "localStorage.getItem('reset_k')")
-            .await
-            .is_null(),
-        "localStorage must be empty after reset"
-    );
-    let cookies = evaluate_str(client, "() => document.cookie").await;
-    assert!(
-        !cookies.contains("reset18"),
-        "cookies must be empty after reset: {cookies}"
-    );
-
-    close_browser(client, "browser_close").await;
-}
-
-// ---------------------------------------------------------------------------
-// t19: remove refuses ownership marker / install-ID mismatch
-// ---------------------------------------------------------------------------
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn t19_remove_refuses_ownership_mismatch() {
-    let _guard = SERIAL.lock().await;
-    if !require_runtime("remove_refuses_ownership_mismatch") {
-        return;
-    }
-
-    // Ensure the real app-owned distro exists.
-    let prod = production_runtime();
-    prod.ensure_runtime().await.expect("runtime ready");
-    let real = prod.distro_identity().expect("real distro identity");
-
-    // A rogue manager whose persisted state CLAIMS the real distro name but
-    // carries a foreign install id. Its remove_runtime must fail closed on
-    // the ownership marker mismatch and leave the real distro untouched.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let wsl_dir = tmp.path().join("wsl");
-    std::fs::create_dir_all(&wsl_dir).expect("create wsl dir");
-    let seeded = json!({
-        "state": "ready",
-        "install_id": "deadbeef",
-        "distro": {
-            "distro_name": real.distro_name,
-            "install_id": "deadbeef",
-            "install_dir": wsl_dir.join(&real.distro_name),
-        },
-        "distro_image_version": null,
-        "lightpanda_version": "0.3.7",
-        "reason": null
-    });
-    std::fs::write(
-        wsl_dir.join(RUNTIME_STATE_FILE),
-        serde_json::to_string_pretty(&seeded).unwrap(),
+    // Baseline side effect: exactly one Count click reaches the fixture.
+    let click = tc(
+        &env,
+        "browser_lightpanda_click",
+        json!({ "selector": "#count-btn" }),
     )
-    .expect("seed rogue state file");
+    .await;
+    assert_ok(&click, "count click before process loss");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while fixture_count(&wsl_fixture.fixture).await < 1 {
+        assert!(
+            Instant::now() < deadline,
+            "count click never reached the fixture"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 
-    let rogue = BrowserRuntimeManager::new(
-        Arc::new(RealWslCommandRunner),
-        Arc::new(HttpsRuntimeDownloader::new().expect("downloader")),
-        Arc::new(RealRuntimeContractVerifier::new(PathBuf::from("wsl.exe"))),
-        RuntimeManifest::from_json_str(&manifest_json()).expect("manifest"),
-        tmp.path().to_path_buf(),
-    );
-    assert_eq!(
-        rogue.current_state(),
-        RuntimeProvisionState::Ready,
-        "rogue manager must load the seeded state file"
-    );
-
-    let error = rogue
-        .remove_runtime()
-        .await
-        .expect_err("remove must fail closed on ownership mismatch");
-    assert_eq!(
-        error.code,
-        ErrorCode::BrowserWslDistroConflict,
-        "ownership mismatch must surface BROWSER_WSL_DISTRO_CONFLICT: {error}"
-    );
-
-    // The real distro is untouched: still registered, install dir intact,
-    // production state still Ready.
+    // Induce process death out-of-band, then verify the interrupted call
+    // fails and is NEVER replayed by the lazy restart.
+    kill_pid(pid2);
+    wait_process_dead(pid2, "killed server child").await;
+    let lost = tc(
+        &env,
+        "browser_lightpanda_click",
+        json!({ "selector": "#count-btn" }),
+    )
+    .await;
     assert!(
-        wsl_distro_registered(&real.distro_name),
-        "real distro must remain registered"
-    );
-    assert!(
-        real.install_dir.exists(),
-        "real install dir must remain intact: {}",
-        real.install_dir.display()
+        lost.is_error.unwrap_or(false),
+        "call against a dead server must fail: {}",
+        result_text(&lost)
     );
     assert_eq!(
-        prod.state_snapshot().expect("prod snapshot").state,
-        RuntimeProvisionState::Ready
+        fixture_count(&wsl_fixture.fixture).await,
+        1,
+        "the failed click must not be replayed against the fixture"
+    );
+
+    // The next independent call lazily starts a fresh server. A fresh
+    // default session has no page loaded yet, so the restart call is a goto
+    // (get_url would correctly report FrameNotLoaded on the new session).
+    goto(&env, &wsl_fixture.url, None).await;
+    assert!(
+        env.browser.server_child_pid().await.is_some(),
+        "a fresh server child must run after restart"
+    );
+    assert_eq!(
+        fixture_count(&wsl_fixture.fixture).await,
+        1,
+        "restart itself must not replay any interrupted call"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// t10: the coverage table equals the exact 31 public native tools
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn t10_coverage_table_is_exact_native_31() {
+    if !require_runtime("coverage_table_is_exact_native_31") {
+        return;
+    }
+
+    // Wait until every runtime test has finished (they serialize on SERIAL;
+    // this loop makes the assertion independent of scheduling order).
+    let covered = loop {
+        {
+            let _guard = SERIAL.lock().await;
+            if RUNTIME_TESTS_DONE.load(Ordering::SeqCst) >= RUNTIME_TEST_COUNT {
+                break COVERAGE
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .clone();
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+
+    let expected: BTreeSet<&'static str> = NATIVE_TOOL_MAPPINGS
+        .iter()
+        .map(|(_, public)| *public)
+        .collect();
+    assert_eq!(
+        expected.len(),
+        EXPECTED_NATIVE_TOOL_COUNT,
+        "contract mapping must define exactly 31 public tools"
+    );
+    let missing: Vec<_> = expected.difference(&covered).collect();
+    let unexpected: Vec<_> = covered.difference(&expected).collect();
+    assert!(
+        missing.is_empty() && unexpected.is_empty(),
+        "31-tool coverage mismatch.\nmissing: {missing:?}\nunexpected: {unexpected:?}"
+    );
+    println!(
+        "native tool coverage: {}/{} public browser_lightpanda tools called by the suite",
+        covered.len(),
+        EXPECTED_NATIVE_TOOL_COUNT
     );
 }
