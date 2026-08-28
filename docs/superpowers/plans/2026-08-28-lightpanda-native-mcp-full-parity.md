@@ -1,6 +1,6 @@
 # Lightpanda Native MCP Full Parity Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Replace the current 39-tool Playwright-shaped Browser Automation compatibility layer with exactly 31 `browser_lightpanda_*` tools that expose the full native Lightpanda 0.3.7 MCP tool surface over one private HTTP MCP server with native sessions.
 
@@ -90,7 +90,7 @@ Do not delete a file until `search_text`/compiler evidence shows it has no remai
 - Produces: `pub fn verify_discovered_tools(discovered: &[rmcp::model::Tool]) -> Result<(), CoreError>`; this function compares exact names and input schemas to the pinned snapshot.
 - Consumed by Tasks 2, 3, 5, 6, 9, and 11.
 
-- [ ] **Step 1: Write the contract tests first**
+- [x] **Step 1: Write the contract tests first**
 
 Add unit tests that make the target contract explicit before creating the resource:
 
@@ -125,7 +125,7 @@ fn mapping_is_one_to_one_and_uses_only_browser_lightpanda_prefix() {
 }
 ```
 
-- [ ] **Step 2: Run the contract tests and verify they fail because the module/resource does not exist yet**
+- [x] **Step 2: Run the contract tests and verify they fail because the module/resource does not exist yet**
 
 Run:
 
@@ -135,7 +135,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::contract::tests -- --no
 
 Expected: compile/test failure referencing missing `browser::contract`, `pinned_contract`, or contract resource.
 
-- [ ] **Step 3: Add the reviewed contract resource with the exact 31 upstream schemas**
+- [x] **Step 3: Add the reviewed contract resource with the exact 31 upstream schemas**
 
 Create `src-tauri/resources/lightpanda-mcp-contract-0.3.7.json` in this shape:
 
@@ -165,7 +165,7 @@ Create `src-tauri/resources/lightpanda-mcp-contract-0.3.7.json` in this shape:
 
 Populate all 31 entries from the pinned binary `tools/list`; do not synthesize fields from the old compatibility structs. Preserve each descriptor's `description` and `inputSchema`. Record/verify that pinned `0.3.7` advertises `outputSchema` on **0 of 31** descriptors. Within input schemas preserve property names, types, required arrays, enum values, and advertised defaults, including `getCookies.all=false` and `setChecked.checked=true` while `checked` remains required.
 
-- [ ] **Step 4: Implement contract parsing and schema normalization**
+- [x] **Step 4: Implement contract parsing and schema normalization**
 
 Use a narrow model that preserves JSON schemas verbatim:
 
@@ -210,7 +210,7 @@ pub fn pinned_contract() -> Result<LightpandaMcpContract, CoreError> {
 
 Normalize only semantically irrelevant JSON object key ordering before comparing discovered schemas. Do not discard `required`, `enum`, or `default`.
 
-- [ ] **Step 5: Add the exact public mapping constant**
+- [x] **Step 5: Add the exact public mapping constant**
 
 The mapping must contain exactly the 31 pairs from the spec, including camelCase-to-snake-case public naming transformations such as:
 
@@ -252,7 +252,7 @@ pub const NATIVE_TOOL_MAPPINGS: &[(&str, &str)] = &[
 
 The tests above enforce count and uniqueness so a missing, duplicate, or renamed pair fails immediately.
 
-- [ ] **Step 6: Add static repository verification**
+- [x] **Step 6: Add static repository verification**
 
 Create `scripts/verify-lightpanda-mcp-contract.py` that reads the JSON snapshot, asserts `lightpanda_version == "0.3.7"`, `tool_count == 31`, exact expected name set, unique names, and rejects any property named `session_id` in an upstream input schema because that would conflict with Local Workspaces routing metadata.
 
@@ -262,7 +262,7 @@ Add to `package.json`:
 "verify:lightpanda-contract": "python scripts/verify-lightpanda-mcp-contract.py"
 ```
 
-- [ ] **Step 7: Run targeted verification**
+- [x] **Step 7: Run targeted verification**
 
 Run:
 
@@ -273,7 +273,7 @@ npm run verify:lightpanda-contract
 
 Expected: both exit 0; verifier prints Lightpanda 0.3.7, 31 expected tools, and no `session_id` collision.
 
-- [ ] **Step 8: Commit the contract gate**
+- [x] **Step 8: Commit the contract gate**
 
 ```bash
 git add src-tauri/resources/lightpanda-mcp-contract-0.3.7.json src-tauri/src/browser/contract.rs src-tauri/src/browser/mod.rs scripts/verify-lightpanda-mcp-contract.py package.json
@@ -298,7 +298,7 @@ git commit -m "test(browser): freeze Lightpanda MCP contract"
 - Produces: `pub async fn call_tool(&self, tool: &str, arguments: Map<String, Value>, session_id: Option<&str>) -> Result<UpstreamToolResponse, CoreError>`
 - Consumed by Tasks 3 and 4.
 
-- [ ] **Step 1: Write failing tests for the default bootstrap header and named session routing**
+- [x] **Step 1: Write failing tests for the default bootstrap header and named session routing**
 
 Use an in-process Axum fake `/mcp` endpoint that records headers and JSON-RPC bodies. The first tests must assert:
 
@@ -316,7 +316,7 @@ client.call_tool("getUrl", Map::new(), Some("alpha")).await.unwrap();
 assert_eq!(last_seen_session(), Some("alpha"));
 ```
 
-- [ ] **Step 2: Write failing validation tests for header injection**
+- [x] **Step 2: Write failing validation tests for header injection**
 
 Cover empty, over-256-byte, CR, LF, NUL, and other ASCII control characters:
 
@@ -330,7 +330,7 @@ assert!(validate_session_id(&"x".repeat(256)).is_ok());
 assert!(validate_session_id(&"x".repeat(257)).is_err());
 ```
 
-- [ ] **Step 3: Write failing response-framing and error tests**
+- [x] **Step 3: Write failing response-framing and error tests**
 
 The fake server must cover:
 
@@ -347,7 +347,7 @@ JSON-RPC error { code:-32604, message:"FrameNotLoaded..." }
 
 Assert a valid JSON-RPC error becomes `UpstreamToolResponse::JsonRpcError` rather than `CoreError::BrowserProtocolError`.
 
-- [ ] **Step 4: Run the transport tests and confirm red state**
+- [x] **Step 4: Run the transport tests and confirm red state**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::http::tests -- --nocapture
@@ -355,7 +355,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::http::tests -- --nocapt
 
 Expected: compile/test failure because `LightpandaHttpClient` does not exist.
 
-- [ ] **Step 5: Implement the client without `rmcp::StreamableHttpClientTransport`**
+- [x] **Step 5: Implement the client without `rmcp::StreamableHttpClientTransport`**
 
 Use a dedicated `reqwest::Client` because Local Workspaces, not a generic MCP client transport, must select the native browsing session per request:
 
@@ -380,7 +380,7 @@ fn effective_session_id(session_id: Option<&str>) -> Result<&str, CoreError> {
 
 Build the client with redirects disabled, bounded connect/request timeout, and a loopback endpoint only.
 
-- [ ] **Step 6: Implement strict request/response handling**
+- [x] **Step 6: Implement strict request/response handling**
 
 Every request must set:
 
@@ -392,7 +392,7 @@ Mcp-Session-Id: <effective session>
 
 Maintain monotonically increasing JSON-RPC IDs for request/response methods; notifications have no ID. Treat ID mismatch, invalid envelope, invalid SSE framing, and malformed JSON as `BROWSER_PROTOCOL_ERROR`. Never retry automatically.
 
-- [ ] **Step 7: Preserve native tool-level errors**
+- [x] **Step 7: Preserve native tool-level errors**
 
 For `tools/call`:
 
@@ -409,7 +409,7 @@ pub enum UpstreamToolResponse {
 
 Deserialize a successful `result` to `CallToolResult` without compatibility reshaping. Keep valid native JSON-RPC `error.code/message/data` separate from malformed protocol errors.
 
-- [ ] **Step 8: Run the complete transport test module**
+- [x] **Step 8: Run the complete transport test module**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::http::tests -- --nocapture
@@ -417,7 +417,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::http::tests -- --nocapt
 
 Expected: all default-header, named-session, SSE, timeout, error-preservation, and no-replay tests pass.
 
-- [ ] **Step 9: Commit the transport**
+- [x] **Step 9: Commit the transport**
 
 ```bash
 git add src-tauri/src/browser/http.rs src-tauri/src/browser/mod.rs
@@ -442,7 +442,7 @@ git commit -m "feat(browser): add native Lightpanda HTTP transport"
 - Preserves: `BrowserRuntimeManager::ensure_runtime`, `repair_runtime`, `reset_browser_data`, `remove_runtime`, `manifest`, `distro_identity`.
 - Consumed by Task 4.
 
-- [ ] **Step 1: Write a failing WSL command-shape test for the HTTP server**
+- [x] **Step 1: Write a failing WSL command-shape test for the HTTP server**
 
 The expected app-owned launch must include WSL `--cd` before `--` and Lightpanda private HTTP flags after `mcp`:
 
@@ -466,7 +466,7 @@ assert_eq!(args, vec![
 
 Also assert `LIGHTPANDA_DISABLE_TELEMETRY=true` and `LIGHTPANDA_DISABLE_CORE_DUMP=1` remain set.
 
-- [ ] **Step 2: Write failing runtime-directory/reset tests for PandaScripts**
+- [x] **Step 2: Write failing runtime-directory/reset tests for PandaScripts**
 
 Assert provisioning creates:
 
@@ -476,7 +476,7 @@ Assert provisioning creates:
 
 and Reset Browser Data removes/recreates only profile/cookies/cache/artifacts, never `pandascripts`.
 
-- [ ] **Step 3: Replace restricted-tool smoke tests with full-contract HTTP verification tests**
+- [x] **Step 3: Replace restricted-tool smoke tests with full-contract HTTP verification tests**
 
 The test verifier must reject:
 
@@ -488,7 +488,7 @@ The test verifier must reject:
 
 and accept only exact 31-tool equality. Add a regression assertion that `initialize.serverInfo.version = "0.1.0"` does not fail a runtime whose manifest/binary version is `0.3.7`.
 
-- [ ] **Step 4: Run runtime/WSL tests and confirm failures**
+- [x] **Step 4: Run runtime/WSL tests and confirm failures**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::wsl::tests -- --nocapture
@@ -497,11 +497,11 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::runtime::tests -- --noc
 
 Expected: failures referencing old stdio command shape/restricted 26-tool smoke verifier.
 
-- [ ] **Step 5: Add fixed HTTP launch helpers**
+- [x] **Step 5: Add fixed HTTP launch helpers**
 
 Replace the page-oriented builder with `build_lightpanda_http_command(wsl_exe: &Path, distro_name: &str, port: u16) -> Result<std::process::Command, CoreError>`. It must set the fixed WSL working directory, fixed Lightpanda HTTP/cache/cookie argv, telemetry/core-dump environment hardening, and only format the app-selected `u16` port as a decimal argv element. Runtime verification and the production native service both use this exact builder; no stdio/page launch builder remains after Task 8.
 
-- [ ] **Step 6: Update runtime directory fragments**
+- [x] **Step 6: Update runtime directory fragments**
 
 Change the provisioning fragment to create and chown:
 
@@ -515,7 +515,7 @@ pandascripts
 
 Keep Reset Browser Data intentionally excluding `pandascripts` from `rm -rf`.
 
-- [ ] **Step 7: Replace `REQUIRED_NATIVE_TOOLS` and stdio `RealMcpSmokeVerifier`**
+- [x] **Step 7: Replace `REQUIRED_NATIVE_TOOLS` and stdio `RealMcpSmokeVerifier`**
 
 Use the Task 1 contract resource as the only native-tool authority. Rename `McpSmokeVerifier` to `RuntimeContractVerifier` and `RealMcpSmokeVerifier` to `RealRuntimeContractVerifier` with this exact interface:
 
@@ -528,7 +528,7 @@ pub trait RuntimeContractVerifier: Send + Sync {
 
 The production verifier starts a temporary private HTTP Lightpanda server on an app-selected port, verifies Windows loopback reachability, initializes on `default`, verifies no bootstrap-generated session pollution, compares all 31 tools/schemas, then terminates its own child. It must not use `initialize.serverInfo.version` for the binary version gate.
 
-- [ ] **Step 8: Preserve the existing binary integrity/version gate**
+- [x] **Step 8: Preserve the existing binary integrity/version gate**
 
 Keep `ensure_lightpanda` verifying:
 
@@ -539,7 +539,7 @@ lightpanda version == manifest.lightpanda_version == 0.3.7
 
 Do not weaken the existing repair behavior or WSL ownership checks.
 
-- [ ] **Step 9: Run targeted runtime verification**
+- [x] **Step 9: Run targeted runtime verification**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::wsl::tests -- --nocapture
@@ -550,7 +550,7 @@ npm run verify:lightpanda-contract
 
 Expected: exit 0.
 
-- [ ] **Step 10: Commit runtime transport prerequisites**
+- [x] **Step 10: Commit runtime transport prerequisites**
 
 ```bash
 git add src-tauri/src/browser/wsl.rs src-tauri/src/browser/runtime.rs src-tauri/src/browser/mod.rs
@@ -574,7 +574,7 @@ git commit -m "refactor(browser): provision Lightpanda HTTP MCP runtime"
 - Produces: `LightpandaNativeService::{new, apply_settings, status, stop, on_pause_changed}`.
 - Consumed by Tasks 6 and 7.
 
-- [ ] **Step 1: Write failing service tests for lazy single-process startup**
+- [x] **Step 1: Write failing service tests for lazy single-process startup**
 
 Use fake runtime/launcher/HTTP seams to assert:
 
@@ -590,7 +590,7 @@ assert_eq!(launch_count(), 1);
 
 No public `open`/`close`/tab concept should appear in this service.
 
-- [ ] **Step 2: Write failing lifecycle tests**
+- [x] **Step 2: Write failing lifecycle tests**
 
 Cover:
 
@@ -603,7 +603,7 @@ next independent call may start a fresh server
 failed call is never automatically replayed
 ```
 
-- [ ] **Step 3: Write failing session-lock tests**
+- [x] **Step 3: Write failing session-lock tests**
 
 Same native session must serialize mutations; different sessions may run concurrently. Use weak keyed locks so arbitrary failed session IDs do not permanently grow the map:
 
@@ -622,7 +622,7 @@ fn lock_for_session(&self, id: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 Session-control calls use a separate global async mutex and always route over `default`.
 
-- [ ] **Step 4: Run the Lightpanda service tests and confirm they fail against the old page driver**
+- [x] **Step 4: Run the Lightpanda service tests and confirm they fail against the old page driver**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::lightpanda::tests -- --nocapture
@@ -630,7 +630,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::lightpanda::tests -- --
 
 Expected: compile failures for missing `LightpandaNativeService`/`BrowserNativeCaller`.
 
-- [ ] **Step 5: Define the server-facing native caller seam**
+- [x] **Step 5: Define the server-facing native caller seam**
 
 Use the exact native argument/result seam:
 
@@ -648,7 +648,7 @@ pub trait BrowserNativeCaller: Send + Sync {
 
 The trait intentionally does not expose lifecycle methods to MCP handlers.
 
-- [ ] **Step 6: Implement `LightpandaNativeService` lifecycle**
+- [x] **Step 6: Implement `LightpandaNativeService` lifecycle**
 
 The concrete service owns:
 
@@ -665,15 +665,15 @@ session-control mutex
 
 `ensure_running` performs the runtime gate, selects a port, starts the server, waits for Windows loopback reachability, initializes on `default`, verifies tools/schemas, verifies `session_list` did not gain a hidden bootstrap session, then publishes the running state atomically.
 
-- [ ] **Step 7: Implement stop behavior with a bounded graceful attempt**
+- [x] **Step 7: Implement stop behavior with a bounded graceful attempt**
 
 Add/use an app-owned fixed WSL signal path (`pkill -TERM -x lightpanda` is available in the managed distro and contains no model/user input), wait a short fixed deadline for the managed `wsl.exe` child to exit, then fall back to the existing JobHandle/process kill containment. Never kill or unregister a foreign distro; ownership remains checked by runtime management.
 
-- [ ] **Step 8: Preserve native errors/results and no replay**
+- [x] **Step 8: Preserve native errors/results and no replay**
 
 `call_native` must return `UpstreamToolResponse::Result` or `JsonRpcError` unchanged from Task 2. Connection loss marks the running instance unhealthy and returns immediately. Do not inspect native error text to translate it into Playwright-era stale-ref/target-not-found errors.
 
-- [ ] **Step 9: Shrink browser runtime types**
+- [x] **Step 9: Shrink browser runtime types**
 
 Keep only types needed by settings/lifecycle, including:
 
@@ -686,7 +686,7 @@ pub struct BrowserRuntimeSettings {
 
 Remove page/tab/emulation/download/image compatibility types only after their callers are migrated in later tasks; if a temporary compile dependency remains, defer that specific deletion to Task 8.
 
-- [ ] **Step 10: Run service tests**
+- [x] **Step 10: Run service tests**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::lightpanda::tests -- --nocapture
@@ -694,7 +694,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::lightpanda::tests -- --
 
 Expected: lazy startup, single process, stop/disable/Pause, session serialization, process loss, and no-replay tests all pass.
 
-- [ ] **Step 11: Commit the native service**
+- [x] **Step 11: Commit the native service**
 
 ```bash
 git add src-tauri/src/browser/lightpanda.rs src-tauri/src/browser/types.rs
@@ -717,7 +717,7 @@ git commit -m "feat(browser): add single native Lightpanda service"
 - Produces: `pub fn safe_native_audit_detail(tool: &str, args: &Map<String, Value>, session_id: Option<&str>) -> Value`.
 - Consumed by Task 6.
 
-- [ ] **Step 1: Write schema parity tests before replacing the structs**
+- [x] **Step 1: Write schema parity tests before replacing the structs**
 
 For every public argument type, generate its JSON schema, remove the Local Workspaces-only `session_id` property, and compare the remaining object to the corresponding pinned upstream `inputSchema` from Task 1. The test must compare property names/types, `required`, enum arrays, and defaults.
 
@@ -733,7 +733,7 @@ for tool in pinned_contract().unwrap().tools {
 }
 ```
 
-- [ ] **Step 2: Run parity tests and confirm the legacy structs fail**
+- [x] **Step 2: Run parity tests and confirm the legacy structs fail**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::mcp::schema_tests -- --nocapture
@@ -741,7 +741,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::mcp::schema_tests -- --
 
 Expected: many mismatches because current structs use `ref`, `text`, `expression`, object extraction schemas, snake_case wait models, and compatibility defaults.
 
-- [ ] **Step 3: Define the native routing field consistently**
+- [x] **Step 3: Define the native routing field consistently**
 
 For non-session-control tools expose:
 
@@ -755,7 +755,7 @@ pub struct NativeRoute {
 
 Use `#[serde(flatten)]` on public structs or explicitly repeat `session_id` if flattening produces cleaner `schemars` output. The resulting public schema must contain `session_id` as an optional top-level string.
 
-- [ ] **Step 4: Implement exact native field names and required sets**
+- [x] **Step 4: Implement exact native field names and required sets**
 
 Representative structs must look like:
 
@@ -794,7 +794,7 @@ pub struct LightpandaExtractArgs {
 
 Implement all 31 tool argument shapes from spec Section 10; do not retain compatibility-only fields such as `ref`, `submit`, `slowly`, `values: Vec<String>`, `expression`, `max_bytes`, `timeout_ms`, browser trace actions, or run-step models.
 
-- [ ] **Step 5: Preserve the unusual upstream `setChecked.checked` contract exactly**
+- [x] **Step 5: Preserve the unusual upstream `setChecked.checked` contract exactly**
 
 The pinned schema advertises `checked` as required and also advertises default `true`. Use schemars validation metadata so public discovery keeps both properties; for example:
 
@@ -817,7 +817,7 @@ pub struct LightpandaSetCheckedArgs {
 
 If schemars 1.x emits a different shape, implement the smallest custom `JsonSchema` override needed so the schema parity test, not intuition, is authoritative.
 
-- [ ] **Step 6: Implement routing stripping without mutating native arguments**
+- [x] **Step 6: Implement routing stripping without mutating native arguments**
 
 Serialize the typed public args, remove only `session_id`, and return the remaining map unchanged:
 
@@ -837,7 +837,7 @@ pub fn split_session_route<T: Serialize>(
 
 Do not convert `backendNodeId`, `schema`, `script`, selectors, wait expressions, or native enum values.
 
-- [ ] **Step 7: Restrict Local Workspaces URL policy to arguments that actually navigate**
+- [x] **Step 7: Restrict Local Workspaces URL policy to arguments that actually navigate**
 
 Validate `url` only for native tools whose optional/required URL causes navigation:
 
@@ -855,7 +855,7 @@ detectForms
 
 Do not treat `getCookies.url` as navigation. Keep current absolute HTTP/HTTPS validation and reject `file:`, `javascript:`, and other schemes before upstream I/O.
 
-- [ ] **Step 8: Implement content-free audit metadata generation**
+- [x] **Step 8: Implement content-free audit metadata generation**
 
 Audit helpers may record safe metadata such as origin, lengths, target kind, booleans, and enum values. They must not store raw search query, fill value, script, extraction schema, cookie/env result, page content, console content, save script/path, or raw session ID/name.
 
@@ -870,11 +870,11 @@ serde_json::json!({
 
 A hash may be added if correlation is needed; never store the raw value.
 
-- [ ] **Step 9: Delete compatibility validation/ref code after the native tests compile**
+- [x] **Step 9: Delete compatibility validation/ref code after the native tests compile**
 
 Remove `is_valid_ref`, ref normalization, `page_evaluate_script`, synthetic drag/hover, performance/network compatibility scripts, compatibility extraction object validator, viewport/batch validators, and legacy output structs when no remaining caller uses them.
 
-- [ ] **Step 10: Run schema and policy tests**
+- [x] **Step 10: Run schema and policy tests**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml browser::mcp -- --nocapture
@@ -883,7 +883,7 @@ cargo test --manifest-path src-tauri/Cargo.toml browser::policy -- --nocapture
 
 Expected: public schema minus `session_id` equals pinned native schema for all 31 mappings.
 
-- [ ] **Step 11: Commit native schemas**
+- [x] **Step 11: Commit native schemas**
 
 ```bash
 git add src-tauri/src/browser/mcp.rs src-tauri/src/browser/policy.rs
@@ -905,7 +905,7 @@ git commit -m "refactor(browser): mirror native Lightpanda tool schemas"
 - Produces: exact public browser discovery set of 31 tools.
 - Produces: native output/error forwarding behavior used by Task 9 real-runtime tests.
 
-- [ ] **Step 1: Rewrite the integration-test harness around a fake native caller**
+- [x] **Step 1: Rewrite the integration-test harness around a fake native caller**
 
 Replace fake `BrowserManager`/page-driver fixtures with:
 
@@ -935,7 +935,7 @@ impl BrowserNativeCaller for FakeNativeBrowser {
 }
 ```
 
-- [ ] **Step 2: Write the exact discovery test before changing `server.rs`**
+- [x] **Step 2: Write the exact discovery test before changing `server.rs`**
 
 Call outer Local Workspaces `tools/list`, filter names beginning with `browser_`, and assert:
 
@@ -948,7 +948,7 @@ assert_eq!(browser_names, expected_public_names_from_contract_mapping());
 
 Because this migration does not add/remove unrelated MCP tools, total discovery is expected to move from 53 to exactly 45. Explicitly assert removed names such as `browser_get_status`, `browser_open`, `browser_snapshot`, `browser_tabs`, `browser_screenshot`, `browser_network`, `browser_trace`, and `browser_run_steps` are absent. For each mapped native tool, also compare the public structural input schema after removing `session_id` and compare `outputSchema` presence/value to the frozen upstream descriptor.
 
-- [ ] **Step 3: Run the discovery test and confirm it fails with the current 39-tool surface**
+- [x] **Step 3: Run the discovery test and confirm it fails with the current 39-tool surface**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml --test browser_mcp_integration browser_tool_discovery_is_exact_native_31 -- --nocapture
@@ -956,7 +956,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test browser_mcp_integration b
 
 Expected: FAIL showing legacy tools and missing `browser_lightpanda_*` tools.
 
-- [ ] **Step 4: Change `WorkspaceServer` to depend on the caller trait**
+- [x] **Step 4: Change `WorkspaceServer` to depend on the caller trait**
 
 Replace:
 
@@ -972,7 +972,7 @@ browser: Arc<dyn crate::browser::lightpanda::BrowserNativeCaller>
 
 and update `WorkspaceServer::new`/`serve` arguments accordingly. Keep desktop lifecycle on the concrete service in `AppState`; only the MCP server uses the trait object.
 
-- [ ] **Step 5: Add one common native-call handler helper**
+- [x] **Step 5: Add one common native-call handler helper**
 
 The helper must perform:
 
@@ -993,7 +993,7 @@ A valid upstream JSON-RPC error should produce content like:
 
 for the authorized caller while audit stores only that a native upstream error occurred plus the numeric code.
 
-- [ ] **Step 6: Register exactly the 31 handlers**
+- [x] **Step 6: Register exactly the 31 handlers**
 
 Implement thin `#[tool]` methods for:
 
@@ -1033,11 +1033,11 @@ browser_lightpanda_session_close
 
 Each handler serializes exactly its typed args, strips `session_id` where present, runs navigation policy when applicable, creates safe audit metadata, and calls the matching upstream tool name from Task 1. Do not attach compatibility `output_schema` declarations. For each public handler, mirror the pinned descriptor's output-schema presence: if upstream 0.3.7 omits `outputSchema`, omit `output_schema` in the outer `#[tool]`; if the frozen snapshot contains one, expose that same shape rather than a Local Workspaces wrapper result.
 
-- [ ] **Step 7: Preserve native tool annotations conservatively**
+- [x] **Step 7: Preserve native tool annotations conservatively**
 
 Mark mutation-capable/navigation/script/session-create-close tools `read_only_hint=false`. `nodeDetails`, `findElement`, `getUrl`, `getCookies`, `getEnv`, `waitFor*`, and `session_list` may be read-only hints as specified; keep `consoleLogs` conservative because it may drain a buffer.
 
-- [ ] **Step 8: Add forwarding/policy/audit tests**
+- [x] **Step 8: Add forwarding/policy/audit tests**
 
 At minimum verify:
 
@@ -1056,7 +1056,7 @@ upstream CallToolResult.isError remains isError
 upstream JSON-RPC -32604 remains an upstream_code -32604 public error
 ```
 
-- [ ] **Step 9: Run the rewritten MCP integration suite**
+- [x] **Step 9: Run the rewritten MCP integration suite**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml --test browser_mcp_integration -- --nocapture
@@ -1064,7 +1064,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test browser_mcp_integration -
 
 Expected: exact 31-tool discovery and all native forwarding/policy/audit tests pass.
 
-- [ ] **Step 10: Commit the public breaking API switch**
+- [x] **Step 10: Commit the public breaking API switch**
 
 ```bash
 git add src-tauri/src/server.rs src-tauri/src/browser/audit.rs src-tauri/tests/browser_mcp_integration.rs
@@ -1088,7 +1088,7 @@ git commit -m "feat(mcp): expose exact Lightpanda native browser tools"
 - Desktop status adds: `transport`, `native_tool_count`, `contract_verified`, `native_http_sessions`, `full_native_tool_parity`.
 - Preserves Tauri commands: `browser_runtime_status`, `setup_browser_runtime`, `repair_browser_runtime`, `reset_browser_data`, `remove_browser_runtime`.
 
-- [ ] **Step 1: Write failing backend status serialization tests**
+- [x] **Step 1: Write failing backend status serialization tests**
 
 Target shape:
 
@@ -1115,7 +1115,7 @@ BrowserRuntimeStatus {
 
 Assert serialized JSON contains no port, URL, session ID, cookie, PandaScript content/path, or absolute runtime path.
 
-- [ ] **Step 2: Write lifecycle command tests**
+- [x] **Step 2: Write lifecycle command tests**
 
 Use a service seam/test constructor to prove:
 
@@ -1126,13 +1126,13 @@ remove_browser_runtime stops service before unregister
 browser_runtime_status never starts the service
 ```
 
-- [ ] **Step 3: Replace `BrowserManager` construction in `lib.rs`**
+- [x] **Step 3: Replace `BrowserManager` construction in `lib.rs`**
 
 Construct the concrete service from the already-created `BrowserRuntimeManager`, app settings, and fixed WSL/runtime dependencies. Pass `browser.clone()` to `server::serve` where it coerces to `Arc<dyn BrowserNativeCaller>`, and keep the concrete Arc in `AppState` for lifecycle/status.
 
 On application exit call `browser.stop()` and retain the existing Tailscale shutdown sequence.
 
-- [ ] **Step 4: Update settings application semantics**
+- [x] **Step 4: Update settings application semantics**
 
 `update_app_settings` continues to persist settings first, then calls:
 
@@ -1142,7 +1142,7 @@ state.browser.apply_settings(BrowserRuntimeSettings::from(&settings)).await?
 
 Disabling Browser Automation must stop the native HTTP service; enabling is lazy and must not provision/start immediately.
 
-- [ ] **Step 5: Update desktop repair/reset/remove sequencing**
+- [x] **Step 5: Update desktop repair/reset/remove sequencing**
 
 Before mutating runtime files:
 
@@ -1152,7 +1152,7 @@ state.browser.stop().await?;
 
 Then call the existing `BrowserRuntimeManager` operation. Repair does not eagerly restart; next native browser call starts a fresh verified server.
 
-- [ ] **Step 6: Update TypeScript contracts and Settings copy**
+- [x] **Step 6: Update TypeScript contracts and Settings copy**
 
 Add status fields matching Rust. Export one pure constant from `settings-page.tsx` so copy is testable without a DOM harness:
 
@@ -1167,7 +1167,7 @@ export const BROWSER_NATIVE_CAPABILITY_COPY = [
 
 Render those four lines in the Browser Automation capability list. Export `RESET_DATA_BODY` and `REMOVE_RUNTIME_BODY` as well; Reset copy must state saved PandaScripts are preserved, while Remove Runtime copy must state saved PandaScripts inside the managed runtime are removed with the distro.
 
-- [ ] **Step 7: Add the focused frontend copy regression test**
+- [x] **Step 7: Add the focused frontend copy regression test**
 
 Create `src/pages/settings-page.test.ts`:
 
@@ -1196,7 +1196,7 @@ describe("native Lightpanda settings copy", () => {
 });
 ```
 
-- [ ] **Step 8: Run backend and frontend focused tests/build**
+- [x] **Step 8: Run backend and frontend focused tests/build**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml commands::tests -- --nocapture
@@ -1206,7 +1206,7 @@ npm run build
 
 Expected: Rust status/lifecycle tests pass, the new Vitest copy test passes, and TypeScript build accepts the new status shape.
 
-- [ ] **Step 9: Commit desktop lifecycle/status integration**
+- [x] **Step 9: Commit desktop lifecycle/status integration**
 
 ```bash
 git add src-tauri/src/lib.rs src-tauri/src/commands.rs src/lib/types.ts src/pages/settings-page.tsx src/pages/settings-page.test.ts
@@ -1232,7 +1232,7 @@ git commit -m "feat(browser): wire native runtime lifecycle and status"
 - First-party prompts mention only current public tools.
 - Browser module exports only native service/transport/contract/runtime/policy/audit/types required by the final architecture.
 
-- [ ] **Step 1: Add a regression search/test for obsolete public browser guidance**
+- [x] **Step 1: Add a regression search/test for obsolete public browser guidance**
 
 The validation step must fail if first-party prompt text contains removed calls such as:
 
@@ -1251,7 +1251,7 @@ browser_emulate_device
 browser_run_steps
 ```
 
-- [ ] **Step 2: Rewrite `AGENT_INSTRUCTIONS` browser workflow**
+- [x] **Step 2: Rewrite `AGENT_INSTRUCTIONS` browser workflow**
 
 Use native guidance:
 
@@ -1267,15 +1267,15 @@ Use native guidance:
 
 Rewrite `debug-web` with the same native vocabulary and remove stale-ref/viewport/network/screenshot claims that no longer exist in the native browser tool family.
 
-- [ ] **Step 3: Search the repository for legacy browser API references**
+- [x] **Step 3: Search the repository for legacy browser API references**
 
 Run targeted searches for `browser_open`, `browser_snapshot`, `BrowserManager`, `BrowserPageDriver`, `PageLaunchSpec`, `BrowserSessionStatus`, and opaque-ref helpers. Classify each remaining match as test/docs migration or dead code; no active production caller should remain after this task.
 
-- [ ] **Step 4: Delete dead compatibility modules only after references are gone**
+- [x] **Step 4: Delete dead compatibility modules only after references are gone**
 
 Remove `driver.rs` and `manager.rs`. Remove `artifacts.rs`/`files.rs` only if no unrelated Screen Capture/workspace code uses them. Shrink `types.rs`/`policy.rs` and `mod.rs` to the actual native architecture.
 
-- [ ] **Step 5: Run prompt validation and compile tests**
+- [x] **Step 5: Run prompt validation and compile tests**
 
 ```text
 npm run validate:skill
@@ -1285,7 +1285,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib
 
 Expected: no references to removed production types/tools and no prompt validation failures.
 
-- [ ] **Step 6: Commit compatibility cleanup**
+- [x] **Step 6: Commit compatibility cleanup**
 
 ```bash
 git add -A src-tauri/src/browser src-tauri/src/agent_skills.rs
@@ -1305,7 +1305,7 @@ git commit -m "refactor(browser): remove legacy browser compatibility layer"
 - Uses the production `BrowserRuntimeManager` and `LightpandaNativeService` through the actual outer Local Workspaces MCP server.
 - Produces release evidence consumed by Task 10 release gate.
 
-- [ ] **Step 1: Replace the test architecture comment/harness before changing cases**
+- [x] **Step 1: Replace the test architecture comment/harness before changing cases**
 
 The harness must reflect:
 
@@ -1318,7 +1318,7 @@ MCP client -> WorkspaceServer -> BrowserNativeCaller
 
 Retain `LW_REQUIRE_LIGHTPANDA_RUNTIME_TESTS=1` fail-closed skip behavior and the existing Windows-host fixture bridge for pages loaded from inside WSL.
 
-- [ ] **Step 2: Add the bootstrap/session regression test first**
+- [x] **Step 2: Add the bootstrap/session regression test first**
 
 After first native call/startup:
 
@@ -1330,11 +1330,11 @@ must report only `default` before the test creates named sessions. This proves i
 
 Then create `alpha` and `beta`, navigate them to different URLs using `session_id`, and assert `get_url` returns independent values.
 
-- [ ] **Step 3: Add contract/version assertions**
+- [x] **Step 3: Add contract/version assertions**
 
 Verify the runtime binary reports 0.3.7 through the existing runtime manager/in-distro `lightpanda version` path. Do not assert `initialize.serverInfo.version == 0.3.7`; add a regression comment/test that protocol serverInfo is not the binary pin.
 
-- [ ] **Step 4: Build one deterministic fixture that exercises all native page features**
+- [x] **Step 4: Build one deterministic fixture that exercises all native page features**
 
 Extend `browser_test_app.rs` with:
 
@@ -1358,7 +1358,7 @@ evaluate/extract-friendly elements
 
 Use fixed IDs/classes so selector-based replay tests are deterministic.
 
-- [ ] **Step 5: Add an explicit 31-tool coverage table in the test source**
+- [x] **Step 5: Add an explicit 31-tool coverage table in the test source**
 
 Maintain a set of upstream/public tools hit by the suite and assert it equals all 31 expected public names at the end. Group tests by behavior, but do not infer coverage from tool discovery alone.
 
@@ -1376,7 +1376,7 @@ For `search`, use the native tool in a bounded smoke call and assert a valid nat
 
 For `getEnv`, assert native behavior without requiring a secret LP_* variable to exist; list mode is sufficient.
 
-- [ ] **Step 6: Add raw `backendNodeId` action parity tests**
+- [x] **Step 6: Add raw `backendNodeId` action parity tests**
 
 Obtain IDs from `browser_lightpanda_tree` and pass them directly to the supported native operations:
 
@@ -1393,7 +1393,7 @@ markdown/html/tree subtree calls
 
 Assert no intermediate Local Workspaces selector-recovery call is needed and raw IDs remain present in native output.
 
-- [ ] **Step 7: Add selector + PandaScript save test**
+- [x] **Step 7: Add selector + PandaScript save test**
 
 Repeat representative actions using CSS selectors, then call:
 
@@ -1406,15 +1406,15 @@ browser_lightpanda_save {
 
 Assert the returned native path is under `/var/lib/local-workspaces/browser/pandascripts` and a `../escape.js` save returns native `isError` without escaping the fixed working directory. Cleanup the integration script with an app-owned test/runtime cleanup path rather than exposing arbitrary filesystem access through the browser tool.
 
-- [ ] **Step 8: Add cookie/session isolation tests**
+- [x] **Step 8: Add cookie/session isolation tests**
 
 Set a cookie in one named session and verify `getCookies` in another native session does not contain it. Do not merge cookies in Local Workspaces to emulate old tabs.
 
-- [ ] **Step 9: Add lifecycle tests for Pause/disable/process loss**
+- [x] **Step 9: Add lifecycle tests for Pause/disable/process loss**
 
 Verify one server process is used for multiple named sessions, Pause stops it, disabled Browser Automation prevents restart, re-enable allows lazy restart, and an induced process death does not replay the interrupted tool call.
 
-- [ ] **Step 10: Run the real runtime suite in developer mode**
+- [x] **Step 10: Run the real runtime suite in developer mode**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml --test browser_runtime_integration --jobs 1 -- --nocapture
@@ -1422,7 +1422,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --test browser_runtime_integrati
 
 Expected on a configured Windows/WSL host: all native tests pass. If prerequisites are absent, developer mode may print explicit `SKIP [...]`; do not treat skips as release proof.
 
-- [ ] **Step 11: Run the mandatory release-mode suite on the target Windows host**
+- [x] **Step 11: Run the mandatory release-mode suite on the target Windows host**
 
 PowerShell:
 
@@ -1435,7 +1435,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Expected: zero skips, zero failed tests, explicit 31/31 native coverage/parity evidence.
 
-- [ ] **Step 12: Commit real-runtime coverage**
+- [x] **Step 12: Commit real-runtime coverage**
 
 ```bash
 git add src-tauri/tests/browser_runtime_integration.rs src-tauri/tests/fixtures/browser_test_app.rs
@@ -1455,7 +1455,7 @@ git commit -m "test(browser): cover all native Lightpanda MCP tools"
 - Consumes: `src-tauri/target/browser-runtime-integration-release.log` from Task 9.
 - Produces: release gate that proves 31 expected native tools, 31 public native tools, zero legacy browser tools, zero runtime-test skips.
 
-- [ ] **Step 1: Write a failing verifier fixture/check for the new parity lines**
+- [x] **Step 1: Write a failing verifier fixture/check for the new parity lines**
 
 The release log must include equivalent evidence:
 
@@ -1470,11 +1470,11 @@ Contract parity: PASS
 
 A log with 30 tools, one legacy tool, `Contract parity: FAIL`, or any `SKIP [` must fail verification.
 
-- [ ] **Step 2: Remove the old `passed >= 19` compatibility criterion**
+- [x] **Step 2: Remove the old `passed >= 19` compatibility criterion**
 
 Replace it with semantic checks for the explicit parity lines plus the normal Rust `test result: ok` / zero-failure / zero-skip checks. Test count may grow without weakening the gate.
 
-- [ ] **Step 3: Make the release gate invoke both static verifiers explicitly**
+- [x] **Step 3: Make the release gate invoke both static verifiers explicitly**
 
 Keep the existing PowerShell call to:
 
@@ -1490,7 +1490,7 @@ scripts/verify-lightpanda-mcp-contract.py
 
 Capture each exit code and append a release-gate error when either verifier fails. Preserve AGPL/source reference, notices, no-bundled-engine, installer-size, and SBOM gates.
 
-- [ ] **Step 4: Set the package scripts to the exact final commands**
+- [x] **Step 4: Set the package scripts to the exact final commands**
 
 `package.json` must contain exactly these browser verification entries:
 
@@ -1500,7 +1500,7 @@ Capture each exit code and append a release-gate error when either verifier fail
 "verify:browser-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-browser-release.ps1"
 ```
 
-- [ ] **Step 5: Run the static and release verifiers against the fresh release log**
+- [x] **Step 5: Run the static and release verifiers against the fresh release log**
 
 ```text
 npm run verify:lightpanda-runtime
@@ -1510,7 +1510,7 @@ npm run verify:browser-release
 
 Expected: all exit 0 only when the real-runtime log proves full parity and the installer prerequisites are present. If the NSIS installer has not been built, `verify:browser-release` is expected to fail for that explicit reason until the release build step is run.
 
-- [ ] **Step 6: Commit the release gate**
+- [x] **Step 6: Commit the release gate**
 
 ```bash
 git add scripts/verify-browser-release.ps1 package.json
@@ -1529,7 +1529,7 @@ git commit -m "chore(browser): gate releases on native MCP parity"
 - Produces final release-ready evidence.
 - No new public APIs beyond the approved spec.
 
-- [ ] **Step 1: Prove there is exactly one public browser tool family**
+- [x] **Step 1: Prove there is exactly one public browser tool family**
 
 Search production source and first-party prompts for removed public names:
 
@@ -1556,7 +1556,7 @@ browser_run_steps
 
 Expected: no active production handler/prompt references. Historical docs/spec migration tables are allowed.
 
-- [ ] **Step 2: Prove old architecture types are gone from production**
+- [x] **Step 2: Prove old architecture types are gone from production**
 
 Search for:
 
@@ -1576,7 +1576,7 @@ normalize_backend_node_ids
 
 Expected: no production references. Remove any dead compatibility module/import that remains.
 
-- [ ] **Step 3: Run formatting and diff hygiene**
+- [x] **Step 3: Run formatting and diff hygiene**
 
 ```text
 cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
@@ -1585,7 +1585,7 @@ git diff --check
 
 If formatting fails, run `cargo fmt --manifest-path src-tauri/Cargo.toml`, inspect the diff, then re-run `--check`.
 
-- [ ] **Step 4: Run the full Rust test suite**
+- [x] **Step 4: Run the full Rust test suite**
 
 ```text
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -1593,7 +1593,7 @@ cargo test --manifest-path src-tauri/Cargo.toml
 
 Expected: zero failures.
 
-- [ ] **Step 5: Run frontend tests/build and skill validation**
+- [x] **Step 5: Run frontend tests/build and skill validation**
 
 ```text
 npm test
@@ -1603,7 +1603,7 @@ npm run build
 
 Expected: all exit 0.
 
-- [ ] **Step 6: Run runtime/contract static verification**
+- [x] **Step 6: Run runtime/contract static verification**
 
 ```text
 npm run verify:lightpanda-runtime
@@ -1612,7 +1612,7 @@ npm run verify:lightpanda-contract
 
 Expected: both exit 0.
 
-- [ ] **Step 7: Run the mandatory real Lightpanda WSL suite and capture release log**
+- [x] **Step 7: Run the mandatory real Lightpanda WSL suite and capture release log**
 
 PowerShell:
 
@@ -1625,7 +1625,7 @@ if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 Expected: no skips/failures and explicit `Contract parity: PASS` with 31 discovered/31 expected/31 public/0 legacy.
 
-- [ ] **Step 8: Build the release installer before invoking the full browser release gate**
+- [x] **Step 8: Build the release installer before invoking the full browser release gate**
 
 ```text
 npm run tauri build
@@ -1633,7 +1633,7 @@ npm run tauri build
 
 Expected: NSIS installer produced under `target/release/bundle/nsis` or `src-tauri/target/release/bundle/nsis` and remains below the existing 100 MiB gate.
 
-- [ ] **Step 9: Run the full browser release gate**
+- [x] **Step 9: Run the full browser release gate**
 
 ```text
 npm run verify:browser-release
@@ -1641,7 +1641,7 @@ npm run verify:browser-release
 
 Expected: exit 0 and a message equivalent to “browser release gate passed”.
 
-- [ ] **Step 10: Review the final MCP discovery output directly**
+- [x] **Step 10: Review the final MCP discovery output directly**
 
 Start the built/test Local Workspaces MCP server in the existing integration harness and print browser tool names. Verify:
 
@@ -1652,7 +1652,7 @@ legacy browser_* count = 0
 
 Do not infer this from source code alone.
 
-- [ ] **Step 11: Inspect final Git status/diff before claiming completion**
+- [x] **Step 11: Inspect final Git status/diff before claiming completion**
 
 ```text
 git status --short
@@ -1662,7 +1662,7 @@ git diff --check
 
 Confirm only intended files changed and no generated runtime/browser data, cookies, PandaScripts from tests, local secrets, or release logs intended to remain untracked are accidentally staged.
 
-- [ ] **Step 12: Commit final cleanup only if the previous gates are green**
+- [x] **Step 12: Commit final cleanup only if the previous gates are green**
 
 ```bash
 git add -A
@@ -1677,19 +1677,19 @@ Do not create this final commit if any required verification remains red or skip
 
 Before execution handoff, verify the plan against the spec:
 
-- [ ] Contract snapshot and exact 31 mappings are covered by Task 1.
-- [ ] Custom app-owned HTTP transport, SSE, request IDs, explicit `default`, named sessions, and native JSON-RPC error preservation are covered by Task 2.
-- [ ] WSL private bind, fixed PandaScript cwd, full-contract runtime verification, binary pin independence from `serverInfo.version`, and Reset preservation are covered by Task 3.
-- [ ] One lazy server, lifecycle, per-session serialization, no replay, Pause/disable stop, and process-loss behavior are covered by Task 4.
-- [ ] Exact native argument schemas, raw `backendNodeId`, native evaluate/extract semantics, URL-policy exception for `getCookies.url`, and sensitive audit metadata are covered by Task 5.
-- [ ] Exactly 31 public `browser_lightpanda_*` handlers and zero aliases are covered by Task 6.
-- [ ] Tauri AppState, repair/reset/remove stop ordering, redacted runtime status, Settings copy, and PandaScript reset/remove UX are covered by Task 7.
-- [ ] Agent prompt migration and dead compatibility architecture removal are covered by Task 8.
-- [ ] Real native sessions, 31-tool smoke coverage, raw IDs, selector/PandaScript workflow, cookies, lifecycle, and bootstrap session regression are covered by Task 9.
-- [ ] Release parity gates are covered by Task 10.
-- [ ] Full build/test/real-runtime/release verification and direct discovery proof are covered by Task 11.
-- [ ] No task requires CDP, Playwright/Puppeteer, screenshots, uploads/downloads, device emulation, proxy/network interception, or other out-of-scope platform work.
-- [ ] No task reintroduces a raw arbitrary native-tool passthrough.
-- [ ] No task relies on `initialize.serverInfo.version == 0.3.7`.
-- [ ] No task initializes named Lightpanda browsing sessions separately after `session_new`.
-- [ ] No task logs cookie/env/fill/query/script/schema/PandaScript/page/console content.
+- [x] Contract snapshot and exact 31 mappings are covered by Task 1.
+- [x] Custom app-owned HTTP transport, SSE, request IDs, explicit `default`, named sessions, and native JSON-RPC error preservation are covered by Task 2.
+- [x] WSL private bind, fixed PandaScript cwd, full-contract runtime verification, binary pin independence from `serverInfo.version`, and Reset preservation are covered by Task 3.
+- [x] One lazy server, lifecycle, per-session serialization, no replay, Pause/disable stop, and process-loss behavior are covered by Task 4.
+- [x] Exact native argument schemas, raw `backendNodeId`, native evaluate/extract semantics, URL-policy exception for `getCookies.url`, and sensitive audit metadata are covered by Task 5.
+- [x] Exactly 31 public `browser_lightpanda_*` handlers and zero aliases are covered by Task 6.
+- [x] Tauri AppState, repair/reset/remove stop ordering, redacted runtime status, Settings copy, and PandaScript reset/remove UX are covered by Task 7.
+- [x] Agent prompt migration and dead compatibility architecture removal are covered by Task 8.
+- [x] Real native sessions, 31-tool smoke coverage, raw IDs, selector/PandaScript workflow, cookies, lifecycle, and bootstrap session regression are covered by Task 9.
+- [x] Release parity gates are covered by Task 10.
+- [x] Full build/test/real-runtime/release verification and direct discovery proof are covered by Task 11.
+- [x] No task requires CDP, Playwright/Puppeteer, screenshots, uploads/downloads, device emulation, proxy/network interception, or other out-of-scope platform work.
+- [x] No task reintroduces a raw arbitrary native-tool passthrough.
+- [x] No task relies on `initialize.serverInfo.version == 0.3.7`.
+- [x] No task initializes named Lightpanda browsing sessions separately after `session_new`.
+- [x] No task logs cookie/env/fill/query/script/schema/PandaScript/page/console content.
