@@ -510,6 +510,12 @@ pub struct BrowserRuntimeManager {
 /// after import (rootfs already ships it; idempotent by design).
 const RUNTIME_DIRS_FRAGMENT: &str = "mkdir -p /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts /var/lib/local-workspaces/browser/pandascripts /opt/local-workspaces/lightpanda && chown -R localworkspaces:localworkspaces /var/lib/local-workspaces /opt/local-workspaces/lightpanda";
 
+/// Fixed layout probe: every directory from `RUNTIME_DIRS_FRAGMENT` must
+/// exist. Distro images provisioned before a directory was added to the
+/// layout (e.g. `pandascripts`) fail this probe and get the full layout
+/// re-asserted.
+const RUNTIME_DIRS_CHECK_FRAGMENT: &str = "test -d /var/lib/local-workspaces/browser/profile && test -d /var/lib/local-workspaces/browser/cookies && test -d /var/lib/local-workspaces/browser/cache && test -d /var/lib/local-workspaces/browser/artifacts && test -d /var/lib/local-workspaces/browser/pandascripts && test -d /opt/local-workspaces/lightpanda";
+
 /// Fixed shell fragment for Reset Browser Data: removes only the browser
 /// profile/cookies/cache/artifacts directories and recreates them with the
 /// runtime user as owner. Never touches the distro or the Lightpanda binary.
@@ -755,6 +761,8 @@ impl BrowserRuntimeManager {
             }
         };
 
+        self.ensure_runtime_dirs(&distro_name).await?;
+
         self.ensure_lightpanda(&distro_name, force_rebuild).await?;
 
         self.set_state(RuntimeProvisionState::VerifyingRuntime, None)
@@ -836,6 +844,33 @@ impl BrowserRuntimeManager {
             .terminate_owned(&identity, Some(&marker), &install_dir)
             .await?;
         Ok(distro_name.to_string())
+    }
+
+    /// Self-heals the in-distro directory layout for already-provisioned
+    /// distros. Fresh imports run `RUNTIME_DIRS_FRAGMENT` during
+    /// provisioning; this closes the gap for distros provisioned before a
+    /// directory was added to the layout (the common path is one cheap
+    /// `test -d` probe per directory).
+    async fn ensure_runtime_dirs(&self, distro_name: &str) -> Result<(), CoreError> {
+        let check = self
+            .adapter
+            .exec_fixed(
+                distro_name,
+                WslUser::Root,
+                &["sh", "-c", RUNTIME_DIRS_CHECK_FRAGMENT],
+                None,
+            )
+            .await?;
+        if check.exit_code == 0 {
+            return Ok(());
+        }
+        self.exec_sh(
+            distro_name,
+            RUNTIME_DIRS_FRAGMENT,
+            None,
+            "re-assert runtime user directories",
+        )
+        .await
     }
 
     /// Verifies the in-distro Lightpanda binary against the pinned digest and
@@ -1170,6 +1205,9 @@ mod tests {
         lightpanda_digest: String,
         symlink_switched: bool,
         browser_data_reset: bool,
+        /// Simulates a distro provisioned before a directory was added to
+        /// the runtime layout (layout probe fails until re-asserted).
+        runtime_dirs_missing: bool,
     }
 
     struct ScriptedRunner {
@@ -1278,9 +1316,16 @@ mod tests {
                     } else if fragment.starts_with("rm -rf /var/lib/local-workspaces/browser") {
                         world.browser_data_reset = true;
                         Ok(out(0, "", ""))
+                    } else if fragment.starts_with("test -d /var/lib/local-workspaces") {
+                        if world.runtime_dirs_missing {
+                            Ok(out(1, "", "missing runtime directories"))
+                        } else {
+                            Ok(out(0, "", ""))
+                        }
                     } else if fragment.contains("wsl.conf")
                         || fragment.contains("mkdir -p /var/lib/local-workspaces")
                     {
+                        world.runtime_dirs_missing = false;
                         Ok(out(0, "", ""))
                     } else if fragment.contains("cat > /opt/local-workspaces/lightpanda/") {
                         // A fresh install writes the pinned bytes. A re-install
@@ -1453,6 +1498,7 @@ mod tests {
             lightpanda_digest: TEST_LP_SHA.to_string(),
             symlink_switched: true,
             browser_data_reset: false,
+            runtime_dirs_missing: false,
         }
     }
 
@@ -1809,6 +1855,53 @@ mod tests {
             created,
             "provisioning must create the pandascripts directory"
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_runtime_heals_layout_missing_since_older_provisioning() {
+        // A distro provisioned before a directory joined the layout (here:
+        // pandascripts) must be healed on the next ensure_runtime instead of
+        // silently breaking tools that write into the missing directory.
+        let tmp = tempfile::tempdir().unwrap();
+        let (manager, world_ref, calls) = provisioned_manager(tmp.path()).await;
+        world_ref.lock().await.runtime_dirs_missing = true;
+        calls.lock().await.clear();
+
+        let state = manager.ensure_runtime().await.unwrap();
+        assert_eq!(state, RuntimeProvisionState::Ready);
+
+        let calls = calls.lock().await.clone();
+        let reasserted = calls.iter().any(|argv| {
+            argv.iter().any(|a| {
+                a.contains("mkdir -p")
+                    && a.contains("/var/lib/local-workspaces/browser/pandascripts")
+            })
+        });
+        assert!(
+            reasserted,
+            "a failed layout probe must re-assert the full runtime layout"
+        );
+        assert!(
+            !world_ref.lock().await.runtime_dirs_missing,
+            "the re-asserted layout must heal the world"
+        );
+    }
+
+    #[test]
+    fn runtime_dirs_check_covers_every_provisioned_directory() {
+        // The self-heal probe must test every directory the layout creates;
+        // a new directory added to RUNTIME_DIRS_FRAGMENT without updating the
+        // probe would silently stop healing.
+        let mkdir = RUNTIME_DIRS_FRAGMENT
+            .split("&&")
+            .next()
+            .expect("layout starts with mkdir -p");
+        for dir in mkdir.split_whitespace().skip(2) {
+            assert!(
+                RUNTIME_DIRS_CHECK_FRAGMENT.contains(&format!("test -d {dir}")),
+                "layout probe missing directory {dir}"
+            );
+        }
     }
 
     #[tokio::test]
