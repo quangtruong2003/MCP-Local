@@ -9,6 +9,7 @@
     "test": "vitest run",
     "build:sidecar": "powershell -ExecutionPolicy Bypass -File scripts/build-tailscale-sidecar.ps1",
     "verify:lightpanda-runtime": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-lightpanda-runtime-manifest.ps1",
+    "verify:lightpanda-contract": "python scripts/verify-lightpanda-mcp-contract.py",
     "verify:browser-release": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-browser-release.ps1",
     "validate:skill": "python scripts/validate-agent-skill.py",
     "package:skill": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-agent-skill.ps1",

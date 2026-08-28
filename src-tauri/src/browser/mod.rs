@@ -1,5 +1,6 @@
 pub mod artifacts;
 pub mod audit;
+pub mod contract;
 pub mod driver;
 pub mod files;
 pub mod lightpanda;
