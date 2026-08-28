@@ -29,8 +29,26 @@ use crate::process_job::JobHandle;
 use super::driver::{
     BrowserPageDriver, BrowserPageDriverFactory, PageDriverStatus, PageLaunchSpec,
 };
-use super::runtime::REQUIRED_NATIVE_TOOLS;
 use super::wsl::build_lightpanda_command;
+
+/// Interim restricted page-mode tool set: the pinned native contract minus
+/// the admin/session tools. Task 4 replaces this module with the native HTTP
+/// service, which uses the full 31-tool contract directly.
+const NATIVE_SESSION_ADMIN_TOOLS: &[&str] = &[
+    "getEnv",
+    "save",
+    "session_new",
+    "session_list",
+    "session_close",
+];
+
+fn required_native_tools() -> Vec<&'static str> {
+    super::contract::NATIVE_TOOL_MAPPINGS
+        .iter()
+        .map(|(native, _)| *native)
+        .filter(|name| !NATIVE_SESSION_ADMIN_TOOLS.contains(name))
+        .collect()
+}
 
 /// Fixed bound on HTTP cache entries handed to the child.
 pub const HTTP_CACHE_ENTRY_LIMIT: u32 = 1_000;
@@ -191,7 +209,7 @@ impl LightpandaPageDriver {
     /// native set. Admin tools are absent by construction; `getCookies` is
     /// callable internally but never exposed publicly (gated higher up).
     pub(crate) fn is_tool_callable(tool: &str) -> bool {
-        REQUIRED_NATIVE_TOOLS.contains(&tool)
+        required_native_tools().contains(&tool)
     }
 
     /// Local diagnostics only: bounded snapshot of child stderr lines. Never
@@ -287,7 +305,8 @@ impl BrowserPageDriver for LightpandaPageDriver {
             .into_iter()
             .map(|tool| tool.name.to_string())
             .collect();
-        let missing = REQUIRED_NATIVE_TOOLS
+        let required = required_native_tools();
+        let missing = required
             .iter()
             .filter(|name| !discovered.contains(**name))
             .count();
@@ -462,7 +481,7 @@ mod tests {
     ];
 
     fn fake_tool_list(missing_required: bool) -> Vec<Value> {
-        let mut tools: Vec<Value> = REQUIRED_NATIVE_TOOLS
+        let mut tools: Vec<Value> = required_native_tools()
             .iter()
             .filter(|name| !(missing_required && **name == "waitForScript"))
             .map(|name| json!({ "name": name, "inputSchema": { "type": "object" } }))
@@ -807,7 +826,7 @@ mod tests {
 
     #[test]
     fn callable_set_is_exactly_the_required_native_tools() {
-        for tool in REQUIRED_NATIVE_TOOLS {
+        for tool in required_native_tools() {
             assert!(
                 LightpandaPageDriver::is_tool_callable(tool),
                 "{tool} must be callable"

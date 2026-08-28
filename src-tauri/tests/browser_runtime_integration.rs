@@ -45,8 +45,8 @@ use local_workspace_mcp_manager::{
     browser::{
         manager::BrowserManager,
         runtime::{
-            BrowserRuntimeManager, HttpsRuntimeDownloader, RealMcpSmokeVerifier, RuntimeManifest,
-            RuntimeProvisionState, RUNTIME_STATE_FILE,
+            BrowserRuntimeManager, HttpsRuntimeDownloader, RealRuntimeContractVerifier,
+            RuntimeManifest, RuntimeProvisionState, RUNTIME_STATE_FILE,
         },
         types::BrowserRuntimeSettings,
         wsl::{decode_wsl_output, RealWslCommandRunner},
@@ -2061,7 +2061,7 @@ async fn t19_remove_refuses_ownership_mismatch() {
     let rogue = BrowserRuntimeManager::new(
         Arc::new(RealWslCommandRunner),
         Arc::new(HttpsRuntimeDownloader::new().expect("downloader")),
-        Arc::new(RealMcpSmokeVerifier::new(PathBuf::from("wsl.exe"))),
+        Arc::new(RealRuntimeContractVerifier::new(PathBuf::from("wsl.exe"))),
         RuntimeManifest::from_json_str(&manifest_json()).expect("manifest"),
         tmp.path().to_path_buf(),
     );

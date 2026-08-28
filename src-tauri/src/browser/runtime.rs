@@ -30,37 +30,6 @@ pub const RUNTIME_STATE_FILE: &str = "runtime-state.json";
 /// Install root for Lightpanda binaries inside the managed distro.
 pub const LIGHTPANDA_INSTALL_ROOT: &str = "/opt/local-workspaces/lightpanda";
 
-/// Required Lightpanda native MCP tools for v0.2.0. Missing tools are a
-/// version-mismatch failure, never a partial success.
-pub const REQUIRED_NATIVE_TOOLS: &[&str] = &[
-    "goto",
-    "getUrl",
-    "getCookies",
-    "consoleLogs",
-    "tree",
-    "markdown",
-    "html",
-    "nodeDetails",
-    "findElement",
-    "interactiveElements",
-    "links",
-    "extract",
-    "structuredData",
-    "search",
-    "click",
-    "hover",
-    "fill",
-    "selectOption",
-    "setChecked",
-    "press",
-    "scroll",
-    "detectForms",
-    "evaluate",
-    "waitForSelector",
-    "waitForState",
-    "waitForScript",
-];
-
 /// Provisioning states, exactly as named in the design spec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -350,150 +319,181 @@ impl RuntimeDownloader for HttpsRuntimeDownloader {
     }
 }
 
-/// MCP smoke verification: launch a temporary Lightpanda MCP child, perform
-/// initialize + tools/list, verify the required native tool set, terminate.
+/// Full-contract runtime verification: launch a temporary private Lightpanda
+/// HTTP MCP server, initialize on `default`, compare all 31 native tools and
+/// schemas against the pinned contract, verify the bootstrap created no
+/// hidden sessions, then terminate the child.
 #[async_trait]
-pub trait McpSmokeVerifier: Send + Sync {
-    async fn smoke_verify(&self, distro_name: &str) -> Result<(), CoreError>;
+pub trait RuntimeContractVerifier: Send + Sync {
+    async fn verify(&self, distro_name: &str) -> Result<(), CoreError>;
 }
 
-/// Production smoke verifier speaking raw JSON-RPC over the child stdio.
-pub struct RealMcpSmokeVerifier {
+/// Production verifier: runs the pinned Lightpanda binary inside the owned
+/// distro against a private loopback HTTP endpoint and compares the full
+/// native MCP contract. `initialize.serverInfo.version` is protocol metadata
+/// only and is deliberately never compared to the pinned binary version; the
+/// binary version gate stays `ensure_lightpanda` (SHA-256 + `lightpanda
+/// version`).
+pub struct RealRuntimeContractVerifier {
     wsl_exe: PathBuf,
 }
 
-impl RealMcpSmokeVerifier {
+impl RealRuntimeContractVerifier {
     pub fn new(wsl_exe: PathBuf) -> Self {
         Self { wsl_exe }
     }
 }
 
 #[async_trait]
-impl McpSmokeVerifier for RealMcpSmokeVerifier {
-    async fn smoke_verify(&self, distro_name: &str) -> Result<(), CoreError> {
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-
-        let std_cmd = super::wsl::build_lightpanda_command(&self.wsl_exe, distro_name, &[])?;
+impl RuntimeContractVerifier for RealRuntimeContractVerifier {
+    async fn verify(&self, distro_name: &str) -> Result<(), CoreError> {
+        let port = pick_loopback_port()?;
+        let std_cmd = super::wsl::build_lightpanda_http_command(&self.wsl_exe, distro_name, port)?;
         let mut child = tokio::process::Command::from(std_cmd)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| {
                 CoreError::new(
                     ErrorCode::BrowserWslUnavailable,
-                    format!("failed to spawn lightpanda smoke verifier: {e}"),
+                    format!("failed to spawn lightpanda contract verifier: {e}"),
                 )
             })?;
 
-        let mut stdin = child.stdin.take().expect("stdin is piped");
-        let stdout = child.stdout.take().expect("stdout is piped");
-
-        let requests = [
-            serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "clientInfo": { "name": "local-workspaces-runtime-smoke", "version": "1.0" }
-                }
-            }),
-            serde_json::json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }),
-            serde_json::json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
-        ];
-        for request in &requests {
-            let mut line = serde_json::to_string(request).map_err(|e| {
-                CoreError::new(
-                    ErrorCode::BrowserProtocolError,
-                    format!("failed to encode smoke request: {e}"),
-                )
-            })?;
-            line.push('\n');
-            stdin.write_all(line.as_bytes()).await.map_err(|e| {
-                CoreError::new(
-                    ErrorCode::BrowserWslUnavailable,
-                    format!("lightpanda smoke verifier stdin failed: {e}"),
-                )
-            })?;
+        let outcome = async {
+            wait_for_loopback(port).await?;
+            let endpoint: url::Url =
+                format!("http://127.0.0.1:{port}/mcp")
+                    .parse()
+                    .map_err(|e| {
+                        CoreError::new(
+                            ErrorCode::BrowserProtocolError,
+                            format!("invalid lightpanda contract endpoint: {e}"),
+                        )
+                    })?;
+            let client = super::http::LightpandaHttpClient::new(endpoint, Duration::from_secs(10))?;
+            verify_http_contract(&client).await
         }
-        // A flush failure means the child pipe is gone; the read loop below
-        // surfaces that as a fail-closed error.
-        let _ = stdin.flush().await;
-
-        let mut lines = BufReader::new(stdout).lines();
-        let outcome = tokio::time::timeout(Duration::from_secs(30), async {
-            while let Some(line) = lines.next_line().await.map_err(|e| {
-                CoreError::new(
-                    ErrorCode::BrowserWslUnavailable,
-                    format!("lightpanda smoke verifier stdout failed: {e}"),
-                )
-            })? {
-                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-                    continue;
-                };
-                if value.get("id") == Some(&serde_json::json!(2)) {
-                    return Ok(value);
-                }
-            }
-            Err(CoreError::new(
-                ErrorCode::BrowserWslUnavailable,
-                "lightpanda smoke verifier exited before answering tools/list",
-            ))
-        })
         .await;
 
         let _ = child.start_kill();
         let _ = child.wait().await;
-
-        let response = match outcome {
-            Ok(Ok(value)) => value,
-            Ok(Err(err)) => return Err(err),
-            Err(_) => {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserWslUnavailable,
-                    "lightpanda smoke verification timed out",
-                ))
-            }
-        };
-        if response.get("error").is_some() {
-            return Err(CoreError::new(
-                ErrorCode::BrowserRuntimeVersionMismatch,
-                "lightpanda tools/list failed during smoke verification",
-            ));
-        }
-        let tools: Vec<String> = response
-            .pointer("/result/tools")
-            .and_then(|v| v.as_array())
-            .map(|entries| {
-                entries
-                    .iter()
-                    .filter_map(|entry| entry.get("name").and_then(|n| n.as_str()))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
-        let missing = REQUIRED_NATIVE_TOOLS
-            .iter()
-            .filter(|required| !tools.iter().any(|tool| tool == *required))
-            .count();
-        if missing > 0 {
-            return Err(CoreError::new(
-                ErrorCode::BrowserRuntimeVersionMismatch,
-                format!("lightpanda runtime is missing {missing} required native tools"),
-            ));
-        }
-        Ok(())
+        outcome
     }
+}
+
+/// Picks a free loopback port selected by the OS. The temporary listener is
+/// dropped immediately; a rare port race is surfaced as a fail-closed spawn
+/// or reachability error by the caller.
+fn pick_loopback_port() -> Result<u16, CoreError> {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| {
+        CoreError::new(
+            ErrorCode::BrowserWslUnavailable,
+            format!("failed to select a loopback port: {e}"),
+        )
+    })?;
+    let addr = listener.local_addr().map_err(|e| {
+        CoreError::new(
+            ErrorCode::BrowserWslUnavailable,
+            format!("failed to read the selected loopback port: {e}"),
+        )
+    })?;
+    Ok(addr.port())
+}
+
+/// Polls Windows loopback reachability for the WSL-side server until the
+/// deadline. Mirrored networking makes the private bind reachable from the
+/// host; a server that never becomes reachable is a fail-closed timeout.
+async fn wait_for_loopback(port: u16) -> Result<(), CoreError> {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    loop {
+        if tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(CoreError::new(
+                ErrorCode::BrowserWslUnavailable,
+                "lightpanda http server never became reachable on loopback",
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Verifies the full native MCP contract against an already-reachable
+/// private endpoint: initialize on `default`, compare all 31 tools/schemas
+/// with the pinned contract snapshot, and require that the bootstrap created
+/// no session beyond `default`. `serverInfo.version` is captured by the
+/// client but never gates verification.
+async fn verify_http_contract(client: &super::http::LightpandaHttpClient) -> Result<(), CoreError> {
+    let _metadata = client.initialize_default().await?;
+    client.notify_initialized_default().await?;
+    let tools = client.list_tools_default().await?;
+    super::contract::verify_discovered_tools(&tools)?;
+
+    let response = client
+        .call_tool("session_list", serde_json::Map::new(), None)
+        .await?;
+    let result = match response {
+        super::http::UpstreamToolResponse::Result(result) => result,
+        super::http::UpstreamToolResponse::JsonRpcError { message, .. } => {
+            return Err(CoreError::new(
+                ErrorCode::BrowserRuntimeVersionMismatch,
+                format!("lightpanda session_list failed during contract verification: {message}"),
+            ));
+        }
+    };
+    let ids = session_ids_from_result(&result)?;
+    if ids.len() != 1 || ids[0] != super::http::DEFAULT_SESSION_ID {
+        return Err(CoreError::new(
+            ErrorCode::BrowserRuntimeVersionMismatch,
+            "lightpanda bootstrap created sessions beyond the default session",
+        ));
+    }
+    Ok(())
+}
+
+/// Extracts session ids from a native `session_list` result (a JSON array of
+/// objects serialized into text content).
+fn session_ids_from_result(result: &rmcp::model::CallToolResult) -> Result<Vec<String>, CoreError> {
+    let mismatch = |what: &str| {
+        CoreError::new(
+            ErrorCode::BrowserRuntimeVersionMismatch,
+            format!("lightpanda session_list returned {what}"),
+        )
+    };
+    let mut text = String::new();
+    for block in &result.content {
+        if let rmcp::model::ContentBlock::Text(content) = block {
+            text.push_str(&content.text);
+        }
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(text.trim()).map_err(|_| mismatch("unparseable content"))?;
+    let entries = value
+        .as_array()
+        .ok_or_else(|| mismatch("a non-array body"))?;
+    let mut ids = Vec::new();
+    for entry in entries {
+        let id = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| mismatch("entries without string ids"))?;
+        ids.push(id.to_string());
+    }
+    Ok(ids)
 }
 
 /// Serialized, idempotent provisioner for the managed WSL2 Lightpanda runtime.
 pub struct BrowserRuntimeManager {
     adapter: Arc<WslHostAdapter<Arc<dyn WslCommandRunner>>>,
     downloader: Arc<dyn RuntimeDownloader>,
-    smoke_verifier: Arc<dyn McpSmokeVerifier>,
+    contract_verifier: Arc<dyn RuntimeContractVerifier>,
     manifest: RuntimeManifest,
     /// Managed distro install root (LocalAppData on Windows).
     wsl_dir: PathBuf,
@@ -506,18 +506,20 @@ pub struct BrowserRuntimeManager {
 
 /// Fixed shell fragment that re-asserts the runtime user's directory layout
 /// after import (rootfs already ships it; idempotent by design).
-const RUNTIME_DIRS_FRAGMENT: &str = "mkdir -p /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts /opt/local-workspaces/lightpanda && chown -R localworkspaces:localworkspaces /var/lib/local-workspaces /opt/local-workspaces/lightpanda";
+const RUNTIME_DIRS_FRAGMENT: &str = "mkdir -p /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts /var/lib/local-workspaces/browser/pandascripts /opt/local-workspaces/lightpanda && chown -R localworkspaces:localworkspaces /var/lib/local-workspaces /opt/local-workspaces/lightpanda";
 
 /// Fixed shell fragment for Reset Browser Data: removes only the browser
 /// profile/cookies/cache/artifacts directories and recreates them with the
 /// runtime user as owner. Never touches the distro or the Lightpanda binary.
+/// `pandascripts` is intentionally preserved: saved scripts survive Reset and
+/// are only removed by Remove Browser Runtime.
 const RESET_BROWSER_DATA_FRAGMENT: &str = "rm -rf /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts && mkdir -p /var/lib/local-workspaces/browser/profile /var/lib/local-workspaces/browser/cookies /var/lib/local-workspaces/browser/cache /var/lib/local-workspaces/browser/artifacts && chown -R localworkspaces:localworkspaces /var/lib/local-workspaces/browser";
 
 impl BrowserRuntimeManager {
     pub fn new(
         runner: Arc<dyn WslCommandRunner>,
         downloader: Arc<dyn RuntimeDownloader>,
-        smoke_verifier: Arc<dyn McpSmokeVerifier>,
+        contract_verifier: Arc<dyn RuntimeContractVerifier>,
         manifest: RuntimeManifest,
         browser_root: PathBuf,
     ) -> Arc<Self> {
@@ -527,7 +529,7 @@ impl BrowserRuntimeManager {
         Arc::new(Self {
             adapter: Arc::new(WslHostAdapter::new(runner)),
             downloader,
-            smoke_verifier,
+            contract_verifier,
             manifest,
             wsl_dir,
             staging_dir,
@@ -536,7 +538,7 @@ impl BrowserRuntimeManager {
         })
     }
 
-    /// Production wiring: real WSL runner, HTTPS downloader, MCP smoke
+    /// Production wiring: real WSL runner, HTTPS downloader, HTTP contract
     /// verifier, bundled manifest, LocalAppData paths.
     #[cfg(windows)]
     pub fn production(manifest_json: &str) -> Result<Arc<Self>, CoreError> {
@@ -546,7 +548,7 @@ impl BrowserRuntimeManager {
         Ok(Self::new(
             Arc::new(RealWslCommandRunner),
             Arc::new(HttpsRuntimeDownloader::new()?),
-            Arc::new(RealMcpSmokeVerifier::new(PathBuf::from("wsl.exe"))),
+            Arc::new(RealRuntimeContractVerifier::new(PathBuf::from("wsl.exe"))),
             manifest,
             browser_root,
         ))
@@ -755,10 +757,10 @@ impl BrowserRuntimeManager {
 
         self.set_state(RuntimeProvisionState::VerifyingRuntime, None)
             .await;
-        if let Err(error) = self.smoke_verifier.smoke_verify(&distro_name).await {
+        if let Err(error) = self.contract_verifier.verify(&distro_name).await {
             self.set_state(
                 RuntimeProvisionState::VerifyingRuntime,
-                Some("smoke_verification_failed"),
+                Some("contract_verification_failed"),
             )
             .await;
             return Err(error);
@@ -1400,21 +1402,21 @@ mod tests {
         }
     }
 
-    struct FakeSmoke {
+    struct FakeContractVerifier {
         ok: bool,
         calls: Arc<AtomicU32>,
     }
 
     #[async_trait]
-    impl McpSmokeVerifier for FakeSmoke {
-        async fn smoke_verify(&self, _distro_name: &str) -> Result<(), CoreError> {
+    impl RuntimeContractVerifier for FakeContractVerifier {
+        async fn verify(&self, _distro_name: &str) -> Result<(), CoreError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if self.ok {
                 Ok(())
             } else {
                 Err(CoreError::new(
                     ErrorCode::BrowserRuntimeVersionMismatch,
-                    "missing required native tools",
+                    "native tool contract mismatch",
                 ))
             }
         }
@@ -1424,20 +1426,20 @@ mod tests {
         tmp: &Path,
         runner: Arc<ScriptedRunner>,
         downloader: Arc<dyn RuntimeDownloader>,
-        smoke_ok: bool,
+        contract_ok: bool,
     ) -> (Arc<BrowserRuntimeManager>, Arc<AtomicU32>) {
-        let smoke_calls = Arc::new(AtomicU32::new(0));
+        let contract_calls = Arc::new(AtomicU32::new(0));
         let manager = BrowserRuntimeManager::new(
             runner.clone(),
             downloader,
-            Arc::new(FakeSmoke {
-                ok: smoke_ok,
-                calls: smoke_calls.clone(),
+            Arc::new(FakeContractVerifier {
+                ok: contract_ok,
+                calls: contract_calls.clone(),
             }),
             test_manifest(),
             tmp.to_path_buf(),
         );
-        (manager, smoke_calls)
+        (manager, contract_calls)
     }
 
     fn healthy_world() -> FakeWorld {
@@ -1510,7 +1512,7 @@ mod tests {
         let world = healthy_world();
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, contract_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
 
         // Seed the marker with the manager's install id (owned by this install).
         let install_id = manager.install_id_for_test().await;
@@ -1521,7 +1523,7 @@ mod tests {
         let state = manager.ensure_runtime().await.unwrap();
         assert_eq!(state, RuntimeProvisionState::Ready);
         assert_eq!(manager.current_state(), RuntimeProvisionState::Ready);
-        assert_eq!(smoke_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(contract_calls.load(Ordering::SeqCst), 1);
 
         let calls = calls.lock().await.clone();
         assert!(!calls_contain(&calls, "--import"));
@@ -1538,7 +1540,7 @@ mod tests {
         };
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, contract_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
 
         let state = manager.ensure_runtime().await.unwrap();
         assert_eq!(state, RuntimeProvisionState::Ready);
@@ -1565,7 +1567,7 @@ mod tests {
         assert_eq!(identity.distro_name, PREFERRED_DISTRO_NAME);
         let marker = world_ref.lock().await.marker.clone().unwrap();
         assert_eq!(marker.install_id, identity.install_id);
-        assert_eq!(smoke_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(contract_calls.load(Ordering::SeqCst), 1);
 
         // State file persisted atomically as ready.
         let state_file = tmp.path().join("wsl").join(RUNTIME_STATE_FILE);
@@ -1578,7 +1580,8 @@ mod tests {
         let world = FakeWorld::default(); // WSL not installed, stays absent
         let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
 
         let err = manager.ensure_runtime().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::BrowserWslRebootRequired);
@@ -1595,7 +1598,8 @@ mod tests {
         let world = FakeWorld::default();
         let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
 
         // First attempt: WSL absent -> reboot required.
         let err = manager.ensure_runtime().await.unwrap_err();
@@ -1620,7 +1624,8 @@ mod tests {
         };
         let (runner, calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::NetworkFailure);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
 
         let err = manager.ensure_runtime().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::BrowserRuntimeDownloadFailed);
@@ -1638,7 +1643,8 @@ mod tests {
         };
         let (runner, calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::IntegrityFailure);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
 
         let err = manager.ensure_runtime().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::BrowserRuntimeIntegrityFailed);
@@ -1656,7 +1662,8 @@ mod tests {
         };
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
         // The in-distro digest will not match the pinned manifest digest.
         world_ref.lock().await.lightpanda_digest = "deadbeef".repeat(8);
 
@@ -1685,7 +1692,8 @@ mod tests {
         };
         let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
 
         let state = manager.ensure_runtime().await.unwrap();
         assert_eq!(state, RuntimeProvisionState::Ready);
@@ -1706,7 +1714,8 @@ mod tests {
         };
         let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
 
         let m1 = manager.clone();
         let m2 = manager.clone();
@@ -1732,7 +1741,8 @@ mod tests {
         let world = healthy_world();
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
         let install_id = manager.install_id_for_test().await;
         world_ref.lock().await.marker = Some(OwnershipMarker::new(install_id));
         manager.seed_identity_for_test().await;
@@ -1753,7 +1763,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn smoke_verification_failure_blocks_ready() {
+    async fn contract_verification_failure_blocks_ready() {
         let tmp = tempfile::tempdir().unwrap();
         let world = FakeWorld {
             wsl_installed: true,
@@ -1761,11 +1771,233 @@ mod tests {
         };
         let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, false);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, false);
 
         let err = manager.ensure_runtime().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::BrowserRuntimeVersionMismatch);
         assert_ne!(manager.current_state(), RuntimeProvisionState::Ready);
+    }
+
+    // --- pandascripts layout -------------------------------------------------
+
+    #[tokio::test]
+    async fn provisioning_creates_pandascripts_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Full provisioning flow: no distro yet, so the runtime directory
+        // fragment actually runs.
+        let world = FakeWorld {
+            wsl_installed: true,
+            ..Default::default()
+        };
+        let (runner, calls, _world_ref) = ScriptedRunner::new(world);
+        let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
+        let (manager, _contract_calls) = build_manager(tmp.path(), runner, downloader, true);
+
+        let state = manager.ensure_runtime().await.unwrap();
+        assert_eq!(state, RuntimeProvisionState::Ready);
+        let calls = calls.lock().await.clone();
+        let created = calls.iter().any(|argv| {
+            argv.iter().any(|a| {
+                a.contains("mkdir -p")
+                    && a.contains("/var/lib/local-workspaces/browser/pandascripts")
+            })
+        });
+        assert!(
+            created,
+            "provisioning must create the pandascripts directory"
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_browser_data_preserves_pandascripts() {
+        // The provisioning layout includes pandascripts...
+        assert!(RUNTIME_DIRS_FRAGMENT.contains("/var/lib/local-workspaces/browser/pandascripts"));
+        // ...while Reset Browser Data never removes or recreates it: saved
+        // scripts survive Reset and are only removed by Remove Browser Runtime.
+        assert!(!RESET_BROWSER_DATA_FRAGMENT.contains("pandascripts"));
+
+        let tmp = tempfile::tempdir().unwrap();
+        let (manager, _world_ref, calls) = provisioned_manager(tmp.path()).await;
+        manager.reset_browser_data().await.unwrap();
+        let calls = calls.lock().await.clone();
+        assert!(calls.iter().all(|argv| argv
+            .iter()
+            .all(|a| !(a.contains("rm -rf") && a.contains("pandascripts")))));
+    }
+
+    // --- HTTP contract verification ------------------------------------------
+
+    #[derive(Clone)]
+    struct ContractFakeConfig {
+        server_version: String,
+        tools_json: serde_json::Value,
+        session_ids: Vec<String>,
+    }
+
+    async fn contract_mcp_handler(
+        axum::extract::State(config): axum::extract::State<ContractFakeConfig>,
+        body: axum::body::Bytes,
+    ) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let body_value: serde_json::Value =
+            serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+        let method = body_value
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if method == "notifications/initialized" {
+            return axum::http::StatusCode::ACCEPTED.into_response();
+        }
+        let id = body_value
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let result = match method {
+            "initialize" => serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "lightpanda", "version": config.server_version},
+            }),
+            "tools/list" => serde_json::json!({ "tools": config.tools_json }),
+            "tools/call" => {
+                let sessions: Vec<serde_json::Value> = config
+                    .session_ids
+                    .iter()
+                    .map(|session_id| serde_json::json!({ "id": session_id }))
+                    .collect();
+                serde_json::json!({
+                    "content": [{"type": "text", "text": serde_json::to_string(&sessions).unwrap()}],
+                    "isError": false,
+                })
+            }
+            _ => serde_json::json!({}),
+        };
+        axum::Json(serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": result,
+        }))
+        .into_response()
+    }
+
+    async fn start_contract_fake(config: ContractFakeConfig) -> url::Url {
+        let app = axum::Router::new()
+            .route("/mcp", axum::routing::post(contract_mcp_handler))
+            .with_state(config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind contract fake");
+        let url: url::Url = format!("http://{}/mcp", listener.local_addr().unwrap())
+            .parse()
+            .unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        url
+    }
+
+    fn pinned_tools_json() -> serde_json::Value {
+        let contract = crate::browser::contract::pinned_contract().unwrap();
+        let tools: Vec<serde_json::Value> = contract
+            .tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "inputSchema": tool.input_schema,
+                })
+            })
+            .collect();
+        serde_json::Value::Array(tools)
+    }
+
+    async fn contract_client(
+        config: ContractFakeConfig,
+    ) -> crate::browser::http::LightpandaHttpClient {
+        let url = start_contract_fake(config).await;
+        crate::browser::http::LightpandaHttpClient::new(url, Duration::from_secs(5)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn http_contract_verification_accepts_exact_contract_ignoring_server_info_version() {
+        let client = contract_client(ContractFakeConfig {
+            // Deliberately not 0.3.7: serverInfo.version is MCP protocol
+            // metadata, never the binary version gate.
+            server_version: "0.1.0".to_string(),
+            tools_json: pinned_tools_json(),
+            session_ids: vec!["default".to_string()],
+        })
+        .await;
+        verify_http_contract(&client).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn http_contract_verification_rejects_missing_tool() {
+        let mut tools = pinned_tools_json();
+        tools.as_array_mut().unwrap().pop();
+        let client = contract_client(ContractFakeConfig {
+            server_version: "0.1.0".to_string(),
+            tools_json: tools,
+            session_ids: vec!["default".to_string()],
+        })
+        .await;
+        let err = verify_http_contract(&client).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserRuntimeVersionMismatch);
+    }
+
+    #[tokio::test]
+    async fn http_contract_verification_rejects_unexpected_tool() {
+        let mut tools = pinned_tools_json();
+        tools.as_array_mut().unwrap().push(serde_json::json!({
+            "name": "bogusExtraTool",
+            "description": "not in the pinned contract",
+            "inputSchema": {"type": "object"},
+        }));
+        let client = contract_client(ContractFakeConfig {
+            server_version: "0.1.0".to_string(),
+            tools_json: tools,
+            session_ids: vec!["default".to_string()],
+        })
+        .await;
+        let err = verify_http_contract(&client).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserRuntimeVersionMismatch);
+    }
+
+    #[tokio::test]
+    async fn http_contract_verification_rejects_schema_drift() {
+        let mut tools = pinned_tools_json();
+        let first = &mut tools.as_array_mut().unwrap()[0];
+        first
+            .pointer_mut("/inputSchema/properties")
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                "driftedArg".to_string(),
+                serde_json::json!({"type": "string"}),
+            );
+        let client = contract_client(ContractFakeConfig {
+            server_version: "0.1.0".to_string(),
+            tools_json: tools,
+            session_ids: vec!["default".to_string()],
+        })
+        .await;
+        let err = verify_http_contract(&client).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserRuntimeVersionMismatch);
+    }
+
+    #[tokio::test]
+    async fn http_contract_verification_rejects_bootstrap_session_pollution() {
+        let client = contract_client(ContractFakeConfig {
+            server_version: "0.1.0".to_string(),
+            tools_json: pinned_tools_json(),
+            session_ids: vec!["default".to_string(), "hidden-bootstrap".to_string()],
+        })
+        .await;
+        let err = verify_http_contract(&client).await.unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserRuntimeVersionMismatch);
     }
 
     #[tokio::test]
@@ -1774,7 +2006,8 @@ mod tests {
         let world = healthy_world();
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner.clone(), downloader, true);
+        let (manager, _contract_calls) =
+            build_manager(tmp.path(), runner.clone(), downloader, true);
         let install_id = manager.install_id_for_test().await;
         {
             let mut w = world_ref.lock().await;
@@ -1812,7 +2045,7 @@ mod tests {
         let world = healthy_world();
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp, runner, downloader, true);
+        let (manager, _contract_calls) = build_manager(tmp, runner, downloader, true);
         let install_id = manager.install_id_for_test().await;
         world_ref.lock().await.marker = Some(OwnershipMarker::new(install_id));
         manager.seed_identity_for_test().await;
@@ -1848,7 +2081,7 @@ mod tests {
         };
         let (runner, _calls, _world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner, downloader, true);
+        let (manager, _contract_calls) = build_manager(tmp.path(), runner, downloader, true);
 
         let err = manager.reset_browser_data().await.unwrap_err();
         assert_eq!(err.code, ErrorCode::BrowserRuntimeNotReady);
@@ -1860,7 +2093,7 @@ mod tests {
         let world = healthy_world();
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner, downloader, true);
+        let (manager, _contract_calls) = build_manager(tmp.path(), runner, downloader, true);
         // Marker belongs to a different install: never treated as owned.
         world_ref.lock().await.marker = Some(OwnershipMarker::new("other-install".to_string()));
         manager.seed_identity_for_test().await;
@@ -1916,7 +2149,7 @@ mod tests {
         let world = healthy_world();
         let (runner, calls, world_ref) = ScriptedRunner::new(world);
         let (downloader, _dl_calls) = FakeDownloader::new(DownloaderMode::Ok);
-        let (manager, _smoke_calls) = build_manager(tmp.path(), runner, downloader, true);
+        let (manager, _contract_calls) = build_manager(tmp.path(), runner, downloader, true);
         world_ref.lock().await.marker = Some(OwnershipMarker::new("other-install".to_string()));
         manager.seed_identity_for_test().await;
 

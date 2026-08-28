@@ -24,6 +24,20 @@ pub const MARKER_PATH: &str = "/etc/local-workspaces-runtime.json";
 pub const RUNTIME_USER: &str = "localworkspaces";
 /// Lightpanda executable path inside the managed distro.
 pub const LIGHTPANDA_BIN: &str = "/opt/local-workspaces/lightpanda/current/lightpanda";
+/// Fixed working directory for the Lightpanda HTTP MCP server. Also the
+/// resolution root for `save`/PandaScript paths; Reset Browser Data must
+/// never remove it.
+pub const PANDASCRIPTS_DIR: &str = "/var/lib/local-workspaces/browser/pandascripts";
+/// Canonical cookie store handed to the Lightpanda HTTP server.
+pub const COOKIE_STORE_PATH: &str = "/var/lib/local-workspaces/browser/cookies/canonical.json";
+/// Cookie jar written back when the Lightpanda HTTP server exits.
+pub const COOKIE_JAR_PATH: &str = "/var/lib/local-workspaces/browser/cookies/default.exit.json";
+/// HTTP cache directory for the Lightpanda HTTP server.
+pub const HTTP_CACHE_DIR: &str = "/var/lib/local-workspaces/browser/cache";
+/// Fixed bound on HTTP cache entries handed to the server.
+pub const HTTP_CACHE_ENTRY_LIMIT: u32 = 1_000;
+/// The HTTP server always binds the WSL-side loopback only.
+pub const LIGHTPANDA_HTTP_HOST: &str = "127.0.0.1";
 /// Fixed isolation config written to the managed distro.
 pub const WSL_CONF_CONTENT: &str =
     "[automount]\nenabled=false\n\n[interop]\nenabled=false\nappendWindowsPath=false\n";
@@ -364,6 +378,63 @@ pub fn verify_ownership(
         ));
     }
     Ok(())
+}
+
+/// Fixed argv for the Lightpanda MCP HTTP server child. Pure data: this list
+/// is later passed verbatim to `wsl.exe` as an argument array; no shell is
+/// ever involved. The working directory is the fixed PandaScript directory so
+/// `save` paths can never escape it through relative traversal. Only the
+/// app-selected port is formatted, as a decimal argv element.
+pub fn lightpanda_http_argv(distro_name: &str, port: u16) -> Result<Vec<String>, CoreError> {
+    validate_distro_name(distro_name)?;
+    Ok(vec![
+        "-d".to_string(),
+        distro_name.to_string(),
+        "-u".to_string(),
+        RUNTIME_USER.to_string(),
+        "--cd".to_string(),
+        PANDASCRIPTS_DIR.to_string(),
+        "--".to_string(),
+        LIGHTPANDA_BIN.to_string(),
+        "mcp".to_string(),
+        "--log-level".to_string(),
+        "warn".to_string(),
+        "--host".to_string(),
+        LIGHTPANDA_HTTP_HOST.to_string(),
+        "--port".to_string(),
+        port.to_string(),
+        "--cookie".to_string(),
+        COOKIE_STORE_PATH.to_string(),
+        "--cookie-jar".to_string(),
+        COOKIE_JAR_PATH.to_string(),
+        "--http-cache-dir".to_string(),
+        HTTP_CACHE_DIR.to_string(),
+        "--http-cache-entry-limit".to_string(),
+        HTTP_CACHE_ENTRY_LIMIT.to_string(),
+    ])
+}
+
+/// Builds the fixed `wsl.exe` child command that runs the Lightpanda MCP HTTP
+/// server on the WSL-side loopback as the unprivileged runtime user. No
+/// console window; telemetry and core dumps disabled; `--log-level warn`
+/// enforced.
+pub fn build_lightpanda_http_command(
+    wsl_exe: &Path,
+    distro_name: &str,
+    port: u16,
+) -> Result<std::process::Command, CoreError> {
+    let argv = lightpanda_http_argv(distro_name, port)?;
+    let mut cmd = std::process::Command::new(wsl_exe);
+    cmd.args(argv);
+    cmd.env("LIGHTPANDA_DISABLE_TELEMETRY", "true");
+    cmd.env("LIGHTPANDA_DISABLE_CORE_DUMP", "1");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    Ok(cmd)
 }
 
 /// Builds the fixed `wsl.exe` child command that runs a Lightpanda MCP process
@@ -753,6 +824,50 @@ impl<R: WslCommandRunner> WslHostAdapter<R> {
                 format!("failed to spawn lightpanda child: {e}"),
             )
         })
+    }
+
+    /// Spawns the shared Lightpanda MCP HTTP server child on the WSL-side
+    /// loopback. The caller owns the returned child and must terminate it on
+    /// shutdown; the server is never exposed beyond loopback.
+    pub fn spawn_lightpanda_http_server(
+        &self,
+        distro_name: &str,
+        port: u16,
+    ) -> Result<std::process::Child, CoreError> {
+        let mut cmd = build_lightpanda_http_command(&self.wsl_exe, distro_name, port)?;
+        cmd.stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        cmd.spawn().map_err(|e| {
+            CoreError::new(
+                ErrorCode::BrowserWslUnavailable,
+                format!("failed to spawn lightpanda http server: {e}"),
+            )
+        })
+    }
+
+    /// Stops any Lightpanda server process inside the owned distro. Exit code
+    /// 1 from `pkill` only means no process matched, which is a successful
+    /// stop. Used before repair/reset/remove so no child survives the
+    /// operation.
+    pub async fn stop_lightpanda_server(&self, distro_name: &str) -> Result<(), CoreError> {
+        let output = self
+            .exec_fixed(
+                distro_name,
+                WslUser::Root,
+                &["pkill", "-TERM", "-x", "lightpanda"],
+                None,
+            )
+            .await?;
+        if output.exit_code == 0 || output.exit_code == 1 {
+            Ok(())
+        } else {
+            Err(sanitized_wsl_error(
+                ErrorCode::BrowserWslUnavailable,
+                "stop lightpanda server",
+                output.exit_code,
+            ))
+        }
     }
 
     /// Launches the elevated WSL install flow (UAC consent; never bypassed).
@@ -1262,6 +1377,138 @@ mod tests {
     #[test]
     fn lightpanda_command_rejects_invalid_distro_name() {
         let err = build_lightpanda_command(Path::new("wsl.exe"), "bad name", &[]).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserWslUnavailable);
+    }
+
+    #[test]
+    fn lightpanda_http_command_matches_planned_argv() {
+        let cmd = build_lightpanda_http_command(
+            Path::new("wsl.exe"),
+            "LocalWorkspaces-Lightpanda",
+            38741,
+        )
+        .unwrap();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "localworkspaces",
+                "--cd",
+                "/var/lib/local-workspaces/browser/pandascripts",
+                "--",
+                "/opt/local-workspaces/lightpanda/current/lightpanda",
+                "mcp",
+                "--log-level",
+                "warn",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "38741",
+                "--cookie",
+                "/var/lib/local-workspaces/browser/cookies/canonical.json",
+                "--cookie-jar",
+                "/var/lib/local-workspaces/browser/cookies/default.exit.json",
+                "--http-cache-dir",
+                "/var/lib/local-workspaces/browser/cache",
+                "--http-cache-entry-limit",
+                "1000",
+            ]
+        );
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.to_string_lossy().into_owned(),
+                    v?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(
+            envs.get("LIGHTPANDA_DISABLE_TELEMETRY").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            envs.get("LIGHTPANDA_DISABLE_CORE_DUMP").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn lightpanda_http_command_rejects_invalid_distro_name() {
+        let err =
+            build_lightpanda_http_command(Path::new("wsl.exe"), "bad name", 38741).unwrap_err();
+        assert_eq!(err.code, ErrorCode::BrowserWslUnavailable);
+    }
+
+    #[tokio::test]
+    async fn stop_lightpanda_server_uses_fixed_pkill_and_tolerates_absence() {
+        let (fake, calls) = FakeRunner::new();
+        fake.script(
+            &[
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "pkill",
+                "-TERM",
+                "-x",
+                "lightpanda",
+            ],
+            out(1, "", ""),
+        );
+        let adapter = WslHostAdapter::new(fake);
+        // Exit 1 means no process matched: still a successful stop.
+        adapter
+            .stop_lightpanda_server("LocalWorkspaces-Lightpanda")
+            .await
+            .unwrap();
+        let calls = calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0],
+            vec![
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "pkill",
+                "-TERM",
+                "-x",
+                "lightpanda",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_lightpanda_server_fails_closed_on_unexpected_exit() {
+        let (fake, _calls) = FakeRunner::new();
+        fake.script(
+            &[
+                "-d",
+                "LocalWorkspaces-Lightpanda",
+                "-u",
+                "root",
+                "--",
+                "pkill",
+                "-TERM",
+                "-x",
+                "lightpanda",
+            ],
+            out(2, "", "pkill failed"),
+        );
+        let adapter = WslHostAdapter::new(fake);
+        let err = adapter
+            .stop_lightpanda_server("LocalWorkspaces-Lightpanda")
+            .await
+            .unwrap_err();
         assert_eq!(err.code, ErrorCode::BrowserWslUnavailable);
     }
 

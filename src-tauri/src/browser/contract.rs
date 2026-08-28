@@ -29,7 +29,10 @@ pub const NATIVE_TOOL_MAPPINGS: &[(&str, &str)] = &[
     ("extract", "browser_lightpanda_extract"),
     ("tree", "browser_lightpanda_tree"),
     ("nodeDetails", "browser_lightpanda_node_details"),
-    ("interactiveElements", "browser_lightpanda_interactive_elements"),
+    (
+        "interactiveElements",
+        "browser_lightpanda_interactive_elements",
+    ),
     ("structuredData", "browser_lightpanda_structured_data"),
     ("detectForms", "browser_lightpanda_detect_forms"),
     ("click", "browser_lightpanda_click"),
@@ -108,8 +111,14 @@ pub fn verify_discovered_tools(discovered: &[rmcp::model::Tool]) -> Result<(), C
     let discovered_names: BTreeSet<&str> =
         discovered.iter().map(|tool| tool.name.as_ref()).collect();
     let expected_names: BTreeSet<&str> = pinned.keys().copied().collect();
-    let missing: Vec<&str> = expected_names.difference(&discovered_names).copied().collect();
-    let unexpected: Vec<&str> = discovered_names.difference(&expected_names).copied().collect();
+    let missing: Vec<&str> = expected_names
+        .difference(&discovered_names)
+        .copied()
+        .collect();
+    let unexpected: Vec<&str> = discovered_names
+        .difference(&expected_names)
+        .copied()
+        .collect();
     if !missing.is_empty() || !unexpected.is_empty() || discovered.len() != pinned.len() {
         return Err(CoreError::new(
             ErrorCode::BrowserRuntimeVersionMismatch,
@@ -212,9 +221,8 @@ mod tests {
                     Arc::new(input_schema),
                 );
                 if let Some(schema) = tool.output_schema.clone() {
-                    discovered = discovered.with_raw_output_schema(Arc::new(
-                        serde_json::from_value(schema).unwrap(),
-                    ));
+                    discovered = discovered
+                        .with_raw_output_schema(Arc::new(serde_json::from_value(schema).unwrap()));
                 }
                 discovered
             })
@@ -228,11 +236,36 @@ mod tests {
         let names: std::collections::BTreeSet<_> =
             c.tools.iter().map(|t| t.name.as_str()).collect();
         let expected: std::collections::BTreeSet<_> = [
-            "goto", "search", "markdown", "html", "links", "evaluate", "extract",
-            "tree", "nodeDetails", "interactiveElements", "structuredData", "detectForms",
-            "click", "fill", "scroll", "waitForSelector", "waitForScript", "waitForState",
-            "hover", "press", "selectOption", "setChecked", "findElement", "consoleLogs",
-            "getUrl", "getCookies", "getEnv", "save", "session_new", "session_list",
+            "goto",
+            "search",
+            "markdown",
+            "html",
+            "links",
+            "evaluate",
+            "extract",
+            "tree",
+            "nodeDetails",
+            "interactiveElements",
+            "structuredData",
+            "detectForms",
+            "click",
+            "fill",
+            "scroll",
+            "waitForSelector",
+            "waitForScript",
+            "waitForState",
+            "hover",
+            "press",
+            "selectOption",
+            "setChecked",
+            "findElement",
+            "consoleLogs",
+            "getUrl",
+            "getCookies",
+            "getEnv",
+            "save",
+            "session_new",
+            "session_list",
             "session_close",
         ]
         .into_iter()
@@ -249,7 +282,9 @@ mod tests {
             NATIVE_TOOL_MAPPINGS.iter().map(|(_, p)| *p).collect();
         assert_eq!(upstream.len(), 31);
         assert_eq!(public.len(), 31);
-        assert!(public.iter().all(|name| name.starts_with("browser_lightpanda_")));
+        assert!(public
+            .iter()
+            .all(|name| name.starts_with("browser_lightpanda_")));
     }
 
     #[test]
@@ -275,7 +310,9 @@ mod tests {
     fn no_upstream_schema_owns_reserved_session_id() {
         for tool in pinned_contract().unwrap().tools {
             assert!(
-                tool.input_schema.pointer("/properties/session_id").is_none(),
+                tool.input_schema
+                    .pointer("/properties/session_id")
+                    .is_none(),
                 "upstream tool {} now owns reserved session_id",
                 tool.name
             );

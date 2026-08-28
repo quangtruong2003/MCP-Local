@@ -169,13 +169,12 @@ impl LightpandaHttpClient {
                 ));
             }
         };
-        let result: rmcp::model::InitializeResult =
-            serde_json::from_value(value).map_err(|e| {
-                CoreError::new(
-                    ErrorCode::BrowserProtocolError,
-                    format!("invalid Lightpanda initialize result: {e}"),
-                )
-            })?;
+        let result: rmcp::model::InitializeResult = serde_json::from_value(value).map_err(|e| {
+            CoreError::new(
+                ErrorCode::BrowserProtocolError,
+                format!("invalid Lightpanda initialize result: {e}"),
+            )
+        })?;
         Ok(InitializeMetadata {
             protocol_version: result.protocol_version.to_string(),
             server_name: result.server_info.name,
@@ -193,7 +192,11 @@ impl LightpandaHttpClient {
     /// MCP `tools/list` on the `default` session.
     pub async fn list_tools_default(&self) -> Result<Vec<rmcp::model::Tool>, CoreError> {
         let envelope = self
-            .request("tools/list", Some(serde_json::json!({})), Some(DEFAULT_SESSION_ID))
+            .request(
+                "tools/list",
+                Some(serde_json::json!({})),
+                Some(DEFAULT_SESSION_ID),
+            )
             .await?;
         let value = match envelope {
             Envelope::Result(value) => value,
@@ -238,9 +241,15 @@ impl LightpandaHttpClient {
                 })?;
                 Ok(UpstreamToolResponse::Result(result))
             }
-            Envelope::RpcError { code, message, data } => {
-                Ok(UpstreamToolResponse::JsonRpcError { code, message, data })
-            }
+            Envelope::RpcError {
+                code,
+                message,
+                data,
+            } => Ok(UpstreamToolResponse::JsonRpcError {
+                code,
+                message,
+                data,
+            }),
         }
     }
 
@@ -263,9 +272,15 @@ impl LightpandaHttpClient {
         }
         match self.post(body, session).await? {
             PostOutcome::Body(bytes) => parse_envelope(&bytes, id),
-            PostOutcome::PreservedError { code, message, data } => {
-                Ok(Envelope::RpcError { code, message, data })
-            }
+            PostOutcome::PreservedError {
+                code,
+                message,
+                data,
+            } => Ok(Envelope::RpcError {
+                code,
+                message,
+                data,
+            }),
         }
     }
 
@@ -324,7 +339,11 @@ impl LightpandaHttpClient {
         if let Ok(value) = serde_json::from_slice::<Value>(&bytes) {
             if let Some(error) = value.get("error") {
                 if let Some((code, message, data)) = parse_rpc_error(error) {
-                    return Ok(PostOutcome::PreservedError { code, message, data });
+                    return Ok(PostOutcome::PreservedError {
+                        code,
+                        message,
+                        data,
+                    });
                 }
             }
         }
@@ -332,7 +351,9 @@ impl LightpandaHttpClient {
             ErrorCode::BrowserProtocolError,
             format!(
                 "Lightpanda MCP endpoint returned HTTP {status} for {}",
-                body.get("method").and_then(Value::as_str).unwrap_or("request")
+                body.get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or("request")
             ),
         ))
     }
@@ -444,7 +465,11 @@ fn parse_envelope(response: &[u8], expected_id: u64) -> Result<Envelope, CoreErr
     }
     if let Some(error) = envelope.get("error") {
         return match parse_rpc_error(error) {
-            Some((code, message, data)) => Ok(Envelope::RpcError { code, message, data }),
+            Some((code, message, data)) => Ok(Envelope::RpcError {
+                code,
+                message,
+                data,
+            }),
             None => Err(CoreError::new(
                 ErrorCode::BrowserProtocolError,
                 "Lightpanda MCP error object was malformed",
@@ -661,10 +686,7 @@ mod tests {
         assert_eq!(seen[0].body["id"], 1);
         assert_eq!(seen[2].body["id"], 2);
 
-        client
-            .call_tool("getUrl", Map::new(), None)
-            .await
-            .unwrap();
+        client.call_tool("getUrl", Map::new(), None).await.unwrap();
         let last_session = state
             .recorded
             .lock()
@@ -708,10 +730,7 @@ mod tests {
     async fn sse_response_is_unwrapped() {
         let (url, state) = start_fake(FakeMode::Sse).await;
         let client = client_for(&url);
-        let response = client
-            .call_tool("getUrl", Map::new(), None)
-            .await
-            .unwrap();
+        let response = client.call_tool("getUrl", Map::new(), None).await.unwrap();
         match response {
             UpstreamToolResponse::Result(result) => {
                 assert_ne!(result.is_error, Some(true));
@@ -759,9 +778,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_loss_maps_to_process_lost() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener);
         let url: url::Url = format!("http://{addr}/mcp").parse().unwrap();
@@ -777,10 +794,7 @@ mod tests {
     async fn upstream_tool_error_is_preserved() {
         let (url, _state) = start_fake(FakeMode::ToolError).await;
         let client = client_for(&url);
-        let response = client
-            .call_tool("click", Map::new(), None)
-            .await
-            .unwrap();
+        let response = client.call_tool("click", Map::new(), None).await.unwrap();
         match response {
             UpstreamToolResponse::Result(result) => {
                 assert_eq!(result.is_error, Some(true));
@@ -793,10 +807,7 @@ mod tests {
     async fn upstream_jsonrpc_error_is_preserved_verbatim() {
         let (url, _state) = start_fake(FakeMode::RpcError).await;
         let client = client_for(&url);
-        let response = client
-            .call_tool("click", Map::new(), None)
-            .await
-            .unwrap();
+        let response = client.call_tool("click", Map::new(), None).await.unwrap();
         match response {
             UpstreamToolResponse::JsonRpcError { code, message, .. } => {
                 assert_eq!(code, -32604);
@@ -819,12 +830,10 @@ mod tests {
                 .unwrap_err();
             assert_eq!(err.code, ErrorCode::InvalidArgument, "{bad}");
         }
-        assert!(
-            LightpandaHttpClient::new(
-                "http://127.0.0.1:38741/mcp".parse().unwrap(),
-                Duration::from_secs(5)
-            )
-            .is_ok()
-        );
+        assert!(LightpandaHttpClient::new(
+            "http://127.0.0.1:38741/mcp".parse().unwrap(),
+            Duration::from_secs(5)
+        )
+        .is_ok());
     }
 }
