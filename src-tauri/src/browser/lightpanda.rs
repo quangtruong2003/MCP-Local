@@ -485,7 +485,7 @@ pub trait NativeRuntimeGate: Send + Sync {
 pub struct SpawnedNativeServer {
     /// `None` only in test fixtures without a real child process.
     pub child: Option<tokio::process::Child>,
-    pub job: Option<JobHandle>,
+    pub(crate) job: Option<JobHandle>,
 }
 
 /// Launcher seam: spawns the shared server on the app-selected loopback port.

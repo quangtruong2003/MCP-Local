@@ -5,6 +5,21 @@ use super::types::{
     MAX_EVENT_LIMIT, MAX_TOOL_TIMEOUT_MS, MAX_VIEWPORT_EDGE,
 };
 
+/// Native tools whose `url` argument causes browser navigation and must
+/// therefore pass the Local Workspaces navigation policy before forwarding.
+/// `getCookies.url` only scopes cookie output and is not navigation.
+pub const NATIVE_NAVIGATION_URL_TOOLS: &[&str] = &[
+    "goto",
+    "markdown",
+    "html",
+    "links",
+    "evaluate",
+    "tree",
+    "interactiveElements",
+    "structuredData",
+    "detectForms",
+];
+
 pub fn validate_navigation_url(input: &str) -> Result<url::Url, CoreError> {
     let parsed = url::Url::parse(input).map_err(|_| {
         CoreError::new(
