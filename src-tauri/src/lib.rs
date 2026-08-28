@@ -19,7 +19,7 @@ pub struct AppState {
     pub port: u16,
     pub agent_policy: Arc<settings::AgentPolicyState>,
     pub agent_settings: Arc<settings::AgentSettingsController>,
-    pub browser: Arc<browser::manager::BrowserManager>,
+    pub browser: Arc<browser::lightpanda::LightpandaNativeService>,
     /// Typed WSL2/Lightpanda runtime provisioner. Construction is lazy and
     /// never downloads/installs; only session startup or explicit setup /
     /// repair commands drive provisioning.
@@ -116,27 +116,17 @@ pub fn run() {
                 browser::runtime::BrowserRuntimeManager::production(&manifest_json)
                     .map_err(|e| e.to_string())?;
 
-            let browser = Arc::new(
-                browser::manager::BrowserManager::with_lightpanda(
-                    core.clone(),
-                    dir.clone(),
-                    &app_settings,
-                    browser_runtime_manager.clone(),
-                )
-                .map_err(|e| e.to_string())?,
-            );
-
             // Single native Lightpanda MCP service backing the public
-            // browser_lightpanda_* tools. The runtime gate reuses the
-            // provisioning manager; the launcher owns the private HTTP server
-            // child inside the managed distro.
+            // browser_lightpanda_* tools and the desktop lifecycle commands.
+            // The runtime gate reuses the provisioning manager; the launcher
+            // owns the private HTTP server child inside the managed distro.
             let native_runtime_gate = Arc::new(
                 browser::lightpanda::NativeRuntimeManagerGate::new(browser_runtime_manager.clone()),
             );
             let native_launcher = Arc::new(browser::lightpanda::WslNativeServerLauncher::new(
                 std::path::PathBuf::from("wsl.exe"),
             ));
-            let native_browser = browser::lightpanda::LightpandaNativeService::new(
+            let browser = browser::lightpanda::LightpandaNativeService::new(
                 native_runtime_gate,
                 native_launcher,
                 browser::types::BrowserRuntimeSettings::from(&app_settings),
@@ -146,7 +136,7 @@ pub fn run() {
                 core.clone(),
                 agent_policy.clone(),
                 agent_settings.clone(),
-                native_browser,
+                browser.clone(),
             ))?;
             app.manage(AppState {
                 core: core.clone(),
@@ -258,9 +248,7 @@ pub fn run() {
                     eprintln!("graceful connection stop on exit failed: {}", e.message);
                 }
                 let browser = app_handle.state::<AppState>().browser.clone();
-                if let Err(e) = tauri::async_runtime::block_on(browser.on_pause_changed(true)) {
-                    eprintln!("graceful browser stop on exit failed: {e}");
-                }
+                tauri::async_runtime::block_on(browser.stop());
             }
             _ => {}
         });

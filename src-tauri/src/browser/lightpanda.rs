@@ -688,6 +688,25 @@ impl LightpandaNativeService {
         // Dropping the JobHandle completes containment cleanup.
     }
 
+    /// Test-only seam: pre-seeds a fake running instance so lifecycle stops
+    /// become observable without a real WSL server. The injected client
+    /// points at a discard port and is never used.
+    #[cfg(test)]
+    pub async fn seed_test_instance(&self, distro_name: &str) {
+        let client = super::http::LightpandaHttpClient::new(
+            "http://127.0.0.1:9/mcp".parse().expect("static url parses"),
+            Duration::from_secs(1),
+        )
+        .expect("http client constructs");
+        *self.instance.lock().await = Some(NativeInstance {
+            distro_name: distro_name.to_string(),
+            child: None,
+            _job: None,
+            client: Arc::new(client),
+            native_tool_count: super::contract::EXPECTED_NATIVE_TOOL_COUNT,
+        });
+    }
+
     /// Returns a live verified client, starting the shared server lazily.
     /// Startup is single-flight; a lost instance is replaced only by the
     /// next independent call, never replayed automatically.

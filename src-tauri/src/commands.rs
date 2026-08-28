@@ -217,9 +217,7 @@ pub async fn set_paused(
     paused: bool,
 ) -> Result<(), String> {
     state.core.pause.set(paused);
-    if let Err(e) = state.browser.on_pause_changed(paused).await {
-        eprintln!("browser shutdown on Pause failed: {e}");
-    }
+    state.browser.on_pause_changed(paused).await;
     audit_ui(
         &state.core.db,
         None,
@@ -379,13 +377,14 @@ pub async fn update_app_settings(
         .agent_settings
         .save_full(&settings)
         .map_err(|e| settings_err("SETTINGS_SAVE_FAILED", e.message))?;
+    // Disabling Browser Automation stops the native HTTP service; enabling
+    // is lazy and provisions nothing here.
     state
         .browser
         .apply_settings(crate::browser::types::BrowserRuntimeSettings::from(
             &settings,
         ))
-        .await
-        .map_err(err_string)?;
+        .await;
 
     sync_launch_on_startup(&app, settings.launch_on_startup)?;
     use std::sync::atomic::Ordering;
@@ -416,30 +415,34 @@ fn sync_launch_on_startup(app: &tauri::AppHandle, want: bool) -> Result<(), Stri
     }
 }
 
-/// Truthful capability flags for the Lightpanda runtime: semantic automation
-/// over native MCP works; visual/rendering features fail closed.
+/// Truthful capability flags for the Lightpanda runtime: the full native MCP
+/// tool surface over private HTTP works; visual/rendering features fail
+/// closed.
 #[derive(Serialize)]
 pub struct BrowserRuntimeCapabilities {
+    pub native_mcp: bool,
+    pub native_http_sessions: bool,
+    pub full_native_tool_parity: bool,
     pub visual_rendering: bool,
     pub screenshots: bool,
-    pub file_upload: bool,
-    pub managed_downloads: bool,
-    pub native_mcp: bool,
 }
 
 /// Redacted browser runtime diagnostics for the Settings page (mirrors the
 /// `BrowserRuntimeStatus` TypeScript type). Security invariants: never
-/// contains an active page URL/title, history, cookies, download filenames,
-/// or absolute host paths; only provision state, the pinned Lightpanda
-/// version, and boolean flags.
+/// contains the loopback port, session IDs, active URLs/titles, history,
+/// cookies, PandaScript contents, or absolute host paths; only provision
+/// state, the pinned Lightpanda version, native contract facts, and boolean
+/// flags.
 #[derive(Serialize)]
 pub struct BrowserRuntimeStatus {
     pub enabled: bool,
     pub running: bool,
     pub backend: &'static str,
-    pub mode: &'static str,
+    pub transport: &'static str,
     pub runtime_state: RuntimeProvisionState,
     pub lightpanda_version: Option<String>,
+    pub native_tool_count: usize,
+    pub contract_verified: bool,
     pub wsl_installed: bool,
     pub distro_ready: bool,
     pub reboot_required: bool,
@@ -476,9 +479,9 @@ fn provision_flags(state: RuntimeProvisionState) -> ProvisionFlags {
     }
 }
 
-/// Assembles the redacted runtime status from the manager session state and
-/// the persisted provisioner state. The manager's richer session status
-/// (which includes the active page URL/title) is intentionally narrowed here.
+/// Assembles the redacted runtime status from the native service state and
+/// the persisted provisioner state. Read-only: never starts the service, so
+/// opening Settings stays side-effect free.
 async fn build_browser_runtime_status(state: &AppState) -> BrowserRuntimeStatus {
     let session = state.browser.status().await;
     let snapshot = state.browser_runtime_manager.state_snapshot();
@@ -501,19 +504,23 @@ async fn build_browser_runtime_status(state: &AppState) -> BrowserRuntimeStatus 
         enabled: session.enabled,
         running: session.running,
         backend: "lightpanda",
-        mode: "background",
+        transport: "private_http",
         runtime_state,
         lightpanda_version: Some(lightpanda_version),
+        native_tool_count: session.native_tool_count,
+        contract_verified: session.contract_verified,
         wsl_installed: flags.wsl_installed,
         distro_ready: flags.distro_ready,
         reboot_required: flags.reboot_required,
         repair_required: flags.repair_required,
         capabilities: BrowserRuntimeCapabilities {
+            native_mcp: true,
+            native_http_sessions: true,
+            // Full parity is a fact only after the pinned contract has been
+            // verified against the running server.
+            full_native_tool_parity: session.contract_verified,
             visual_rendering: false,
             screenshots: false,
-            file_upload: false,
-            managed_downloads: false,
-            native_mcp: true,
         },
     }
 }
@@ -555,6 +562,15 @@ pub async fn setup_browser_runtime(
 pub async fn repair_browser_runtime(
     state: State<'_, AppState>,
 ) -> Result<BrowserRuntimeStatus, String> {
+    repair_browser_runtime_inner(&state).await
+}
+
+/// Stops the native HTTP service first so repair never replaces runtime
+/// files underneath an active Lightpanda process. Repair leaves the service
+/// stopped; the next native browser call lazily starts a fresh verified
+/// server.
+async fn repair_browser_runtime_inner(state: &AppState) -> Result<BrowserRuntimeStatus, String> {
+    state.browser.stop().await;
     state
         .browser_runtime_manager
         .repair_runtime()
@@ -568,27 +584,31 @@ pub async fn repair_browser_runtime(
         None,
         None,
     );
-    Ok(build_browser_runtime_status(&state).await)
+    Ok(build_browser_runtime_status(state).await)
 }
 
-/// Desktop-only Reset Browser Data: closes all page children, then removes
-/// only the owned WSL profile/cookies/cache/artifacts. Never removes the
-/// distro or the Lightpanda binary.
+/// Desktop-only Reset Browser Data: stops the native HTTP service, then
+/// removes only the owned WSL profile/cookies/cache/artifacts. Never removes
+/// the distro or the Lightpanda binary.
 #[tauri::command]
 pub async fn reset_browser_data(
     state: State<'_, AppState>,
 ) -> Result<BrowserRuntimeStatus, String> {
-    state.browser.close().await.map_err(err_string)?;
+    reset_browser_data_inner(&state).await
+}
+
+async fn reset_browser_data_inner(state: &AppState) -> Result<BrowserRuntimeStatus, String> {
+    state.browser.stop().await;
     state
         .browser_runtime_manager
         .reset_browser_data()
         .await
         .map_err(err_string)?;
     audit_ui(&state.core.db, None, "reset_browser_data", None, None, None);
-    Ok(build_browser_runtime_status(&state).await)
+    Ok(build_browser_runtime_status(state).await)
 }
 
-/// Desktop-only Remove Browser Runtime: closes all page children, then
+/// Desktop-only Remove Browser Runtime: stops the native HTTP service, then
 /// unregisters the owned distro and deletes app-owned runtime directories
 /// only after full ownership verification. The Browser Automation toggle is
 /// preserved; the next browser use provisions again.
@@ -596,7 +616,11 @@ pub async fn reset_browser_data(
 pub async fn remove_browser_runtime(
     state: State<'_, AppState>,
 ) -> Result<BrowserRuntimeStatus, String> {
-    state.browser.close().await.map_err(err_string)?;
+    remove_browser_runtime_inner(&state).await
+}
+
+async fn remove_browser_runtime_inner(state: &AppState) -> Result<BrowserRuntimeStatus, String> {
+    state.browser.stop().await;
     state
         .browser_runtime_manager
         .remove_runtime()
@@ -610,7 +634,7 @@ pub async fn remove_browser_runtime(
         None,
         None,
     );
-    Ok(build_browser_runtime_status(&state).await)
+    Ok(build_browser_runtime_status(state).await)
 }
 
 #[cfg(test)]
@@ -718,38 +742,43 @@ mod tests {
             enabled: true,
             running: true,
             backend: "lightpanda",
-            mode: "background",
+            transport: "private_http",
             runtime_state: RuntimeProvisionState::Ready,
             lightpanda_version: Some("0.3.7".into()),
+            native_tool_count: 31,
+            contract_verified: true,
             wsl_installed: true,
             distro_ready: true,
             reboot_required: false,
             repair_required: false,
             capabilities: BrowserRuntimeCapabilities {
+                native_mcp: true,
+                native_http_sessions: true,
+                full_native_tool_parity: true,
                 visual_rendering: false,
                 screenshots: false,
-                file_upload: false,
-                managed_downloads: false,
-                native_mcp: true,
             },
         };
         let json = serde_json::to_string(&status).unwrap();
-        // Exact key whitelists prove no URL/title/history/cookie/path or
-        // download-filename field can ever be serialized.
+        // Exact key whitelists prove no loopback port, URL, session ID,
+        // cookie, PandaScript content/path, or absolute runtime path field
+        // can ever be serialized.
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let keys: std::collections::BTreeSet<String> =
             parsed.as_object().unwrap().keys().cloned().collect();
         let expected: std::collections::BTreeSet<String> = [
             "backend",
             "capabilities",
+            "contract_verified",
             "distro_ready",
             "enabled",
             "lightpanda_version",
-            "mode",
+            "native_tool_count",
             "reboot_required",
             "repair_required",
             "running",
             "runtime_state",
+            "transport",
             "wsl_installed",
         ]
         .iter()
@@ -763,8 +792,8 @@ mod tests {
             .cloned()
             .collect();
         let expected_caps: std::collections::BTreeSet<String> = [
-            "file_upload",
-            "managed_downloads",
+            "full_native_tool_parity",
+            "native_http_sessions",
             "native_mcp",
             "screenshots",
             "visual_rendering",
@@ -773,13 +802,294 @@ mod tests {
         .map(|s| s.to_string())
         .collect();
         assert_eq!(cap_keys, expected_caps);
+        assert_eq!(parsed["native_tool_count"], 31);
+        assert_eq!(parsed["transport"], "private_http");
         for forbidden in [
-            "url", "title", "history", "cookie", "filename", "c:\\", "/home/",
+            "127.0.0.1",
+            "localhost",
+            "http://",
+            "cookie",
+            "pandascript",
+            "c:\\",
+            "/home/",
         ] {
             assert!(
                 !json.to_ascii_lowercase().contains(forbidden),
                 "runtime status leaks '{forbidden}': {json}"
             );
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Native lifecycle harness: a real LightpandaNativeService with a
+    // recording runtime gate, plus a runtime manager whose scripted WSL
+    // runner records the first provisioning touch and then refuses it.
+    // This makes the stop-before-mutate ordering observable without a
+    // Windows host.
+    // ------------------------------------------------------------------
+
+    use crate::browser::{
+        lightpanda::{
+            LightpandaNativeService, NativeRuntimeGate, NativeServerLauncher, SpawnedNativeServer,
+        },
+        runtime::{
+            BrowserRuntimeManager, RuntimeContractVerifier, RuntimeDownloader, RuntimeManifest,
+            RuntimeStateFile, RUNTIME_STATE_FILE,
+        },
+        types::BrowserRuntimeSettings,
+        wsl::{ManagedDistroIdentity, WslCommand, WslCommandOutput, WslCommandRunner},
+    };
+    use std::sync::Arc;
+
+    #[derive(Default)]
+    struct LifecycleEvents(std::sync::Mutex<Vec<&'static str>>);
+
+    struct RecordingGate {
+        events: Arc<LifecycleEvents>,
+    }
+
+    #[async_trait::async_trait]
+    impl NativeRuntimeGate for RecordingGate {
+        async fn ensure_ready(&self) -> Result<String, CoreError> {
+            self.events.0.lock().unwrap().push("gate_ensure_ready");
+            Ok("test-distro".to_string())
+        }
+
+        async fn stop_server(&self, _distro_name: &str) -> Result<(), CoreError> {
+            self.events.0.lock().unwrap().push("service_stop");
+            Ok(())
+        }
+    }
+
+    struct RefusingLauncher;
+
+    #[async_trait::async_trait]
+    impl NativeServerLauncher for RefusingLauncher {
+        async fn spawn(
+            &self,
+            _distro_name: &str,
+            _port: u16,
+        ) -> Result<SpawnedNativeServer, CoreError> {
+            Err(CoreError::new(
+                lc_core::error::ErrorCode::BrowserStartFailed,
+                "test launcher never spawns",
+            ))
+        }
+    }
+
+    struct RecordingRunner {
+        events: Arc<LifecycleEvents>,
+    }
+
+    #[async_trait::async_trait]
+    impl WslCommandRunner for RecordingRunner {
+        async fn run(&self, _request: WslCommand) -> Result<WslCommandOutput, CoreError> {
+            self.events.0.lock().unwrap().push("runtime_op");
+            Err(CoreError::new(
+                lc_core::error::ErrorCode::BrowserWslUnavailable,
+                "test runner refuses wsl calls",
+            ))
+        }
+
+        fn launch_elevated_install(&self) -> Result<(), CoreError> {
+            Err(CoreError::new(
+                lc_core::error::ErrorCode::BrowserWslUnavailable,
+                "test runner refuses elevated install",
+            ))
+        }
+    }
+
+    struct RefusingDownloader;
+
+    #[async_trait::async_trait]
+    impl RuntimeDownloader for RefusingDownloader {
+        async fn download_verified(
+            &self,
+            _url: &str,
+            _dest: &std::path::Path,
+            _expected_sha256: &str,
+        ) -> Result<(), CoreError> {
+            Err(CoreError::new(
+                lc_core::error::ErrorCode::BrowserRuntimeDownloadFailed,
+                "test downloader never downloads",
+            ))
+        }
+    }
+
+    struct RefusingVerifier;
+
+    #[async_trait::async_trait]
+    impl RuntimeContractVerifier for RefusingVerifier {
+        async fn verify(&self, _distro_name: &str) -> Result<(), CoreError> {
+            Err(CoreError::new(
+                lc_core::error::ErrorCode::BrowserProtocolError,
+                "test verifier never verifies",
+            ))
+        }
+    }
+
+    struct LifecycleHarness {
+        state: AppState,
+        events: Arc<LifecycleEvents>,
+        service: Arc<LightpandaNativeService>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn test_manifest() -> RuntimeManifest {
+        RuntimeManifest::from_json_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/resources/lightpanda-runtime-manifest.json"
+        )))
+        .expect("bundled manifest parses")
+    }
+
+    fn seed_provisioned_state(root: &std::path::Path) {
+        let wsl_dir = root.join("wsl");
+        std::fs::create_dir_all(&wsl_dir).unwrap();
+        let state = RuntimeStateFile {
+            state: RuntimeProvisionState::Ready,
+            install_id: "abcd1234".into(),
+            distro: Some(ManagedDistroIdentity {
+                distro_name: "test-distro".into(),
+                install_id: "abcd1234".into(),
+                install_dir: wsl_dir.join("test-distro"),
+            }),
+            distro_image_version: None,
+            lightpanda_version: Some("0.3.7".into()),
+            reason: None,
+        };
+        std::fs::write(
+            wsl_dir.join(RUNTIME_STATE_FILE),
+            serde_json::to_vec_pretty(&state).unwrap(),
+        )
+        .unwrap();
+    }
+
+    async fn lifecycle_harness(seed_distro: bool, running: bool) -> LifecycleHarness {
+        let dir = tempfile::tempdir().unwrap();
+        if seed_distro {
+            seed_provisioned_state(dir.path());
+        }
+        let events = Arc::new(LifecycleEvents::default());
+        let core = Arc::new(lc_core::CoreServices::open(&dir.path().join("test.db")).unwrap());
+        let app_settings = settings::AppSettings {
+            browser_automation_enabled: true,
+            ..settings::AppSettings::default()
+        };
+        let agent_policy = Arc::new(settings::AgentPolicyState::from_settings(&app_settings));
+        let agent_settings = Arc::new(settings::AgentSettingsController::new(
+            dir.path().to_path_buf(),
+            agent_policy.clone(),
+        ));
+        let runtime = BrowserRuntimeManager::new(
+            Arc::new(RecordingRunner {
+                events: events.clone(),
+            }),
+            Arc::new(RefusingDownloader),
+            Arc::new(RefusingVerifier),
+            test_manifest(),
+            dir.path().to_path_buf(),
+        );
+        let service = LightpandaNativeService::new(
+            Arc::new(RecordingGate {
+                events: events.clone(),
+            }),
+            Arc::new(RefusingLauncher),
+            BrowserRuntimeSettings::from(&app_settings),
+        );
+        if running {
+            service.seed_test_instance("test-distro").await;
+        }
+        LifecycleHarness {
+            state: AppState {
+                core,
+                port: 0,
+                agent_policy,
+                agent_settings,
+                browser: service.clone(),
+                browser_runtime_manager: runtime,
+            },
+            events,
+            service,
+            _dir: dir,
+        }
+    }
+
+    fn assert_stopped_before_runtime_op(events: &LifecycleEvents) {
+        let log = events.0.lock().unwrap();
+        let stop = log
+            .iter()
+            .position(|e| *e == "service_stop")
+            .expect("native service stop recorded");
+        let op = log
+            .iter()
+            .position(|e| *e == "runtime_op")
+            .expect("runtime mutation attempted");
+        assert!(
+            stop < op,
+            "service must stop before runtime mutation: {log:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn repair_browser_runtime_stops_service_before_repair() {
+        let h = lifecycle_harness(false, true).await;
+        assert!(repair_browser_runtime_inner(&h.state).await.is_err());
+        assert_stopped_before_runtime_op(&h.events);
+    }
+
+    #[tokio::test]
+    async fn reset_browser_data_stops_service_before_reset() {
+        let h = lifecycle_harness(true, true).await;
+        assert!(reset_browser_data_inner(&h.state).await.is_err());
+        assert_stopped_before_runtime_op(&h.events);
+    }
+
+    #[tokio::test]
+    async fn remove_browser_runtime_stops_service_before_unregister() {
+        let h = lifecycle_harness(true, true).await;
+        assert!(remove_browser_runtime_inner(&h.state).await.is_err());
+        assert_stopped_before_runtime_op(&h.events);
+    }
+
+    #[tokio::test]
+    async fn browser_runtime_status_never_starts_service() {
+        let h = lifecycle_harness(true, false).await;
+        let status = build_browser_runtime_status(&h.state).await;
+        assert!(!status.running);
+        assert!(!status.contract_verified);
+        assert_eq!(status.native_tool_count, 0);
+        assert!(!h.service.status().await.running);
+        assert!(
+            h.events.0.lock().unwrap().is_empty(),
+            "status must be side-effect free"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_status_reflects_verified_native_service() {
+        let h = lifecycle_harness(true, true).await;
+        let status = build_browser_runtime_status(&h.state).await;
+        assert!(status.enabled);
+        assert!(status.running);
+        assert_eq!(status.backend, "lightpanda");
+        assert_eq!(status.transport, "private_http");
+        assert_eq!(status.runtime_state, RuntimeProvisionState::Ready);
+        assert_eq!(status.lightpanda_version.as_deref(), Some("0.3.7"));
+        assert_eq!(status.native_tool_count, 31);
+        assert!(status.contract_verified);
+        assert!(status.wsl_installed);
+        assert!(status.distro_ready);
+        assert!(!status.reboot_required);
+        assert!(!status.repair_required);
+        assert!(status.capabilities.native_mcp);
+        assert!(status.capabilities.native_http_sessions);
+        assert!(status.capabilities.full_native_tool_parity);
+        assert!(!status.capabilities.visual_rendering);
+        assert!(!status.capabilities.screenshots);
+        assert!(
+            h.events.0.lock().unwrap().is_empty(),
+            "building status must not touch the runtime"
+        );
     }
 }

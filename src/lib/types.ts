@@ -24,25 +24,27 @@ export type BrowserRuntimeProvisionState =
 
 /** Truthful capability flags for the Lightpanda backend. */
 export interface BrowserRuntimeCapabilities {
+  native_mcp: boolean;
+  native_http_sessions: boolean;
+  full_native_tool_parity: boolean;
   visual_rendering: boolean;
   screenshots: boolean;
-  file_upload: boolean;
-  managed_downloads: boolean;
-  native_mcp: boolean;
 }
 
 /**
  * Redacted browser runtime diagnostics from `browser_runtime_status`.
- * Never contains active URLs, history, cookies, download filenames, or
- * absolute host paths.
+ * Never contains the loopback port, session IDs, active URLs, history,
+ * cookies, PandaScript contents, or absolute host paths.
  */
 export interface BrowserRuntimeStatus {
   enabled: boolean;
   running: boolean;
   backend: "lightpanda";
-  mode: "background";
+  transport: "private_http";
   runtime_state: BrowserRuntimeProvisionState;
   lightpanda_version: string | null;
+  native_tool_count: number;
+  contract_verified: boolean;
   wsl_installed: boolean;
   distro_ready: boolean;
   reboot_required: boolean;

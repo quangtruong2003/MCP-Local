@@ -46,11 +46,19 @@ const UNRESTRICTED_BODY =
 const UNRESTRICTED_KEYWORD = "UNRESTRICTED";
 
 const RESET_DATA_TITLE = "Reset browser data?";
-const RESET_DATA_BODY =
-  "This stops any running automation pages, then removes the browser profile, cookies, cache and artifacts stored inside the managed Local Workspaces Linux runtime. The runtime itself stays installed. Your personal browser and data are not touched.";
+export const RESET_DATA_BODY =
+  "This stops the running Lightpanda server, then removes the browser profile, cookies, cache and artifacts stored inside the managed Local Workspaces Linux runtime, preserving your saved PandaScripts. The runtime itself stays installed. Your personal browser and data are not touched.";
 const REMOVE_RUNTIME_TITLE = "Remove the browser runtime?";
-const REMOVE_RUNTIME_BODY =
-  "This stops any running automation pages, unregisters the managed Local Workspaces Linux runtime from WSL, and deletes its app-owned files. Browser Automation stays switched on; the runtime will be set up again the next time a browser session starts.";
+export const REMOVE_RUNTIME_BODY =
+  "This stops the running Lightpanda server, unregisters the managed Local Workspaces Linux runtime from WSL, and deletes its app-owned files, removing any PandaScripts saved inside the managed runtime. Browser Automation stays switched on; the runtime will be set up again the next time a browser session starts.";
+
+/** Truthful capability copy for the native Lightpanda runtime (unit-tested). */
+export const BROWSER_NATIVE_CAPABILITY_COPY = [
+  "Lightpanda native MCP over a private local HTTP channel",
+  "31/31 native MCP tools available when the pinned runtime contract is verified",
+  "Native isolated browser sessions are supported",
+  "Lightpanda has no graphical rendering or browser screenshots",
+] as const;
 
 /** Middle-truncates to roughly `max` characters for display. */
 function elide(text: string, max = 40): string {
@@ -415,8 +423,8 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
             <strong className="text-right font-medium">Lightpanda (WSL2)</strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm">
-            <span>Mode</span>
-            <strong className="text-right font-medium">Background</strong>
+            <span>Transport</span>
+            <strong className="text-right font-medium">Private local HTTP</strong>
           </li>
           <li className="flex items-center justify-between gap-3 py-2 text-sm">
             <span>Runtime status</span>
@@ -434,9 +442,9 @@ export default function SettingsPage({ settings, connection, onSaveSettings, rep
         <div className="rounded-md border p-3">
           <Label>Capabilities</Label>
           <ul className="mt-1 flex flex-col gap-1 text-[13px] text-muted-foreground">
-            <li>Semantic browser automation over a private native MCP channel</li>
-            <li>No visual rendering or screenshots</li>
-            <li>No file upload, managed downloads, dialogs, or device emulation</li>
+            {BROWSER_NATIVE_CAPABILITY_COPY.map((line) => (
+              <li key={line}>{line}</li>
+            ))}
           </ul>
         </div>
         {browserStatus?.reboot_required ? (
