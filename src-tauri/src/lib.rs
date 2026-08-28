@@ -126,11 +126,27 @@ pub fn run() {
                 .map_err(|e| e.to_string())?,
             );
 
+            // Single native Lightpanda MCP service backing the public
+            // browser_lightpanda_* tools. The runtime gate reuses the
+            // provisioning manager; the launcher owns the private HTTP server
+            // child inside the managed distro.
+            let native_runtime_gate = Arc::new(
+                browser::lightpanda::NativeRuntimeManagerGate::new(browser_runtime_manager.clone()),
+            );
+            let native_launcher = Arc::new(browser::lightpanda::WslNativeServerLauncher::new(
+                std::path::PathBuf::from("wsl.exe"),
+            ));
+            let native_browser = browser::lightpanda::LightpandaNativeService::new(
+                native_runtime_gate,
+                native_launcher,
+                browser::types::BrowserRuntimeSettings::from(&app_settings),
+            );
+
             let port = tauri::async_runtime::block_on(server::serve(
                 core.clone(),
                 agent_policy.clone(),
                 agent_settings.clone(),
-                browser.clone(),
+                native_browser,
             ))?;
             app.manage(AppState {
                 core: core.clone(),

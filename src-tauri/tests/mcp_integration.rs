@@ -9,10 +9,7 @@ use rmcp::{
 use std::{io::Cursor, sync::Arc};
 
 use local_workspace_mcp_manager::{
-    browser::{
-        driver::{BrowserPageDriver, BrowserPageDriverFactory, PageDriverStatus, PageLaunchSpec},
-        manager::{BrowserManager, CookieStore, RuntimeGate},
-    },
+    browser::{http::UpstreamToolResponse, lightpanda::BrowserNativeCaller},
     screen_capture::{
         CaptureGeometry, CaptureTarget, CaptureTargetKind, CapturedImage, ScreenCaptureProvider,
     },
@@ -98,70 +95,19 @@ impl ScreenCaptureProvider for FakeCaptureProvider {
 }
 
 #[derive(Debug, Default)]
-struct FakePageDriver;
+struct StubNativeBrowser;
 
 #[async_trait::async_trait]
-impl BrowserPageDriver for FakePageDriver {
-    async fn start(
-        &self,
-        spec: PageLaunchSpec,
-    ) -> Result<PageDriverStatus, lc_core::error::CoreError> {
-        Ok(PageDriverStatus {
-            running: true,
-            page_id: spec.page_id,
-            child_pid: None,
-        })
-    }
-
-    async fn call(
+impl BrowserNativeCaller for StubNativeBrowser {
+    async fn call_native(
         &self,
         _tool: &'static str,
         _arguments: serde_json::Map<String, serde_json::Value>,
-    ) -> Result<rmcp::model::CallToolResult, lc_core::error::CoreError> {
-        Ok(rmcp::model::CallToolResult::success(vec![
-            rmcp::model::ContentBlock::text("ok"),
-        ]))
-    }
-
-    async fn stop(&self) -> Result<(), lc_core::error::CoreError> {
-        Ok(())
-    }
-
-    async fn is_alive(&self) -> bool {
-        true
-    }
-}
-
-#[derive(Debug, Default)]
-struct FakePageFactory;
-
-impl BrowserPageDriverFactory for FakePageFactory {
-    fn create(&self) -> Arc<dyn BrowserPageDriver> {
-        Arc::new(FakePageDriver)
-    }
-}
-
-#[derive(Debug, Default)]
-struct OkRuntimeGate;
-
-#[async_trait::async_trait]
-impl RuntimeGate for OkRuntimeGate {
-    async fn ensure_ready(&self) -> Result<(), lc_core::error::CoreError> {
-        Ok(())
-    }
-}
-
-#[derive(Debug, Default)]
-struct MemoryCookieStore;
-
-#[async_trait::async_trait]
-impl CookieStore for MemoryCookieStore {
-    async fn write(&self, _path: &str, _json: &str) -> Result<(), lc_core::error::CoreError> {
-        Ok(())
-    }
-
-    async fn read(&self, _path: &str) -> Result<Option<String>, lc_core::error::CoreError> {
-        Ok(None)
+        _session_id: Option<&str>,
+    ) -> Result<UpstreamToolResponse, lc_core::error::CoreError> {
+        Ok(UpstreamToolResponse::Result(
+            rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text("ok")]),
+        ))
     }
 }
 
@@ -213,18 +159,7 @@ async fn spawn_server_with_settings(
         ),
     );
     let agent_settings_for_server = agent_settings.clone();
-    let browser = Arc::new(
-        BrowserManager::new(
-            core.clone(),
-            dir.path().to_path_buf(),
-            &settings,
-            Arc::new(FakePageFactory),
-            Arc::new(OkRuntimeGate),
-            Arc::new(MemoryCookieStore),
-        )
-        .unwrap(),
-    );
-    let browser_for_server = browser.clone();
+    let browser_for_server: Arc<dyn BrowserNativeCaller> = Arc::new(StubNativeBrowser);
     let capture_provider: Arc<dyn ScreenCaptureProvider> = Arc::new(FakeCaptureProvider);
     let capture_provider_for_server = capture_provider.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
@@ -1075,45 +1010,37 @@ async fn tool_discovery_exposes_agent_policy_tool() {
         names,
         vec![
             "apply_patch",
-            "browser_click",
-            "browser_close",
-            "browser_console",
-            "browser_detect_forms",
-            "browser_devtools",
-            "browser_dialog",
-            "browser_dom",
-            "browser_downloads",
-            "browser_drag",
-            "browser_emulate_device",
-            "browser_evaluate",
-            "browser_extract",
-            "browser_fill",
-            "browser_find_element",
-            "browser_get_status",
-            "browser_hover",
-            "browser_html",
-            "browser_interactive_elements",
-            "browser_links",
-            "browser_markdown",
-            "browser_navigate",
-            "browser_network",
-            "browser_open",
-            "browser_performance",
-            "browser_press",
-            "browser_run_steps",
-            "browser_save_download_to_workspace",
-            "browser_screenshot",
-            "browser_scroll",
-            "browser_search",
-            "browser_select",
-            "browser_set_checked",
-            "browser_set_viewport",
-            "browser_snapshot",
-            "browser_structured_data",
-            "browser_tabs",
-            "browser_trace",
-            "browser_upload",
-            "browser_wait",
+            "browser_lightpanda_click",
+            "browser_lightpanda_console_logs",
+            "browser_lightpanda_detect_forms",
+            "browser_lightpanda_evaluate",
+            "browser_lightpanda_extract",
+            "browser_lightpanda_fill",
+            "browser_lightpanda_find_element",
+            "browser_lightpanda_get_cookies",
+            "browser_lightpanda_get_env",
+            "browser_lightpanda_get_url",
+            "browser_lightpanda_goto",
+            "browser_lightpanda_hover",
+            "browser_lightpanda_html",
+            "browser_lightpanda_interactive_elements",
+            "browser_lightpanda_links",
+            "browser_lightpanda_markdown",
+            "browser_lightpanda_node_details",
+            "browser_lightpanda_press",
+            "browser_lightpanda_save",
+            "browser_lightpanda_scroll",
+            "browser_lightpanda_search",
+            "browser_lightpanda_select_option",
+            "browser_lightpanda_session_close",
+            "browser_lightpanda_session_list",
+            "browser_lightpanda_session_new",
+            "browser_lightpanda_set_checked",
+            "browser_lightpanda_structured_data",
+            "browser_lightpanda_tree",
+            "browser_lightpanda_wait_for_script",
+            "browser_lightpanda_wait_for_selector",
+            "browser_lightpanda_wait_for_state",
             "capture_screen",
             "create_file",
             "find_files",

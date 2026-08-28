@@ -7,31 +7,17 @@
 //! handlers. Flagged for spec Task 15 ruling.
 
 use crate::{
-    browser::{
-        files::{BrowserDownloadInfo, BrowserSavedDownloadOutput},
-        mcp::{
-            call_result_text, is_static_initiator, is_valid_ref, redact_sensitive_url,
-            truncate_utf8, validate_extract_schema, validate_find_element, validate_scroll_offsets,
-            validated_content_cap, BrowserConsoleArgs, BrowserConsoleOutput, BrowserDevtoolsOutput,
-            BrowserDialogArgs, BrowserDomArgs, BrowserDomOutput, BrowserDragArgs,
-            BrowserEmulateArgs, BrowserEvaluateArgs, BrowserEvaluateOutput, BrowserExtractArgs,
-            BrowserExtractOutput, BrowserFillArgs, BrowserFindElementArgs, BrowserHtmlArgs,
-            BrowserMarkdownArgs, BrowserNavigateArgs, BrowserNavigationAction,
-            BrowserNavigationOutput, BrowserNetworkArgs, BrowserNetworkOutput, BrowserOkOutput,
-            BrowserOpenArgs, BrowserOpenOutput, BrowserPageSummary, BrowserPerformanceOutput,
-            BrowserPressArgs, BrowserRunStepsArgs, BrowserRunStepsOutput, BrowserSaveDownloadArgs,
-            BrowserScreenshotArgs, BrowserScreenshotMetadata, BrowserScrollArgs, BrowserSearchArgs,
-            BrowserSelectArgs, BrowserSetCheckedArgs, BrowserSnapshotOutput, BrowserStep,
-            BrowserStepError, BrowserTabAction, BrowserTabsArgs, BrowserTargetArgs,
-            BrowserTextOutput, BrowserTextTruncatedOutput, BrowserTraceAction, BrowserTraceArgs,
-            BrowserTraceOutput, BrowserUploadArgs, BrowserUploadOutput, BrowserUploadSource,
-            BrowserViewportArgs, BrowserViewportOutput, BrowserWaitArgs, BrowserWaitCondition,
-        },
-        policy::{
-            bounded_event_limit, redacted_origin, validate_batch_step_count,
-            validate_navigation_url, validate_timeout, validate_viewport,
-        },
-        types::BrowserSessionStatus,
+    browser::mcp::{
+        LightpandaClickArgs, LightpandaConsoleLogsArgs, LightpandaDetectFormsArgs,
+        LightpandaEvaluateArgs, LightpandaExtractArgs, LightpandaFillArgs,
+        LightpandaFindElementArgs, LightpandaGetCookiesArgs, LightpandaGetEnvArgs,
+        LightpandaGetUrlArgs, LightpandaGotoArgs, LightpandaHoverArgs, LightpandaHtmlArgs,
+        LightpandaInteractiveElementsArgs, LightpandaLinksArgs, LightpandaMarkdownArgs,
+        LightpandaNodeDetailsArgs, LightpandaPressArgs, LightpandaSaveArgs,
+        LightpandaScrollArgs, LightpandaSearchArgs, LightpandaSelectOptionArgs,
+        LightpandaSessionCloseArgs, LightpandaSessionListArgs, LightpandaSessionNewArgs,
+        LightpandaSetCheckedArgs, LightpandaStructuredDataArgs, LightpandaTreeArgs,
+        LightpandaWaitForScriptArgs, LightpandaWaitForSelectorArgs, LightpandaWaitForStateArgs,
     },
     screen_capture::{
         filter_targets_for_scope, CaptureTarget, CapturedImage, ScreenCaptureProvider,
@@ -88,7 +74,7 @@ pub struct WorkspaceServer {
     core: Arc<CoreServices>,
     agent_policy: Arc<crate::settings::AgentPolicyState>,
     agent_settings: Arc<crate::settings::AgentSettingsController>,
-    browser: Arc<crate::browser::manager::BrowserManager>,
+    browser: Arc<dyn crate::browser::lightpanda::BrowserNativeCaller>,
     capture_provider: Arc<dyn ScreenCaptureProvider>,
     pub(crate) prompt_router: PromptRouter<Self>,
 }
@@ -288,211 +274,29 @@ fn execution_error(e: crate::execution::policy::PolicyError) -> CoreError {
     }
 }
 
-async fn page_summaries(
-    browser: &crate::browser::manager::BrowserManager,
-) -> Vec<BrowserPageSummary> {
-    browser
-        .page_summaries()
-        .await
-        .into_iter()
-        .map(|page| BrowserPageSummary {
-            page_id: page.page_id,
-            title: page.title,
-            url: page.url,
-            active: page.active,
-        })
-        .collect()
+/// Builds the public `isError` result for a valid upstream JSON-RPC tool
+/// error, preserving the upstream numeric code and message for the authorized
+/// caller. Audit stores only the numeric code, never the raw message.
+fn upstream_rpc_result(code: i64, message: &str) -> CallToolResult {
+    let payload = serde_json::json!({ "upstream_code": code, "message": message });
+    CallToolResult::error(vec![ContentBlock::text(payload.to_string())])
 }
 
-fn browser_outcome<T: serde::Serialize>(
+/// Writes the one fail-closed audit row for a native browser call and returns
+/// the public result. An audit failure fails closed and is never replayed.
+fn finish_native(
     core: &CoreServices,
     op: &str,
-    result: Result<T, CoreError>,
+    outcome: crate::browser::audit::NativeCallOutcome,
     detail: Option<serde_json::Value>,
+    public: CallToolResult,
 ) -> CallToolResult {
-    let error = result.as_ref().err();
-    if let Err(audit_error) = crate::browser::audit::record_browser_call(core, op, error, detail) {
+    if let Err(audit_error) =
+        crate::browser::audit::record_native_browser_call(core, op, outcome, detail)
+    {
         return err_result(&audit_error);
     }
-    match result {
-        Ok(value) => ok_structured(&value),
-        Err(error) => err_result(&error),
-    }
-}
-
-/// Opaque pagination token for console/network reads. Encodes the number of
-/// lines already consumed; callers must treat it as opaque.
-fn encode_cursor(offset: usize) -> String {
-    base64::engine::general_purpose::STANDARD.encode(format!("lc1:{offset}"))
-}
-
-fn decode_cursor(cursor: &str) -> Result<usize, CoreError> {
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(cursor)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
-        .and_then(|text| {
-            text.strip_prefix("lc1:")
-                .and_then(|offset| offset.parse::<usize>().ok())
-        });
-    bytes.ok_or_else(|| {
-        CoreError::new(
-            ErrorCode::InvalidArgument,
-            "browser cursor must come from a previous console/network call",
-        )
-    })
-}
-
-/// Takes one page of lines starting at the decoded cursor offset. Returns the
-/// page text and the next cursor (None when no lines remain).
-fn paginate_lines(
-    text: &str,
-    cursor: Option<&str>,
-    limit: usize,
-) -> Result<(String, Option<String>), CoreError> {
-    let offset = match cursor {
-        Some(cursor) => decode_cursor(cursor)?,
-        None => 0,
-    };
-    let lines: Vec<&str> = text.lines().skip(offset).take(limit).collect();
-    let page = lines.join("\n");
-    let consumed = offset + lines.len();
-    let next = if text.lines().nth(consumed).is_some() {
-        Some(encode_cursor(consumed))
-    } else {
-        None
-    };
-    Ok((page, next))
-}
-
-/// Histogram of console message levels in a returned page. Audit stores only
-/// these counts, never message text.
-fn console_level_histogram(text: &str) -> std::collections::BTreeMap<String, u64> {
-    let mut levels = std::collections::BTreeMap::<String, u64>::new();
-    for line in text.lines() {
-        let level = console_line_level(line);
-        *levels.entry(level).or_default() += 1;
-    }
-    levels
-}
-
-/// Level of one console line. Lightpanda `consoleLogs` renders each message as
-/// `[tag] text` where tag is one of log/debug/info/warning/error/fatal/trace/
-/// dir/dirxml. Tags are folded onto the four public levels; anything unparsable
-/// is treated as debug so it is never silently dropped.
-fn console_line_level(line: &str) -> String {
-    let trimmed = line.trim();
-    let tag = if let Some(rest) = trimmed.strip_prefix('[') {
-        rest.split(']').next().unwrap_or_default()
-    } else {
-        ""
-    };
-    match tag.trim().to_ascii_lowercase().as_str() {
-        "error" | "fatal" => "error".to_string(),
-        "warning" => "warning".to_string(),
-        "info" | "log" => "info".to_string(),
-        _ => "debug".to_string(),
-    }
-}
-
-/// Severity rank used for the minimum-level console filter.
-fn console_level_rank(level: &str) -> u8 {
-    match level {
-        "debug" => 0,
-        "info" => 1,
-        "warning" => 2,
-        "error" => 3,
-        _ => 0,
-    }
-}
-
-async fn browser_wait_internal(
-    browser: &crate::browser::manager::BrowserManager,
-    condition: BrowserWaitCondition,
-    requested_timeout: Option<u64>,
-) -> Result<BrowserOkOutput, CoreError> {
-    let timeout_ms = validate_timeout(requested_timeout, false)?;
-    browser.wait_for(condition, timeout_ms).await?;
-    Ok(BrowserOkOutput { ok: true })
-}
-
-/// Full preflight for one `browser_run_steps` batch. Every step validates
-/// before step 0 executes: allowed types, required fields, URL validity,
-/// ref/key/text/value bounds, delay/timeout bounds, and unsupported types.
-/// An invalid later step can never ride on an earlier step's side effects.
-fn preflight_run_steps(steps: &[BrowserStep]) -> Result<(), CoreError> {
-    for step in steps {
-        match step {
-            BrowserStep::Navigate { url } => {
-                validate_navigation_url(url)?;
-            }
-            BrowserStep::Snapshot => {}
-            BrowserStep::Click { ref_id } => preflight_step_ref(ref_id)?,
-            BrowserStep::Fill { ref_id, text } => {
-                preflight_step_ref(ref_id)?;
-                if text.is_empty() {
-                    return Err(CoreError::new(
-                        ErrorCode::InvalidArgument,
-                        "fill step text must not be empty",
-                    ));
-                }
-            }
-            BrowserStep::Press { key } => {
-                if key.trim().is_empty() {
-                    return Err(CoreError::new(
-                        ErrorCode::InvalidArgument,
-                        "press step key must not be empty",
-                    ));
-                }
-            }
-            BrowserStep::Select { ref_id, values } => {
-                preflight_step_ref(ref_id)?;
-                if values.is_empty() {
-                    return Err(CoreError::new(
-                        ErrorCode::InvalidArgument,
-                        "select step requires at least one value",
-                    ));
-                }
-            }
-            BrowserStep::Wait {
-                condition,
-                timeout_ms,
-            } => {
-                let resolved = validate_timeout(*timeout_ms, false)?;
-                if let BrowserWaitCondition::Delay { milliseconds } = condition {
-                    if *milliseconds == 0 || *milliseconds > resolved {
-                        return Err(CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser wait delay must be within timeout",
-                        ));
-                    }
-                }
-            }
-            BrowserStep::SetViewport { .. } => {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserFeatureUnsupported,
-                    "set_viewport steps are not supported by the lightpanda runtime",
-                ));
-            }
-            BrowserStep::Screenshot { .. } => {
-                return Err(CoreError::new(
-                    ErrorCode::BrowserFeatureUnsupported,
-                    "screenshot steps are not supported by the lightpanda runtime",
-                ));
-            }
-        }
-    }
-    Ok(())
-}
-
-fn preflight_step_ref(ref_id: &str) -> Result<(), CoreError> {
-    if !is_valid_ref(ref_id) {
-        return Err(CoreError::new(
-            ErrorCode::InvalidArgument,
-            "browser ref must look like e1, e2, ...",
-        ));
-    }
-    Ok(())
+    public
 }
 
 // The #[tool_router] macro generates an associated `Self::tool_router()`
@@ -503,7 +307,7 @@ impl WorkspaceServer {
         core: Arc<CoreServices>,
         agent_policy: Arc<crate::settings::AgentPolicyState>,
         agent_settings: Arc<crate::settings::AgentSettingsController>,
-        browser: Arc<crate::browser::manager::BrowserManager>,
+        browser: Arc<dyn crate::browser::lightpanda::BrowserNativeCaller>,
         capture_provider: Arc<dyn ScreenCaptureProvider>,
     ) -> Self {
         Self {
@@ -516,1273 +320,437 @@ impl WorkspaceServer {
         }
     }
 
-    #[tool(
-        description = "Read Browser Automation state without starting a browser. This remains readable when Browser Automation is disabled so the agent can report the blocker. Pause still wins.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserSessionStatus>()
-    )]
-    async fn browser_get_status(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = if self.core.pause.is_paused() {
-            Err(CoreError::new(
-                ErrorCode::AccessPaused,
-                "access is paused by the user",
-            ))
-        } else {
-            Ok(self.browser.status().await)
-        };
-        let detail = result.as_ref().ok().map(|status| {
-            serde_json::json!({
-                "enabled": status.enabled,
-                "running": status.running,
-                "engine": status.configured_engine,
-                "run_mode": status.run_mode,
-            })
-        });
-        browser_outcome(&self.core, "browser_get_status", result, detail)
-    }
-
-    #[tool(
-        description = "Start the dedicated Local Workspaces browser session, optionally navigating to an initial http(s) URL. Uses the configured engine and Background/Visible Debug mode.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserOpenOutput>()
-    )]
-    async fn browser_open(&self, Parameters(a): Parameters<BrowserOpenArgs>) -> CallToolResult {
-        let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
-        let result = async {
-            let status = self.browser.open(a.url.as_deref()).await?;
-            let pages = page_summaries(&self.browser).await;
-            Ok::<_, CoreError>(BrowserOpenOutput { status, pages })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_open",
-            result,
-            Some(serde_json::json!({ "origin": origin })),
-        )
-    }
-
-    #[tool(
-        description = "Close the active Local Workspaces browser session. The dedicated profile remains on disk for future automation sessions.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserSessionStatus>()
-    )]
-    async fn browser_close(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = self.browser.close().await;
-        browser_outcome(&self.core, "browser_close", result, None)
-    }
-
-    #[tool(
-        description = "List, create, select, or close browser tabs. Local Workspaces returns session-scoped opaque page_id values; pass page_id for select/close instead of Playwright tab indices.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<Vec<BrowserPageSummary>>()
-    )]
-    async fn browser_tabs(&self, Parameters(a): Parameters<BrowserTabsArgs>) -> CallToolResult {
-        let action_name = match a.action {
-            BrowserTabAction::List => "list",
-            BrowserTabAction::New => "new",
-            BrowserTabAction::Select => "select",
-            BrowserTabAction::Close => "close",
-        };
-        let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
-        let result = async {
-            // Logical tabs are manager-owned: one Lightpanda child per page.
-            // There is no upstream tabs primitive.
-            match a.action {
-                BrowserTabAction::List => self.browser.tabs_list().await,
-                BrowserTabAction::New => self.browser.tab_new(a.url.as_deref()).await,
-                BrowserTabAction::Select => {
-                    let page_id = a.page_id.as_deref().ok_or_else(|| {
-                        CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser_tabs select/close requires page_id",
-                        )
-                    })?;
-                    self.browser.tab_select(page_id).await
-                }
-                BrowserTabAction::Close => {
-                    let page_id = a.page_id.as_deref().ok_or_else(|| {
-                        CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser_tabs select/close requires page_id",
-                        )
-                    })?;
-                    self.browser.tab_close(page_id).await
-                }
-            }
-            .map(|pages| {
-                pages
-                    .into_iter()
-                    .map(|page| BrowserPageSummary {
-                        page_id: page.page_id,
-                        title: page.title,
-                        url: page.url,
-                        active: page.active,
-                    })
-                    .collect::<Vec<BrowserPageSummary>>()
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_tabs",
-            result,
-            Some(serde_json::json!({
-                "action": action_name,
-                "page_id": a.page_id,
-                "origin": origin,
-            })),
-        )
-    }
-
-    #[tool(
-        description = "Navigate the active page to an http(s) URL, go back, go forward, or reload. file:// and non-http(s) schemes are rejected before the browser runtime is called.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserNavigationOutput>()
-    )]
-    async fn browser_navigate(
+    /// Common path for every `browser_lightpanda_*` handler: pause gate, split
+    /// the `session_id` routing metadata, run the navigation URL policy, build
+    /// content-free audit metadata, forward to the native caller, and forward
+    /// the native result / JSON-RPC error unchanged.
+    async fn native_tool_call<T: serde::Serialize>(
         &self,
-        Parameters(a): Parameters<BrowserNavigateArgs>,
+        public_op: &str,
+        native_tool: &'static str,
+        args: &T,
     ) -> CallToolResult {
-        let action_name = match a.action {
-            BrowserNavigationAction::Url => "url",
-            BrowserNavigationAction::Back => "back",
-            BrowserNavigationAction::Forward => "forward",
-            BrowserNavigationAction::Reload => "reload",
+        use crate::browser::http::UpstreamToolResponse;
+        use crate::browser::mcp::{
+            safe_native_audit_detail, split_session_route, validate_native_navigation,
         };
-        let origin = a.url.as_deref().and_then(|url| redacted_origin(url).ok());
-        let result = async {
-            let final_url = match a.action {
-                BrowserNavigationAction::Url => {
-                    let url = a.url.as_deref().ok_or_else(|| {
-                        CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser_navigate action=url requires url",
-                        )
-                    })?;
-                    self.browser.navigate_to(url).await?
-                }
-                action => self.browser.navigate_history(action).await?,
-            };
-            let (text, truncated) = truncate_utf8(final_url, 256 * 1024);
-            let pages = page_summaries(&self.browser).await;
-            Ok::<_, CoreError>(BrowserNavigationOutput {
-                text,
-                truncated,
-                pages,
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_navigate",
-            result,
-            Some(serde_json::json!({ "action": action_name, "origin": origin })),
-        )
-    }
 
-    #[tool(
-        description = "Search the web in the active browser using the runtime's native search tool. The query is never written to the audit log.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserNavigationOutput>()
-    )]
-    async fn browser_search(&self, Parameters(a): Parameters<BrowserSearchArgs>) -> CallToolResult {
-        let result = async {
-            if a.query.trim().is_empty() {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "browser_search query cannot be empty",
-                ));
-            }
-            let text = self.browser.search(&a.query).await?;
-            let (text, truncated) = truncate_utf8(text, 256 * 1024);
-            let pages = page_summaries(&self.browser).await;
-            Ok::<_, CoreError>(BrowserNavigationOutput {
-                text,
-                truncated,
-                pages,
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_search",
-            result,
-            Some(serde_json::json!({ "query_bytes": a.query.len() })),
-        )
-    }
-
-    #[tool(
-        description = "Return a bounded semantic accessibility/DOM snapshot of the active page. Use returned target references for element interactions.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserSnapshotOutput>()
-    )]
-    async fn browser_snapshot(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = async {
-            let text = self.browser.snapshot_tree().await?;
-            let (text, truncated) = truncate_utf8(text, crate::browser::types::MAX_SNAPSHOT_BYTES);
-            let bytes = text.len();
-            Ok::<_, CoreError>(BrowserSnapshotOutput {
-                snapshot: text,
-                bytes,
-                truncated,
-            })
-        }
-        .await;
-        let detail = result
-            .as_ref()
-            .ok()
-            .map(|v| serde_json::json!({"returned_bytes": v.bytes, "truncated": v.truncated}));
-        browser_outcome(&self.core, "browser_snapshot", result, detail)
-    }
-
-    #[tool(
-        description = "Click an element target from the current browser snapshot.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_click(&self, Parameters(a): Parameters<BrowserTargetArgs>) -> CallToolResult {
-        let result = async {
-            let r = self.browser.click_ref(&a.ref_id).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&r), 64 * 1024);
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_click",
-            result,
-            Some(serde_json::json!({"target":a.ref_id})),
-        )
-    }
-
-    #[tool(
-        description = "Fill/type text into an element target. Audit records length only and never the supplied text.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTextOutput>()
-    )]
-    async fn browser_fill(&self, Parameters(a): Parameters<BrowserFillArgs>) -> CallToolResult {
-        let result = async {
-            self.browser.fill_ref(&a.ref_id, &a.text, a.submit).await?;
-            // Fixed output on purpose: Lightpanda echoes the filled value back
-            // in its action result, and filled text never leaves the audit
-            // boundary as content.
-            Ok::<_, CoreError>(BrowserTextOutput {
-                text: format!("filled {} bytes into the target element", a.text.len()),
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_fill",
-            result,
-            Some(
-                serde_json::json!({"target":a.ref_id,"text_bytes":a.text.len(),"submit":a.submit,"slowly":a.slowly}),
-            ),
-        )
-    }
-
-    #[tool(
-        description = "Press a keyboard key in the active page, such as Enter or Escape.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTextOutput>()
-    )]
-    async fn browser_press(&self, Parameters(a): Parameters<BrowserPressArgs>) -> CallToolResult {
-        let result = async {
-            if a.key.is_empty() || a.key.len() > 128 {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "browser key must be 1 to 128 bytes",
-                ));
-            }
-            let r = self.browser.press_key(&a.key).await?;
-            Ok::<_, CoreError>(BrowserTextOutput {
-                text: truncate_utf8(call_result_text(&r), 64 * 1024).0,
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_press",
-            result,
-            Some(serde_json::json!({"key":a.key})),
-        )
-    }
-    #[tool(
-        description = "Select one or more values in a select element target.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTextOutput>()
-    )]
-    async fn browser_select(&self, Parameters(a): Parameters<BrowserSelectArgs>) -> CallToolResult {
-        let result = async {
-            if a.values.is_empty() || a.values.len() > 64 {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "browser_select requires 1 to 64 values",
-                ));
-            }
-            self.browser.select_ref(&a.ref_id, &a.values).await?;
-            // Fixed output: option values are model-supplied data and are not
-            // echoed back through the tool response.
-            Ok::<_, CoreError>(BrowserTextOutput {
-                text: format!("selected {} values in the target element", a.values.len()),
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_select",
-            result,
-            Some(serde_json::json!({"target":a.ref_id,"value_count":a.values.len()})),
-        )
-    }
-
-    #[tool(
-        description = "Hover an element target from the current browser snapshot.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserOkOutput>()
-    )]
-    async fn browser_hover(&self, Parameters(a): Parameters<BrowserTargetArgs>) -> CallToolResult {
-        let result = async {
-            self.browser.hover_ref(&a.ref_id).await?;
-            Ok::<_, CoreError>(BrowserOkOutput { ok: true })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_hover",
-            result,
-            Some(serde_json::json!({"target":a.ref_id})),
-        )
-    }
-
-    #[tool(
-        description = "Render the active page, or one snapshot ref's subtree, as markdown. Bounded output.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_markdown(
-        &self,
-        Parameters(a): Parameters<BrowserMarkdownArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            let cap = validated_content_cap(a.max_bytes)?;
-            let response = self.browser.markdown_content(a.ref_id.as_deref()).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), cap);
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_markdown",
-            result,
-            Some(serde_json::json!({"ref":a.ref_id,"max_bytes":a.max_bytes})),
-        )
-    }
-
-    #[tool(
-        description = "Return raw HTML for the active page, or one snapshot ref's outerHTML. Verbose; prefer browser_markdown. Bounded output.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_html(&self, Parameters(a): Parameters<BrowserHtmlArgs>) -> CallToolResult {
-        let result = async {
-            let cap = validated_content_cap(a.max_bytes)?;
-            let response = self.browser.html_content(a.ref_id.as_deref()).await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), cap);
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_html",
-            result,
-            Some(serde_json::json!({"ref":a.ref_id,"max_bytes":a.max_bytes})),
-        )
-    }
-
-    #[tool(
-        description = "List all links on the active page with visible text and resolved href. Bounded output.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_links(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = async {
-            let response = self.browser.links_content().await?;
-            let (text, truncated) = truncate_utf8(
-                call_result_text(&response),
-                crate::browser::mcp::MAX_CONTENT_BYTES,
+        if self.core.pause.is_paused() {
+            let err = CoreError::new(ErrorCode::AccessPaused, "access is paused by the user");
+            let public = err_result(&err);
+            return finish_native(
+                &self.core,
+                public_op,
+                crate::browser::audit::NativeCallOutcome::Local(&err),
+                None,
+                public,
             );
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
         }
-        .await;
-        browser_outcome(&self.core, "browser_links", result, None)
-    }
-
-    #[tool(
-        description = "Find interactive elements by ARIA role and/or accessible name. Requires at least one criterion.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_find_element(
-        &self,
-        Parameters(a): Parameters<BrowserFindElementArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            validate_find_element(a.role.as_deref(), a.name.as_deref())?;
-            let response = self
-                .browser
-                .find_element(a.role.as_deref(), a.name.as_deref())
-                .await?;
-            let (text, truncated) = truncate_utf8(
-                call_result_text(&response),
-                crate::browser::mcp::MAX_CONTENT_BYTES,
-            );
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        let detail = Some(serde_json::json!({
-            "role_bytes": a.role.as_ref().map(|s| s.len()).unwrap_or(0),
-            "name_bytes": a.name.as_ref().map(|s| s.len()).unwrap_or(0),
-        }));
-        browser_outcome(&self.core, "browser_find_element", result, detail)
-    }
-
-    #[tool(
-        description = "List interactive elements on the active page. Bounded output.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_interactive_elements(
-        &self,
-        Parameters(_): Parameters<EmptyArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            let response = self.browser.interactive_elements_content().await?;
-            let (text, truncated) = truncate_utf8(
-                call_result_text(&response),
-                crate::browser::mcp::MAX_CONTENT_BYTES,
-            );
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        browser_outcome(&self.core, "browser_interactive_elements", result, None)
-    }
-
-    #[tool(
-        description = "Extract structured data from the active page using a CSS-selector schema object. The schema is validated before any native call.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserExtractOutput>()
-    )]
-    async fn browser_extract(
-        &self,
-        Parameters(a): Parameters<BrowserExtractArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            let encoded = validate_extract_schema(&a.schema)?;
-            let response = self.browser.extract_data(&encoded).await?;
-            let text = call_result_text(&response);
-            let data = serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text));
-            Ok::<_, CoreError>(BrowserExtractOutput { data })
-        }
-        .await;
-        let detail = Some(serde_json::json!({
-            "schema_bytes": serde_json::to_string(&a.schema).map(|s| s.len()).unwrap_or(0),
-        }));
-        browser_outcome(&self.core, "browser_extract", result, detail)
-    }
-
-    #[tool(
-        description = "Extract structured data such as JSON-LD and OpenGraph metadata from the active page. Bounded output.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_structured_data(
-        &self,
-        Parameters(_): Parameters<EmptyArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            let response = self.browser.structured_data_content().await?;
-            let (text, truncated) = truncate_utf8(
-                call_result_text(&response),
-                crate::browser::mcp::MAX_CONTENT_BYTES,
-            );
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        browser_outcome(&self.core, "browser_structured_data", result, None)
-    }
-
-    #[tool(
-        description = "Detect all forms on the active page with field structure, types, and required status. Field values are never included.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_detect_forms(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = async {
-            let response = self.browser.detect_forms_content().await?;
-            let (text, truncated) = truncate_utf8(
-                call_result_text(&response),
-                crate::browser::mcp::MAX_CONTENT_BYTES,
-            );
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        browser_outcome(&self.core, "browser_detect_forms", result, None)
-    }
-
-    #[tool(
-        description = "Scroll the window, or one snapshot ref's element, by the given offsets.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTextTruncatedOutput>()
-    )]
-    async fn browser_scroll(&self, Parameters(a): Parameters<BrowserScrollArgs>) -> CallToolResult {
-        let result = async {
-            validate_scroll_offsets(a.x, a.y)?;
-            let response = self
-                .browser
-                .scroll_page(a.ref_id.as_deref(), a.x, a.y)
-                .await?;
-            let (text, truncated) = truncate_utf8(call_result_text(&response), 64 * 1024);
-            Ok::<_, CoreError>(BrowserTextTruncatedOutput { text, truncated })
-        }
-        .await;
-        let detail = Some(serde_json::json!({
-            "ref": a.ref_id,
-            "x": a.x,
-            "y": a.y,
-        }));
-        browser_outcome(&self.core, "browser_scroll", result, detail)
-    }
-
-    #[tool(
-        description = "Check or uncheck a checkbox or radio element target. Audit records the opaque target and requested state only.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTextOutput>()
-    )]
-    async fn browser_set_checked(
-        &self,
-        Parameters(a): Parameters<BrowserSetCheckedArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            self.browser.set_checked_ref(&a.ref_id, a.checked).await?;
-            // Fixed output on purpose: the native result echoes element
-            // state text that need not leave the audit boundary.
-            Ok::<_, CoreError>(BrowserTextOutput {
-                text: "updated the checked state of the target element".to_string(),
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_set_checked",
-            result,
-            Some(serde_json::json!({"target":a.ref_id,"checked":a.checked})),
-        )
-    }
-
-    #[tool(
-        description = "Drag from one semantic element target to another using an app-owned synthetic DataTransfer event sequence. Refs are invalidated even when the drop is rejected.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserOkOutput>()
-    )]
-    async fn browser_drag(&self, Parameters(a): Parameters<BrowserDragArgs>) -> CallToolResult {
-        let result = async {
-            self.browser.drag_refs(&a.start_ref, &a.end_ref).await?;
-            Ok::<_, CoreError>(BrowserOkOutput { ok: true })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_drag",
-            result,
-            Some(serde_json::json!({"start_ref":a.start_ref,"end_ref":a.end_ref})),
-        )
-    }
-
-    #[tool(
-        description = "Wait for text, element visibility, URL, load state, or a bounded delay. Pause/disable is checked while polling.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserOkOutput>()
-    )]
-    async fn browser_wait(&self, Parameters(a): Parameters<BrowserWaitArgs>) -> CallToolResult {
-        let kind = match &a.condition {
-            BrowserWaitCondition::TextPresent { .. } => "text_present",
-            BrowserWaitCondition::TextAbsent { .. } => "text_absent",
-            BrowserWaitCondition::RefVisible { .. } => "ref_visible",
-            BrowserWaitCondition::RefHidden { .. } => "ref_hidden",
-            BrowserWaitCondition::UrlContains { .. } => "url_contains",
-            BrowserWaitCondition::LoadState { .. } => "load_state",
-            BrowserWaitCondition::Delay { .. } => "delay",
+        let (session_id, native_args) = match split_session_route(args) {
+            Ok(value) => value,
+            Err(err) => {
+                let public = err_result(&err);
+                return finish_native(
+                    &self.core,
+                    public_op,
+                    crate::browser::audit::NativeCallOutcome::Local(&err),
+                    None,
+                    public,
+                );
+            }
         };
-        let result = browser_wait_internal(&self.browser, a.condition, a.timeout_ms).await;
-        browser_outcome(
-            &self.core,
-            "browser_wait",
-            result,
-            Some(serde_json::json!({"kind":kind,"timeout_ms":a.timeout_ms})),
-        )
-    }
-
-    #[tool(
-        description = "Dialog handling is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserOkOutput>()
-    )]
-    async fn browser_dialog(&self, Parameters(a): Parameters<BrowserDialogArgs>) -> CallToolResult {
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            Err::<BrowserOkOutput, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "browser dialogs are not supported by the lightpanda runtime",
-            ))
+        if let Err(err) = validate_native_navigation(native_tool, &native_args) {
+            let public = err_result(&err);
+            return finish_native(
+                &self.core,
+                public_op,
+                crate::browser::audit::NativeCallOutcome::Local(&err),
+                None,
+                public,
+            );
         }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_dialog",
-            result,
-            Some(
-                serde_json::json!({"accept":a.accept,"prompt_bytes":a.prompt_text.as_ref().map(|s|s.len()).unwrap_or(0)}),
-            ),
-        )
-    }
-
-    #[tool(
-        description = "Viewport resizing is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserViewportOutput>()
-    )]
-    async fn browser_set_viewport(
-        &self,
-        Parameters(a): Parameters<BrowserViewportArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            validate_viewport(a.width, a.height)?;
-            Err::<BrowserViewportOutput, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "viewport resizing is not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_set_viewport",
-            result,
-            Some(serde_json::json!({"width":a.width,"height":a.height})),
-        )
-    }
-
-    #[tool(
-        description = "Device emulation is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserSessionStatus>()
-    )]
-    async fn browser_emulate_device(
-        &self,
-        Parameters(_a): Parameters<BrowserEmulateArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            Err::<BrowserSessionStatus, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "device emulation is not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        browser_outcome(&self.core, "browser_emulate_device", result, None)
-    }
-
-    #[tool(
-        description = "Screenshots are not supported by the Lightpanda runtime and fail closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserScreenshotMetadata>()
-    )]
-    async fn browser_screenshot(
-        &self,
-        Parameters(_a): Parameters<BrowserScreenshotArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            Err::<BrowserScreenshotMetadata, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "screenshots are not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        browser_outcome(&self.core, "browser_screenshot", result, None)
-    }
-
-    #[tool(
-        description = "Read bounded browser console messages. Message text is returned to the caller but audit stores only level/count metadata.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserConsoleOutput>()
-    )]
-    async fn browser_console(
-        &self,
-        Parameters(a): Parameters<BrowserConsoleArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            let limit = bounded_event_limit(a.limit)?;
-            let level = a.level.clone().unwrap_or_else(|| "info".into());
-            if !matches!(level.as_str(), "error" | "warning" | "info" | "debug") {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "browser console level must be error, warning, info, or debug",
-                ));
+        let mut detail =
+            safe_native_audit_detail(native_tool, &native_args, session_id.as_deref());
+        let response = self
+            .browser
+            .call_native(native_tool, native_args, session_id.as_deref())
+            .await;
+        match response {
+            Ok(UpstreamToolResponse::Result(result)) => {
+                let is_error = result.is_error == Some(true);
+                finish_native(
+                    &self.core,
+                    public_op,
+                    crate::browser::audit::NativeCallOutcome::Native { is_error },
+                    Some(detail),
+                    result,
+                )
             }
-            // Native `consoleLogs` drains the child buffer; the manager ring is
-            // the stable source. Filter by minimum severity app-side.
-            let ring = self.browser.console_lines().await?;
-            let min_rank = console_level_rank(&level);
-            let filtered: Vec<String> = ring
-                .into_iter()
-                .filter(|line| console_level_rank(&console_line_level(line)) >= min_rank)
-                .collect();
-            let joined = filtered.join("\n");
-            let (text, next_cursor) = paginate_lines(&joined, a.cursor.as_deref(), limit)?;
-            let count = text.lines().count();
-            let levels = console_level_histogram(&text);
-            Ok::<_, CoreError>(BrowserConsoleOutput {
-                level,
-                count,
-                levels,
-                messages: text,
-                next_cursor,
-            })
-        }
-        .await;
-        let detail = result
-            .as_ref()
-            .ok()
-            .map(|v| serde_json::json!({"count":v.count,"levels":v.levels,"cursor":v.next_cursor}));
-        browser_outcome(&self.core, "browser_console", result, detail)
-    }
-
-    #[tool(
-        description = "Read bounded browser network resource metadata from Performance Resource Timing. The optional filter is a regular expression matched against resource URLs (e.g. \"/api/.*user\"). Credential-like URL query values are redacted. Method, status, and headers are not available in this runtime and are never fabricated.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserNetworkOutput>()
-    )]
-    async fn browser_network(
-        &self,
-        Parameters(a): Parameters<BrowserNetworkArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            let limit = bounded_event_limit(a.limit)?;
-            let filter_regex = match a.filter.clone() {
-                Some(filter) => {
-                    // Pre-flight guard: bound the length and reject control
-                    // characters before compiling, then compile app-side.
-                    if filter.len() > 4096 || filter.bytes().any(|byte| byte < 0x20) {
-                        return Err(CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser network filter must be a regular expression of at most 4096 bytes without control characters",
-                        ));
-                    }
-                    Some(regex::Regex::new(&filter).map_err(|_| {
-                        CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser network filter is not a valid regular expression",
-                        )
-                    })?)
+            Ok(UpstreamToolResponse::JsonRpcError { code, message, .. }) => {
+                if let Some(obj) = detail.as_object_mut() {
+                    obj.insert("upstream_code".into(), serde_json::json!(code));
                 }
-                None => None,
-            };
-            // Lightpanda exposes only Performance Resource Timing; there are no
-            // method/status/header fields to fetch and none are fabricated.
-            let raw = self.browser.network_resource_timing().await?;
-            let parsed: serde_json::Value =
-                serde_json::from_str(&raw).unwrap_or(serde_json::Value::Null);
-            let resources = parsed
-                .get("resources")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-            let mut lines: Vec<String> = Vec::new();
-            for resource in &resources {
-                let name = resource
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let initiator = resource
-                    .get("initiatorType")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("other");
-                if !a.include_static && is_static_initiator(initiator) {
-                    continue;
-                }
-                if let Some(re) = &filter_regex {
-                    if !re.is_match(name) {
-                        continue;
-                    }
-                }
-                let duration = resource
-                    .get("duration")
-                    .and_then(|v| v.as_f64())
-                    .unwrap_or(0.0);
-                let size = resource
-                    .get("transferSize")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(0);
-                let url = redact_sensitive_url(name);
-                lines.push(format!(
-                    "[{initiator}] {url} => duration={duration:.0}ms size={size}"
-                ));
+                let public = upstream_rpc_result(code, &message);
+                finish_native(
+                    &self.core,
+                    public_op,
+                    crate::browser::audit::NativeCallOutcome::UpstreamRpc,
+                    Some(detail),
+                    public,
+                )
             }
-            let joined = lines.join("\n");
-            let (text, next_cursor) = paginate_lines(&joined, a.cursor.as_deref(), limit)?;
-            let count = text.lines().count();
-            Ok::<_, CoreError>(BrowserNetworkOutput {
-                count,
-                requests: text,
-                next_cursor,
-                coverage: "performance-resource-timing: method, status, and headers are not available in this runtime".to_string(),
-            })
-        }
-        .await;
-        let detail = result
-            .as_ref()
-            .ok()
-            .map(|v| serde_json::json!({"count":v.count,"cursor":v.next_cursor}));
-        browser_outcome(&self.core, "browser_network", result, detail)
-    }
-
-    #[tool(
-        description = "Inspect one element target via nodeDetails plus a redacted outerHTML and computed-style allowlist. Sensitive value/token/password-like attributes are redacted. The layout rect is always null because this runtime performs no layout.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserDomOutput>()
-    )]
-    async fn browser_dom(&self, Parameters(a): Parameters<BrowserDomArgs>) -> CallToolResult {
-        let result = async {
-            let text = self.browser.dom_inspect(&a.ref_id).await?;
-            let (text, truncated) = truncate_utf8(text, 64 * 1024);
-            Ok::<_, CoreError>(BrowserDomOutput {
-                target: a.ref_id.clone(),
-                result: text,
-                truncated,
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_dom",
-            result,
-            Some(serde_json::json!({"target":a.ref_id})),
-        )
-    }
-
-    #[tool(
-        description = "Evaluate JavaScript inside the active page context, optionally against an element ref. Function-style expressions are invoked once and return their value.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserEvaluateOutput>()
-    )]
-    async fn browser_evaluate(
-        &self,
-        Parameters(a): Parameters<BrowserEvaluateArgs>,
-    ) -> CallToolResult {
-        let result = async {
-            if a.expression.is_empty() || a.expression.len() > 256 * 1024 {
-                return Err(CoreError::new(
-                    ErrorCode::InvalidArgument,
-                    "browser evaluate expression must be 1..262144 bytes",
-                ));
-            }
-            let text = self
-                .browser
-                .evaluate_expression(&a.expression, a.ref_id.as_deref())
-                .await?;
-            let (text, truncated) = truncate_utf8(text, 256 * 1024);
-            Ok::<_, CoreError>(BrowserEvaluateOutput {
-                result: text,
-                truncated,
-            })
-        }
-        .await;
-        browser_outcome(
-            &self.core,
-            "browser_evaluate",
-            result,
-            Some(
-                serde_json::json!({"expression_bytes":a.expression.len(),"has_target":a.ref_id.is_some()}),
-            ),
-        )
-    }
-
-    #[tool(
-        description = "Read browser performance timing/resource data from the active page via the Performance API. The Lightpanda runtime exposes no CDP, so cdp_supported is always false.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserPerformanceOutput>()
-    )]
-    async fn browser_performance(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = async {
-            let raw = self.browser.performance_timing().await?;
-            let (page_text, page_truncated) = truncate_utf8(raw, 256 * 1024);
-            Ok::<_, CoreError>(BrowserPerformanceOutput {
-                page: page_text,
-                page_truncated,
-                cdp_supported: false,
-                cdp: None,
-                backend: "lightpanda".to_string(),
-            })
-        }
-        .await;
-        let detail=result.as_ref().ok().map(|v|serde_json::json!({"cdp_supported":v.cdp_supported,"page_truncated":v.page_truncated,"backend":v.backend}));
-        browser_outcome(&self.core, "browser_performance", result, detail)
-    }
-
-    #[tool(
-        description = "Start, stop, or read status of app-owned tracing for the active browser session. The trace records timestamps and tool names only, never arguments or page content. Trace artifacts stay inside the session sandbox and are returned only as opaque metadata.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserTraceOutput>()
-    )]
-    async fn browser_trace(&self, Parameters(a): Parameters<BrowserTraceArgs>) -> CallToolResult {
-        let action = match a.action {
-            BrowserTraceAction::Start => "start",
-            BrowserTraceAction::Stop => "stop",
-            BrowserTraceAction::Status => "status",
-        };
-        let result = async {
-            self.browser.guard_page_operation().await?;
-            match a.action {
-                BrowserTraceAction::Status => Ok::<_, CoreError>(BrowserTraceOutput {
-                    tracing: self.browser.is_tracing().await,
-                    artifact_id: None,
-                    files: None,
-                    bytes: None,
-                }),
-                BrowserTraceAction::Start => {
-                    if self.browser.is_tracing().await {
-                        return Err(CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser trace is already running",
-                        ));
-                    }
-                    self.browser.start_trace().await;
-                    Ok(BrowserTraceOutput {
-                        tracing: true,
-                        artifact_id: None,
-                        files: None,
-                        bytes: None,
-                    })
-                }
-                BrowserTraceAction::Stop => {
-                    if !self.browser.is_tracing().await {
-                        return Err(CoreError::new(
-                            ErrorCode::InvalidArgument,
-                            "browser trace is not running",
-                        ));
-                    }
-                    let events = self.browser.stop_trace().await;
-                    let trace_dir = self.browser.active_artifact_dir().await?.join("traces");
-                    std::fs::create_dir_all(&trace_dir).map_err(CoreError::io)?;
-                    let mut events_body = String::new();
-                    for event in &events {
-                        let line = serde_json::to_string(event).map_err(|_| {
-                            CoreError::new(
-                                ErrorCode::BrowserArtifactFailed,
-                                "browser trace event could not be serialized",
-                            )
-                        })?;
-                        events_body.push_str(&line);
-                        events_body.push('\n');
-                    }
-                    let manifest_body = serde_json::to_string_pretty(&serde_json::json!({
-                        "schema": "lc-trace-v1",
-                        "event_count": events.len(),
-                    }))
-                    .map_err(|_| {
-                        CoreError::new(
-                            ErrorCode::BrowserArtifactFailed,
-                            "browser trace manifest could not be serialized",
-                        )
-                    })?;
-                    let written: [(&str, String); 2] = [
-                        ("events.jsonl", events_body),
-                        ("manifest.json", manifest_body),
-                    ];
-                    let mut total = 0u64;
-                    let mut records: Vec<(String, String)> = Vec::new();
-                    for (rel, body) in &written {
-                        std::fs::write(trace_dir.join(rel), body).map_err(CoreError::io)?;
-                        total = total.saturating_add(body.len() as u64);
-                        records.push((
-                            (*rel).to_string(),
-                            lc_core::ops::sha256_hex(body.as_bytes()),
-                        ));
-                    }
-                    // Brief, opaque stop metadata: one artifact id fingerprinting the whole
-                    // trace set (sorted rel-path + per-file sha256), a file count, and total
-                    // bytes. No filenames, per-file hashes, or paths are returned.
-                    records.sort();
-                    let fingerprint: String = records
-                        .iter()
-                        .map(|(rel, hash)| format!("{rel}:{hash}\n"))
-                        .collect();
-                    let artifact_id = format!(
-                        "a-{}",
-                        &lc_core::ops::sha256_hex(fingerprint.as_bytes())[..16]
-                    );
-                    Ok(BrowserTraceOutput {
-                        tracing: false,
-                        artifact_id: Some(artifact_id),
-                        files: Some(written.len()),
-                        bytes: Some(total),
-                    })
-                }
+            Err(err) => {
+                let public = err_result(&err);
+                finish_native(
+                    &self.core,
+                    public_op,
+                    crate::browser::audit::NativeCallOutcome::Local(&err),
+                    Some(detail),
+                    public,
+                )
             }
         }
-        .await;
-        let detail = Some(serde_json::json!({"action":action}));
-        browser_outcome(&self.core, "browser_trace", result, detail)
     }
 
     #[tool(
-        description = "Report Visible Debug DevTools support. The fixed Lightpanda background backend has no visible DevTools; this tool fails closed and never launches a second browser.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<BrowserDevtoolsOutput>()
+        description = "Navigate the session to an http(s) URL. Native Lightpanda goto; optional timeout (ms) and waitUntil load state.",
+        annotations(read_only_hint = false)
     )]
-    async fn browser_devtools(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = async {
-            self.browser.guard_page_operation().await?;
-            Err::<BrowserDevtoolsOutput, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "visible DevTools is not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        browser_outcome(&self.core, "browser_devtools", result, None)
-    }
-
-    #[tool(
-        description = "File upload is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserUploadOutput>()
-    )]
-    async fn browser_upload(&self, Parameters(a): Parameters<BrowserUploadArgs>) -> CallToolResult {
-        let sources: Vec<serde_json::Value> = a
-            .sources
-            .iter()
-            .map(|source| match source {
-                BrowserUploadSource::Workspace { path } => {
-                    serde_json::json!({"kind":"workspace","path":path})
-                }
-                BrowserUploadSource::Artifact { .. } => serde_json::json!({"kind":"artifact"}),
-            })
-            .collect();
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            Err::<BrowserUploadOutput, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "file upload is not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        let detail = serde_json::json!({
-            "workspace_id": a.workspace_id,
-            "sources": sources,
-            "file_count": a.sources.len(),
-        });
-        browser_outcome(&self.core, "browser_upload", result, Some(detail))
-    }
-
-    #[tool(
-        description = "Downloads are not supported by the Lightpanda runtime and fail closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = true),
-        output_schema = schema_for_output::<Vec<BrowserDownloadInfo>>()
-    )]
-    async fn browser_downloads(&self, Parameters(_): Parameters<EmptyArgs>) -> CallToolResult {
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            Err::<Vec<BrowserDownloadInfo>, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "downloads are not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        browser_outcome(&self.core, "browser_downloads", result, None)
-    }
-
-    #[tool(
-        description = "Saving downloads is not supported by the Lightpanda runtime and fails closed with BROWSER_FEATURE_UNSUPPORTED.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserSavedDownloadOutput>()
-    )]
-    async fn browser_save_download_to_workspace(
+    async fn browser_lightpanda_goto(
         &self,
-        Parameters(a): Parameters<BrowserSaveDownloadArgs>,
+        Parameters(a): Parameters<LightpandaGotoArgs>,
     ) -> CallToolResult {
-        let result = async {
-            self.browser.guard_unsupported().await?;
-            Err::<BrowserSavedDownloadOutput, CoreError>(CoreError::new(
-                ErrorCode::BrowserFeatureUnsupported,
-                "saving downloads is not supported by the lightpanda runtime",
-            ))
-        }
-        .await;
-        let detail = serde_json::json!({"workspace_id":a.workspace_id,"download_id":a.download_id,"path":a.path});
-        browser_outcome(
-            &self.core,
-            "browser_save_download_to_workspace",
-            result,
-            Some(detail),
-        )
+        self.native_tool_call("browser_lightpanda_goto", "goto", &a).await
     }
 
     #[tool(
-        description = "Run up to 20 safe browser steps sequentially using the same Local Workspaces validation/policy paths. Every step is validated before step 0 runs; unsupported step types (set_viewport, screenshot) are rejected up front. Stops on first failure and never replays a side-effecting step after process loss.",
-        annotations(read_only_hint = false),
-        output_schema = schema_for_output::<BrowserRunStepsOutput>()
+        description = "Run a web search in the session. Native Lightpanda search; optional timeout (ms).",
+        annotations(read_only_hint = false)
     )]
-    async fn browser_run_steps(
+    async fn browser_lightpanda_search(
         &self,
-        Parameters(a): Parameters<BrowserRunStepsArgs>,
+        Parameters(a): Parameters<LightpandaSearchArgs>,
     ) -> CallToolResult {
-        let step_count = a.steps.len();
-        let types: Vec<&'static str> = a
-            .steps
-            .iter()
-            .map(|s| match s {
-                BrowserStep::Navigate { .. } => "navigate",
-                BrowserStep::Snapshot => "snapshot",
-                BrowserStep::Click { .. } => "click",
-                BrowserStep::Fill { .. } => "fill",
-                BrowserStep::Press { .. } => "press",
-                BrowserStep::Select { .. } => "select",
-                BrowserStep::Wait { .. } => "wait",
-                BrowserStep::SetViewport { .. } => "set_viewport",
-                BrowserStep::Screenshot { .. } => "screenshot",
-            })
-            .collect();
-        let mut step_failure: Option<CoreError> = None;
-        let result = async {
-            validate_batch_step_count(step_count)?;
-            self.browser.guard_page_operation().await?;
-            // Full preflight: every step must validate before step 0 runs, so
-            // an invalid later step can never ride on earlier side effects.
-            preflight_run_steps(&a.steps)?;
-            let mut results = Vec::with_capacity(step_count);
-            for (index, step) in a.steps.into_iter().enumerate() {
-                let one: Result<serde_json::Value, CoreError> = async {
-                    match step {
-                        BrowserStep::Navigate { url } => {
-                            let final_url = self.browser.navigate_to(&url).await?;
-                            Ok(serde_json::json!({"text":truncate_utf8(final_url,64*1024).0}))
-                        }
-                        BrowserStep::Snapshot => {
-                            let text = self.browser.snapshot_tree().await?;
-                            let (text, truncated) =
-                                truncate_utf8(text, crate::browser::types::MAX_SNAPSHOT_BYTES);
-                            Ok(serde_json::json!({"snapshot":text,"truncated":truncated}))
-                        }
-                        BrowserStep::Click { ref_id } => {
-                            self.browser.click_ref(&ref_id).await?;
-                            Ok(serde_json::json!({"ok":true}))
-                        }
-                        BrowserStep::Fill { ref_id, text } => {
-                            self.browser.fill_ref(&ref_id, &text, false).await?;
-                            Ok(serde_json::json!({"ok":true}))
-                        }
-                        BrowserStep::Press { key } => {
-                            self.browser.press_key(&key).await?;
-                            Ok(serde_json::json!({"ok":true}))
-                        }
-                        BrowserStep::Select { ref_id, values } => {
-                            self.browser.select_ref(&ref_id, &values).await?;
-                            Ok(serde_json::json!({"ok":true}))
-                        }
-                        BrowserStep::Wait {
-                            condition,
-                            timeout_ms,
-                        } => {
-                            let ok =
-                                browser_wait_internal(&self.browser, condition, timeout_ms).await?;
-                            Ok(serde_json::to_value(ok).unwrap_or_default())
-                        }
-                        // Rejected by preflight already; this is the fail-closed
-                        // backstop that never reaches a driver.
-                        BrowserStep::SetViewport { .. } => {
-                            Err::<serde_json::Value, CoreError>(CoreError::new(
-                                ErrorCode::BrowserFeatureUnsupported,
-                                "set_viewport steps are not supported by the lightpanda runtime",
-                            ))
-                        }
-                        BrowserStep::Screenshot { .. } => {
-                            Err::<serde_json::Value, CoreError>(CoreError::new(
-                                ErrorCode::BrowserFeatureUnsupported,
-                                "screenshot steps are not supported by the lightpanda runtime",
-                            ))
-                        }
-                    }
-                }
-                .await;
-                match one {
-                    Ok(v) => results.push(serde_json::json!({"index":index,"ok":true,"result":v})),
-                    Err(e) => {
-                        step_failure = Some(e.clone());
-                        return Ok::<_, CoreError>(BrowserRunStepsOutput {
-                            ok: false,
-                            results,
-                            failed_index: Some(index),
-                            status: Some("failed".to_string()),
-                            error: Some(BrowserStepError {
-                                code: e.code.as_str().to_string(),
-                                message: e.message,
-                            }),
-                        });
-                    }
-                }
-            }
-            Ok::<_, CoreError>(BrowserRunStepsOutput {
-                ok: true,
-                results,
-                failed_index: None,
-                status: None,
-                error: None,
-            })
-        }
-        .await;
-        // A failed step must never audit as allow: record failed_index/status
-        // and the error decision while still returning per-step results to the
-        // caller (stop-on-first-failure, no replay).
-        let audit_error: Option<CoreError> = match &result {
-            Ok(_) if step_failure.is_some() => step_failure.clone(),
-            Ok(_) => None,
-            Err(error) => Some(error.clone()),
-        };
-        let detail = Some(match &result {
-            Ok(_) if step_failure.is_some() => serde_json::json!({
-                "step_count": step_count,
-                "step_types": types,
-                "status": "failed",
-                "failed_index": result.as_ref().ok().and_then(|v| v.failed_index),
-                "error": step_failure.as_ref().map(|e| serde_json::json!({"code": e.code.as_str(), "message": e.message})),
-            }),
-            Ok(_) => serde_json::json!({
-                "step_count": step_count,
-                "step_types": types,
-                "status": "ok",
-                "failed_index": null,
-            }),
-            Err(_) => serde_json::json!({
-                "step_count": step_count,
-                "step_types": types,
-                "status": "error",
-            }),
-        });
-        if let Err(audit_error) = crate::browser::audit::record_browser_call(
-            &self.core,
-            "browser_run_steps",
-            audit_error.as_ref(),
-            detail,
-        ) {
-            return err_result(&audit_error);
-        }
-        match result {
-            Ok(value) => ok_structured(&value),
-            Err(error) => err_result(&error),
-        }
+        self.native_tool_call("browser_lightpanda_search", "search", &a).await
+    }
+
+    #[tool(
+        description = "Return the current page (or one element, or a navigated URL) as Markdown. Optional selector/backendNodeId/maxBytes/url/timeout.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_markdown(
+        &self,
+        Parameters(a): Parameters<LightpandaMarkdownArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_markdown", "markdown", &a).await
+    }
+
+    #[tool(
+        description = "Return the current page (or one element, or a navigated URL) as raw HTML. Optional selector/backendNodeId/url/timeout.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_html(
+        &self,
+        Parameters(a): Parameters<LightpandaHtmlArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_html", "html", &a).await
+    }
+
+    #[tool(
+        description = "List links on the current page, optionally navigating to a URL first. Optional url/timeout.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_links(
+        &self,
+        Parameters(a): Parameters<LightpandaLinksArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_links", "links", &a).await
+    }
+
+    #[tool(
+        description = "Evaluate a JavaScript script in the page and return the native result. Optional url/timeout/save. The script is passed to Lightpanda unchanged.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_evaluate(
+        &self,
+        Parameters(a): Parameters<LightpandaEvaluateArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_evaluate", "evaluate", &a).await
+    }
+
+    #[tool(
+        description = "Extract structured data using a native Lightpanda extraction schema string. Optional save.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_extract(
+        &self,
+        Parameters(a): Parameters<LightpandaExtractArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_extract", "extract", &a).await
+    }
+
+    #[tool(
+        description = "Return the accessibility/DOM tree. Optional url/timeout/backendNodeId/maxDepth.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_tree(
+        &self,
+        Parameters(a): Parameters<LightpandaTreeArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_tree", "tree", &a).await
+    }
+
+    #[tool(
+        description = "Return details for one backend node id, including a usable CSS selector.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_node_details(
+        &self,
+        Parameters(a): Parameters<LightpandaNodeDetailsArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_node_details", "nodeDetails", &a).await
+    }
+
+    #[tool(
+        description = "List interactive elements on the page. Optional url/timeout.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_interactive_elements(
+        &self,
+        Parameters(a): Parameters<LightpandaInteractiveElementsArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_interactive_elements", "interactiveElements", &a).await
+    }
+
+    #[tool(
+        description = "Extract structured data from the page. Optional url/timeout.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_structured_data(
+        &self,
+        Parameters(a): Parameters<LightpandaStructuredDataArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_structured_data", "structuredData", &a).await
+    }
+
+    #[tool(
+        description = "Detect forms and their fields on the page. Optional url/timeout.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_detect_forms(
+        &self,
+        Parameters(a): Parameters<LightpandaDetectFormsArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_detect_forms", "detectForms", &a).await
+    }
+
+    #[tool(
+        description = "Click an element by CSS selector or backendNodeId.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_click(
+        &self,
+        Parameters(a): Parameters<LightpandaClickArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_click", "click", &a).await
+    }
+
+    #[tool(
+        description = "Fill an input identified by selector or backendNodeId with a value.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_fill(
+        &self,
+        Parameters(a): Parameters<LightpandaFillArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_fill", "fill", &a).await
+    }
+
+    #[tool(
+        description = "Scroll the window or one node. Optional backendNodeId/x/y.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_scroll(
+        &self,
+        Parameters(a): Parameters<LightpandaScrollArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_scroll", "scroll", &a).await
+    }
+
+    #[tool(
+        description = "Wait until a CSS selector matches. Optional timeout (ms).",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_wait_for_selector(
+        &self,
+        Parameters(a): Parameters<LightpandaWaitForSelectorArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_wait_for_selector", "waitForSelector", &a).await
+    }
+
+    #[tool(
+        description = "Wait until a JavaScript expression is truthy. Optional timeout (ms). The script is passed to Lightpanda unchanged.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_wait_for_script(
+        &self,
+        Parameters(a): Parameters<LightpandaWaitForScriptArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_wait_for_script", "waitForScript", &a).await
+    }
+
+    #[tool(
+        description = "Wait for a page load state (load/domcontentloaded/networkalmostidle/networkidle/done). Optional timeout (ms).",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_wait_for_state(
+        &self,
+        Parameters(a): Parameters<LightpandaWaitForStateArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_wait_for_state", "waitForState", &a).await
+    }
+
+    #[tool(
+        description = "Hover an element by selector or backendNodeId.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_hover(
+        &self,
+        Parameters(a): Parameters<LightpandaHoverArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_hover", "hover", &a).await
+    }
+
+    #[tool(
+        description = "Press a key, optionally targeting an element by selector or backendNodeId.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_press(
+        &self,
+        Parameters(a): Parameters<LightpandaPressArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_press", "press", &a).await
+    }
+
+    #[tool(
+        description = "Select an option in a <select> by selector or backendNodeId.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_select_option(
+        &self,
+        Parameters(a): Parameters<LightpandaSelectOptionArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_select_option", "selectOption", &a).await
+    }
+
+    #[tool(
+        description = "Set the checked state of a checkbox/radio by selector or backendNodeId. checked defaults to true.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_set_checked(
+        &self,
+        Parameters(a): Parameters<LightpandaSetCheckedArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_set_checked", "setChecked", &a).await
+    }
+
+    #[tool(
+        description = "Find an element by ARIA role and/or accessible name.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_find_element(
+        &self,
+        Parameters(a): Parameters<LightpandaFindElementArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_find_element", "findElement", &a).await
+    }
+
+    #[tool(
+        description = "Return and drain buffered console logs for the session.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_console_logs(
+        &self,
+        Parameters(a): Parameters<LightpandaConsoleLogsArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_console_logs", "consoleLogs", &a).await
+    }
+
+    #[tool(
+        description = "Return the current page URL of the session.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_get_url(
+        &self,
+        Parameters(a): Parameters<LightpandaGetUrlArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_get_url", "getUrl", &a).await
+    }
+
+    #[tool(
+        description = "Return cookies, optionally filtered by url, or all cookies when all=true.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_get_cookies(
+        &self,
+        Parameters(a): Parameters<LightpandaGetCookiesArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_get_cookies", "getCookies", &a).await
+    }
+
+    #[tool(
+        description = "Read a Lightpanda LP_* environment variable by name.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_get_env(
+        &self,
+        Parameters(a): Parameters<LightpandaGetEnvArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_get_env", "getEnv", &a).await
+    }
+
+    #[tool(
+        description = "Save a PandaScript to the runtime's script directory under a relative path.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_save(
+        &self,
+        Parameters(a): Parameters<LightpandaSaveArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_save", "save", &a).await
+    }
+
+    #[tool(
+        description = "Create a new isolated Lightpanda browsing session, optionally named.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_session_new(
+        &self,
+        Parameters(a): Parameters<LightpandaSessionNewArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_session_new", "session_new", &a).await
+    }
+
+    #[tool(
+        description = "List active Lightpanda sessions.",
+        annotations(read_only_hint = true)
+    )]
+    async fn browser_lightpanda_session_list(
+        &self,
+        Parameters(a): Parameters<LightpandaSessionListArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_session_list", "session_list", &a).await
+    }
+
+    #[tool(
+        description = "Close a named Lightpanda session. The default session cannot be closed.",
+        annotations(read_only_hint = false)
+    )]
+    async fn browser_lightpanda_session_close(
+        &self,
+        Parameters(a): Parameters<LightpandaSessionCloseArgs>,
+    ) -> CallToolResult {
+        self.native_tool_call("browser_lightpanda_session_close", "session_close", &a).await
     }
 
     #[tool(
@@ -2465,7 +1433,7 @@ pub async fn serve(
     core: Arc<CoreServices>,
     agent_policy: Arc<crate::settings::AgentPolicyState>,
     agent_settings: Arc<crate::settings::AgentSettingsController>,
-    browser: Arc<crate::browser::manager::BrowserManager>,
+    browser: Arc<dyn crate::browser::lightpanda::BrowserNativeCaller>,
 ) -> std::io::Result<u16> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
