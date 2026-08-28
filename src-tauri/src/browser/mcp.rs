@@ -935,4 +935,3 @@ mod schema_tests {
         assert_eq!(detail["id_bytes"], 19);
     }
 }
-

@@ -48,20 +48,15 @@ impl BrowserNativeCaller for FakeNativeBrowser {
         arguments: Map<String, Value>,
         session_id: Option<&str>,
     ) -> Result<UpstreamToolResponse, CoreError> {
-        self.calls.lock().await.push((
-            tool.to_string(),
-            arguments,
-            session_id.map(str::to_string),
-        ));
-        self.next
+        self.calls
             .lock()
             .await
-            .pop_front()
-            .unwrap_or_else(|| {
-                Ok(UpstreamToolResponse::Result(CallToolResult::success(
-                    vec![ContentBlock::text("ok")],
-                )))
-            })
+            .push((tool.to_string(), arguments, session_id.map(str::to_string)));
+        self.next.lock().await.pop_front().unwrap_or_else(|| {
+            Ok(UpstreamToolResponse::Result(CallToolResult::success(vec![
+                ContentBlock::text("ok"),
+            ])))
+        })
     }
 }
 
@@ -310,7 +305,10 @@ async fn browser_tool_discovery_is_exact_native_31() {
         "browser_trace",
         "browser_run_steps",
     ] {
-        assert!(!browser_names.contains(removed), "{removed} must be removed");
+        assert!(
+            !browser_names.contains(removed),
+            "{removed} must be removed"
+        );
     }
 
     // Upstream 0.3.7 advertises no outputSchema, so none may be published.
@@ -340,7 +338,10 @@ async fn browser_tool_discovery_is_exact_native_31() {
             .get(&name)
             .unwrap_or_else(|| panic!("{name} missing from contract mapping"));
         let mut public_schema = Value::Object((*tool.input_schema).clone());
-        if let Some(props) = public_schema.get_mut("properties").and_then(Value::as_object_mut) {
+        if let Some(props) = public_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        {
             props.remove("session_id");
         }
         let pinned_schema = pinned
@@ -367,12 +368,18 @@ async fn fill_forwards_value_but_audit_omits_it() {
     let calls = fake.calls().await;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "fill");
-    assert_eq!(calls[0].1["value"], secret, "value must be forwarded unchanged");
+    assert_eq!(
+        calls[0].1["value"], secret,
+        "value must be forwarded unchanged"
+    );
     let rows = matching_audit(&core, "browser_lightpanda_fill");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].decision, "allow");
     let detail = serde_json::to_string(rows[0].detail.as_ref().unwrap()).unwrap();
-    assert!(!detail.contains(secret), "audit must not contain the fill value");
+    assert!(
+        !detail.contains(secret),
+        "audit must not contain the fill value"
+    );
 }
 
 #[tokio::test]
@@ -382,9 +389,8 @@ async fn evaluate_forwards_script_but_audit_omits_it() {
     let script = "document.title + '-secret-script'";
     let result = client
         .call_tool(
-            CallToolRequestParams::new("browser_lightpanda_evaluate").with_arguments(arguments(
-                serde_json::json!({"script": script}),
-            )),
+            CallToolRequestParams::new("browser_lightpanda_evaluate")
+                .with_arguments(arguments(serde_json::json!({"script": script}))),
         )
         .await
         .unwrap();
@@ -392,11 +398,17 @@ async fn evaluate_forwards_script_but_audit_omits_it() {
     let calls = fake.calls().await;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "evaluate");
-    assert_eq!(calls[0].1["script"], script, "script must be forwarded unchanged");
+    assert_eq!(
+        calls[0].1["script"], script,
+        "script must be forwarded unchanged"
+    );
     let rows = matching_audit(&core, "browser_lightpanda_evaluate");
     assert_eq!(rows.len(), 1);
     let detail = serde_json::to_string(rows[0].detail.as_ref().unwrap()).unwrap();
-    assert!(!detail.contains(script), "audit must not contain the script");
+    assert!(
+        !detail.contains(script),
+        "audit must not contain the script"
+    );
 }
 
 #[tokio::test]
@@ -406,9 +418,8 @@ async fn extract_forwards_schema_string_unchanged() {
     let schema = "{\"title\":{\"selector\":\"h1.head\"}}";
     let result = client
         .call_tool(
-            CallToolRequestParams::new("browser_lightpanda_extract").with_arguments(arguments(
-                serde_json::json!({"schema": schema}),
-            )),
+            CallToolRequestParams::new("browser_lightpanda_extract")
+                .with_arguments(arguments(serde_json::json!({"schema": schema}))),
         )
         .await
         .unwrap();
@@ -416,11 +427,17 @@ async fn extract_forwards_schema_string_unchanged() {
     let calls = fake.calls().await;
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, "extract");
-    assert_eq!(calls[0].1["schema"], schema, "schema must be forwarded unchanged");
+    assert_eq!(
+        calls[0].1["schema"], schema,
+        "schema must be forwarded unchanged"
+    );
     let rows = matching_audit(&core, "browser_lightpanda_extract");
     assert_eq!(rows.len(), 1);
     let detail = serde_json::to_string(rows[0].detail.as_ref().unwrap()).unwrap();
-    assert!(!detail.contains("h1.head"), "audit must not contain the schema");
+    assert!(
+        !detail.contains("h1.head"),
+        "audit must not contain the schema"
+    );
 }
 
 #[tokio::test]
@@ -506,8 +523,14 @@ async fn save_forwards_path_and_script_but_audit_omits_both() {
     let rows = matching_audit(&core, "browser_lightpanda_save");
     assert_eq!(rows.len(), 1);
     let detail = serde_json::to_string(rows[0].detail.as_ref().unwrap()).unwrap();
-    assert!(!detail.contains(path), "audit must not contain the save path");
-    assert!(!detail.contains(script), "audit must not contain the save script");
+    assert!(
+        !detail.contains(path),
+        "audit must not contain the save path"
+    );
+    assert!(
+        !detail.contains(script),
+        "audit must not contain the save script"
+    );
 }
 
 #[tokio::test]
@@ -517,9 +540,8 @@ async fn search_audit_omits_query() {
     let query = "secret search query xyz";
     let result = client
         .call_tool(
-            CallToolRequestParams::new("browser_lightpanda_search").with_arguments(arguments(
-                serde_json::json!({"query": query}),
-            )),
+            CallToolRequestParams::new("browser_lightpanda_search")
+                .with_arguments(arguments(serde_json::json!({"query": query}))),
         )
         .await
         .unwrap();
@@ -566,9 +588,8 @@ async fn file_url_is_rejected_before_native_call() {
     let client = client(port).await;
     let result = client
         .call_tool(
-            CallToolRequestParams::new("browser_lightpanda_goto").with_arguments(arguments(
-                serde_json::json!({"url": "file:///etc/passwd"}),
-            )),
+            CallToolRequestParams::new("browser_lightpanda_goto")
+                .with_arguments(arguments(serde_json::json!({"url": "file:///etc/passwd"}))),
         )
         .await
         .unwrap();
@@ -618,7 +639,11 @@ async fn upstream_is_error_remains_is_error() {
         )
         .await
         .unwrap();
-    assert_eq!(result.is_error, Some(true), "upstream isError must be preserved");
+    assert_eq!(
+        result.is_error,
+        Some(true),
+        "upstream isError must be preserved"
+    );
     let rows = matching_audit(&core, "browser_lightpanda_click");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].decision, "error");
@@ -646,7 +671,10 @@ async fn upstream_json_rpc_error_keeps_upstream_code() {
     assert_eq!(result.is_error, Some(true));
     let payload: Value = serde_json::from_str(&first_text(&result)).unwrap();
     assert_eq!(payload["upstream_code"], -32604);
-    assert!(payload["message"].as_str().unwrap().contains("FrameNotLoaded"));
+    assert!(payload["message"]
+        .as_str()
+        .unwrap()
+        .contains("FrameNotLoaded"));
     let rows = matching_audit(&core, "browser_lightpanda_goto");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].decision, "error");
@@ -654,7 +682,9 @@ async fn upstream_json_rpc_error_keeps_upstream_code() {
     let detail = rows[0].detail.as_ref().unwrap();
     assert_eq!(detail["upstream_code"], -32604);
     assert!(
-        !serde_json::to_string(detail).unwrap().contains("no frame is loaded"),
+        !serde_json::to_string(detail)
+            .unwrap()
+            .contains("no frame is loaded"),
         "audit must not contain the raw upstream message"
     );
 }

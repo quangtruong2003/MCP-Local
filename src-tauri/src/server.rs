@@ -13,11 +13,11 @@ use crate::{
         LightpandaFindElementArgs, LightpandaGetCookiesArgs, LightpandaGetEnvArgs,
         LightpandaGetUrlArgs, LightpandaGotoArgs, LightpandaHoverArgs, LightpandaHtmlArgs,
         LightpandaInteractiveElementsArgs, LightpandaLinksArgs, LightpandaMarkdownArgs,
-        LightpandaNodeDetailsArgs, LightpandaPressArgs, LightpandaSaveArgs,
-        LightpandaScrollArgs, LightpandaSearchArgs, LightpandaSelectOptionArgs,
-        LightpandaSessionCloseArgs, LightpandaSessionListArgs, LightpandaSessionNewArgs,
-        LightpandaSetCheckedArgs, LightpandaStructuredDataArgs, LightpandaTreeArgs,
-        LightpandaWaitForScriptArgs, LightpandaWaitForSelectorArgs, LightpandaWaitForStateArgs,
+        LightpandaNodeDetailsArgs, LightpandaPressArgs, LightpandaSaveArgs, LightpandaScrollArgs,
+        LightpandaSearchArgs, LightpandaSelectOptionArgs, LightpandaSessionCloseArgs,
+        LightpandaSessionListArgs, LightpandaSessionNewArgs, LightpandaSetCheckedArgs,
+        LightpandaStructuredDataArgs, LightpandaTreeArgs, LightpandaWaitForScriptArgs,
+        LightpandaWaitForSelectorArgs, LightpandaWaitForStateArgs,
     },
     screen_capture::{
         filter_targets_for_scope, CaptureTarget, CapturedImage, ScreenCaptureProvider,
@@ -369,8 +369,7 @@ impl WorkspaceServer {
                 public,
             );
         }
-        let mut detail =
-            safe_native_audit_detail(native_tool, &native_args, session_id.as_deref());
+        let mut detail = safe_native_audit_detail(native_tool, &native_args, session_id.as_deref());
         let response = self
             .browser
             .call_native(native_tool, native_args, session_id.as_deref())
@@ -420,7 +419,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaGotoArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_goto", "goto", &a).await
+        self.native_tool_call("browser_lightpanda_goto", "goto", &a)
+            .await
     }
 
     #[tool(
@@ -431,7 +431,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSearchArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_search", "search", &a).await
+        self.native_tool_call("browser_lightpanda_search", "search", &a)
+            .await
     }
 
     #[tool(
@@ -442,7 +443,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaMarkdownArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_markdown", "markdown", &a).await
+        self.native_tool_call("browser_lightpanda_markdown", "markdown", &a)
+            .await
     }
 
     #[tool(
@@ -453,7 +455,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaHtmlArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_html", "html", &a).await
+        self.native_tool_call("browser_lightpanda_html", "html", &a)
+            .await
     }
 
     #[tool(
@@ -464,7 +467,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaLinksArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_links", "links", &a).await
+        self.native_tool_call("browser_lightpanda_links", "links", &a)
+            .await
     }
 
     #[tool(
@@ -475,7 +479,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaEvaluateArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_evaluate", "evaluate", &a).await
+        self.native_tool_call("browser_lightpanda_evaluate", "evaluate", &a)
+            .await
     }
 
     #[tool(
@@ -486,7 +491,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaExtractArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_extract", "extract", &a).await
+        self.native_tool_call("browser_lightpanda_extract", "extract", &a)
+            .await
     }
 
     #[tool(
@@ -497,7 +503,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaTreeArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_tree", "tree", &a).await
+        self.native_tool_call("browser_lightpanda_tree", "tree", &a)
+            .await
     }
 
     #[tool(
@@ -508,7 +515,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaNodeDetailsArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_node_details", "nodeDetails", &a).await
+        self.native_tool_call("browser_lightpanda_node_details", "nodeDetails", &a)
+            .await
     }
 
     #[tool(
@@ -519,7 +527,12 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaInteractiveElementsArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_interactive_elements", "interactiveElements", &a).await
+        self.native_tool_call(
+            "browser_lightpanda_interactive_elements",
+            "interactiveElements",
+            &a,
+        )
+        .await
     }
 
     #[tool(
@@ -530,7 +543,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaStructuredDataArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_structured_data", "structuredData", &a).await
+        self.native_tool_call("browser_lightpanda_structured_data", "structuredData", &a)
+            .await
     }
 
     #[tool(
@@ -541,7 +555,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaDetectFormsArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_detect_forms", "detectForms", &a).await
+        self.native_tool_call("browser_lightpanda_detect_forms", "detectForms", &a)
+            .await
     }
 
     #[tool(
@@ -552,7 +567,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaClickArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_click", "click", &a).await
+        self.native_tool_call("browser_lightpanda_click", "click", &a)
+            .await
     }
 
     #[tool(
@@ -563,7 +579,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaFillArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_fill", "fill", &a).await
+        self.native_tool_call("browser_lightpanda_fill", "fill", &a)
+            .await
     }
 
     #[tool(
@@ -574,7 +591,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaScrollArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_scroll", "scroll", &a).await
+        self.native_tool_call("browser_lightpanda_scroll", "scroll", &a)
+            .await
     }
 
     #[tool(
@@ -585,7 +603,12 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaWaitForSelectorArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_wait_for_selector", "waitForSelector", &a).await
+        self.native_tool_call(
+            "browser_lightpanda_wait_for_selector",
+            "waitForSelector",
+            &a,
+        )
+        .await
     }
 
     #[tool(
@@ -596,7 +619,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaWaitForScriptArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_wait_for_script", "waitForScript", &a).await
+        self.native_tool_call("browser_lightpanda_wait_for_script", "waitForScript", &a)
+            .await
     }
 
     #[tool(
@@ -607,7 +631,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaWaitForStateArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_wait_for_state", "waitForState", &a).await
+        self.native_tool_call("browser_lightpanda_wait_for_state", "waitForState", &a)
+            .await
     }
 
     #[tool(
@@ -618,7 +643,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaHoverArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_hover", "hover", &a).await
+        self.native_tool_call("browser_lightpanda_hover", "hover", &a)
+            .await
     }
 
     #[tool(
@@ -629,7 +655,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaPressArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_press", "press", &a).await
+        self.native_tool_call("browser_lightpanda_press", "press", &a)
+            .await
     }
 
     #[tool(
@@ -640,7 +667,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSelectOptionArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_select_option", "selectOption", &a).await
+        self.native_tool_call("browser_lightpanda_select_option", "selectOption", &a)
+            .await
     }
 
     #[tool(
@@ -651,7 +679,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSetCheckedArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_set_checked", "setChecked", &a).await
+        self.native_tool_call("browser_lightpanda_set_checked", "setChecked", &a)
+            .await
     }
 
     #[tool(
@@ -662,7 +691,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaFindElementArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_find_element", "findElement", &a).await
+        self.native_tool_call("browser_lightpanda_find_element", "findElement", &a)
+            .await
     }
 
     #[tool(
@@ -673,7 +703,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaConsoleLogsArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_console_logs", "consoleLogs", &a).await
+        self.native_tool_call("browser_lightpanda_console_logs", "consoleLogs", &a)
+            .await
     }
 
     #[tool(
@@ -684,7 +715,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaGetUrlArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_get_url", "getUrl", &a).await
+        self.native_tool_call("browser_lightpanda_get_url", "getUrl", &a)
+            .await
     }
 
     #[tool(
@@ -695,7 +727,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaGetCookiesArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_get_cookies", "getCookies", &a).await
+        self.native_tool_call("browser_lightpanda_get_cookies", "getCookies", &a)
+            .await
     }
 
     #[tool(
@@ -706,7 +739,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaGetEnvArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_get_env", "getEnv", &a).await
+        self.native_tool_call("browser_lightpanda_get_env", "getEnv", &a)
+            .await
     }
 
     #[tool(
@@ -717,7 +751,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSaveArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_save", "save", &a).await
+        self.native_tool_call("browser_lightpanda_save", "save", &a)
+            .await
     }
 
     #[tool(
@@ -728,7 +763,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSessionNewArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_session_new", "session_new", &a).await
+        self.native_tool_call("browser_lightpanda_session_new", "session_new", &a)
+            .await
     }
 
     #[tool(
@@ -739,7 +775,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSessionListArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_session_list", "session_list", &a).await
+        self.native_tool_call("browser_lightpanda_session_list", "session_list", &a)
+            .await
     }
 
     #[tool(
@@ -750,7 +787,8 @@ impl WorkspaceServer {
         &self,
         Parameters(a): Parameters<LightpandaSessionCloseArgs>,
     ) -> CallToolResult {
-        self.native_tool_call("browser_lightpanda_session_close", "session_close", &a).await
+        self.native_tool_call("browser_lightpanda_session_close", "session_close", &a)
+            .await
     }
 
     #[tool(

@@ -67,7 +67,10 @@ mod tests {
 
     #[test]
     fn user_controlled_browser_denials_are_classified_as_deny() {
-        for code in [ErrorCode::AccessPaused, ErrorCode::BrowserAutomationDisabled] {
+        for code in [
+            ErrorCode::AccessPaused,
+            ErrorCode::BrowserAutomationDisabled,
+        ] {
             assert_eq!(decision(Some(&CoreError::new(code, "denied"))), "deny");
         }
         assert_eq!(decision(None), "allow");

@@ -382,11 +382,8 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
     let runtime = production_runtime();
     let gate = Arc::new(NativeRuntimeManagerGate::new(runtime.clone()));
     let launcher = Arc::new(WslNativeServerLauncher::new(PathBuf::from("wsl.exe")));
-    let browser = LightpandaNativeService::new(
-        gate,
-        launcher,
-        BrowserRuntimeSettings::from(&settings),
-    );
+    let browser =
+        LightpandaNativeService::new(gate, launcher, BrowserRuntimeSettings::from(&settings));
     let capture: Arc<dyn ScreenCaptureProvider> = Arc::new(EmptyCapture);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -394,8 +391,9 @@ async fn spawn_real(settings: AppSettings) -> RealEnv {
         .expect("bind mcp listener");
     let port = listener.local_addr().expect("mcp addr").port();
     let core_for_server = core.clone();
-    let browser_for_server: Arc<dyn local_workspace_mcp_manager::browser::lightpanda::BrowserNativeCaller> =
-        browser.clone();
+    let browser_for_server: Arc<
+        dyn local_workspace_mcp_manager::browser::lightpanda::BrowserNativeCaller,
+    > = browser.clone();
     let service = rmcp::transport::streamable_http_server::StreamableHttpService::new(
         move || {
             Ok(WorkspaceServer::new(
@@ -686,8 +684,9 @@ async fn interactive_element_id_by_dom_id(env: &RealEnv, dom_id: &str) -> i64 {
 /// Like `try_node_id_near`, but panics with the full text when the id cannot
 /// be found, so format drift is visible in test output.
 fn node_id_near(text: &str, needle: &str) -> i64 {
-    try_node_id_near(text, needle)
-        .unwrap_or_else(|| panic!("no backendNodeId found near {needle:?} in native output:\n{text}"))
+    try_node_id_near(text, needle).unwrap_or_else(|| {
+        panic!("no backendNodeId found near {needle:?} in native output:\n{text}")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -816,14 +815,24 @@ async fn t02_bootstrap_sessions_single_server_process_and_parity_evidence() {
         .expect("server child running after first native call");
 
     // Create two named sessions and navigate them independently.
-    let alpha = tc(&env, "browser_lightpanda_session_new", json!({ "name": "alpha" })).await;
+    let alpha = tc(
+        &env,
+        "browser_lightpanda_session_new",
+        json!({ "name": "alpha" }),
+    )
+    .await;
     assert_ok(&alpha, "session_new alpha");
     assert!(
         first_text(&alpha).contains("alpha"),
         "session_new must return the session id: {}",
         first_text(&alpha)
     );
-    let beta = tc(&env, "browser_lightpanda_session_new", json!({ "name": "beta" })).await;
+    let beta = tc(
+        &env,
+        "browser_lightpanda_session_new",
+        json!({ "name": "beta" }),
+    )
+    .await;
     assert_ok(&beta, "session_new beta");
 
     goto(&env, &wsl_fixture.url, Some("alpha")).await;
@@ -838,8 +847,7 @@ async fn t02_bootstrap_sessions_single_server_process_and_parity_evidence() {
     assert_ok(&url_alpha, "get_url alpha");
     let url_alpha = first_text(&url_alpha);
     assert!(
-        url_alpha.trim().starts_with(&wsl_fixture.url)
-            && !url_alpha.contains("/plain"),
+        url_alpha.trim().starts_with(&wsl_fixture.url) && !url_alpha.contains("/plain"),
         "alpha must stay on the fixture root: {url_alpha}"
     );
 
@@ -872,7 +880,12 @@ async fn t02_bootstrap_sessions_single_server_process_and_parity_evidence() {
     print_parity_evidence(&env).await;
 
     // Closing a named session removes it from the list.
-    let close = tc(&env, "browser_lightpanda_session_close", json!({ "id": "beta" })).await;
+    let close = tc(
+        &env,
+        "browser_lightpanda_session_close",
+        json!({ "id": "beta" }),
+    )
+    .await;
     assert_ok(&close, "session_close beta");
     let list = tc(&env, "browser_lightpanda_session_list", json!({})).await;
     let list_text = first_text(&list);
@@ -1076,7 +1089,12 @@ async fn t04_raw_backend_node_id_action_parity() {
     .await;
     assert_ok(&check, "setChecked by backendNodeId");
     assert_eq!(
-        evaluate(&env, None, "document.getElementById('agree-checkbox').checked").await,
+        evaluate(
+            &env,
+            None,
+            "document.getElementById('agree-checkbox').checked"
+        )
+        .await,
         "true"
     );
 
@@ -1102,7 +1120,12 @@ async fn t04_raw_backend_node_id_action_parity() {
     .await;
     assert_ok(&hover, "hover by backendNodeId");
     assert_eq!(
-        evaluate(&env, None, "document.getElementById('hover-target').textContent").await,
+        evaluate(
+            &env,
+            None,
+            "document.getElementById('hover-target').textContent"
+        )
+        .await,
         "hover:hovered"
     );
 
@@ -1115,8 +1138,13 @@ async fn t04_raw_backend_node_id_action_parity() {
     .await;
     assert_ok(&press, "press by backendNodeId");
     assert!(
-        evaluate(&env, None, "document.getElementById('keyboard-log').textContent").await
-            .contains('a'),
+        evaluate(
+            &env,
+            None,
+            "document.getElementById('keyboard-log').textContent"
+        )
+        .await
+        .contains('a'),
         "keyboard target must receive the pressed key"
     );
 
@@ -1400,9 +1428,19 @@ async fn t07_cookie_isolation_between_native_sessions() {
     let env = spawn_real(enabled_settings()).await;
     let wsl_fixture = spawn_wsl_fixture().await;
 
-    let alpha = tc(&env, "browser_lightpanda_session_new", json!({ "name": "alpha" })).await;
+    let alpha = tc(
+        &env,
+        "browser_lightpanda_session_new",
+        json!({ "name": "alpha" }),
+    )
+    .await;
     assert_ok(&alpha, "session_new alpha");
-    let beta = tc(&env, "browser_lightpanda_session_new", json!({ "name": "beta" })).await;
+    let beta = tc(
+        &env,
+        "browser_lightpanda_session_new",
+        json!({ "name": "beta" }),
+    )
+    .await;
     assert_ok(&beta, "session_new beta");
 
     // Alpha visits the cookie-setting page.
@@ -1510,7 +1548,11 @@ async fn t09_lifecycle_pause_disable_and_process_loss_no_replay() {
     wait_process_dead(pid1, "paused server child").await;
 
     let paused = tc(&env, "browser_lightpanda_get_url", json!({})).await;
-    assert_error_code(&paused, ErrorCode::BrowserAutomationDisabled, "call while paused");
+    assert_error_code(
+        &paused,
+        ErrorCode::BrowserAutomationDisabled,
+        "call while paused",
+    );
 
     // Unpaused but disabled: calls fail closed and never restart the server.
     env.browser.on_pause_changed(false).await;

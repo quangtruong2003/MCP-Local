@@ -230,10 +230,7 @@ async fn plain() -> Html<&'static str> {
 
 async fn cookie() -> impl IntoResponse {
     (
-        [(
-            header::SET_COOKIE,
-            "fixture-cookie=chocolate; Path=/",
-        )],
+        [(header::SET_COOKIE, "fixture-cookie=chocolate; Path=/")],
         Html(COOKIE_HTML),
     )
 }
