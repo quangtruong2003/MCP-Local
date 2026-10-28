@@ -162,9 +162,11 @@ export default function App() {
       ) : page === "workspaces" ? (
         <WorkspacesPage
           workspaces={workspaces}
+          settings={settings}
           onWorkspacesChanged={async () => {
             await Promise.all([reloadWorkspaces(), refreshAudit()]);
           }}
+          onSaveSettings={saveSettings}
           reportError={reportError}
         />
       ) : page === "activity" ? (

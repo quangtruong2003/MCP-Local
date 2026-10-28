@@ -130,6 +130,7 @@ pub fn add_workspace(
         &canonical.display().to_string(),
     )
     .map_err(err_string)?;
+    workspace_repo::grant_full_access(&state.core.db, &ws.id).map_err(err_string)?;
     audit_ui(
         &state.core.db,
         Some(&ws.id),
@@ -138,7 +139,15 @@ pub fn add_workspace(
         Some(&canonical.display().to_string()),
         None,
     );
-    Ok(ws)
+    workspace_repo::get_workspace(&state.core.db, &ws.id).map_err(err_string)
+}
+
+#[tauri::command]
+pub fn list_drives() -> Vec<String> {
+    ('A'..='Z')
+        .map(|letter| format!("{letter}:\\"))
+        .filter(|root| std::path::Path::new(root).is_dir())
+        .collect()
 }
 
 #[tauri::command]

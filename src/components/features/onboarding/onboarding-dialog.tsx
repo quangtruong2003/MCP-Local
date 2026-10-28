@@ -24,7 +24,7 @@ import type { ConnectionStatus, Workspace } from "@/lib/types";
 
 /**
  * Guided first-run onboarding:
- * Welcome -> Add workspace -> Review Read ON / Write OFF -> Start connection,
+ * Welcome -> Add workspace -> Review full access -> Start connection,
  * then live connection states take over: NeedsLogin ->
  * NeedsFunnelPermission/HttpsSetup -> Verifying -> Online (Copy endpoint +
  * Finish).
@@ -161,8 +161,9 @@ export default function OnboardingFlow({
             {step === "add-workspace" ? (
               <div className="flex flex-col gap-3 text-sm">
                 <p className="text-muted-foreground">
-                  Pick at least one folder ChatGPT may read. Nothing outside these boundaries is
-                  ever touched.
+                  Pick at least one folder ChatGPT may use. File tools stay within workspace
+                  boundaries, but Full PowerShell scripts can reach other locations allowed by your
+                  Windows account.
                 </p>
                 {workspaces.length > 0 ? (
                   <ul className="flex flex-col gap-1" aria-label="Added workspaces">
@@ -185,7 +186,7 @@ export default function OnboardingFlow({
 
             {step === "review-permissions" ? (
               <div className="flex flex-col gap-3 text-sm">
-                <p className="text-muted-foreground">Every new folder starts with safe defaults:</p>
+                <p className="text-muted-foreground">Every new folder starts with full access:</p>
                 <ul className="flex flex-col gap-2">
                   <li className="flex items-start gap-2">
                     <ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary" />
@@ -199,16 +200,23 @@ export default function OnboardingFlow({
                   <li className="flex items-start gap-2">
                     <ShieldCheck aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-primary" />
                     <div>
-                      <strong>Write — off</strong>
+                      <strong>Write — on</strong>
                       <p className="text-muted-foreground">
-                        ChatGPT cannot create or change files until you allow it.
+                        ChatGPT can create files and apply patches.
+                      </p>
+                    </div>
+                  </li>
+                  <li className="flex items-start gap-2">
+                    <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-warning" />
+                    <div>
+                      <strong>Execute — on (Full PowerShell)</strong>
+                      <p className="text-muted-foreground">
+                        Scripts run with your Windows account permissions. Toggle anything off on
+                        the Workspaces page.
                       </p>
                     </div>
                   </li>
                 </ul>
-                <p className="text-[13px] text-muted-foreground">
-                  You can change both later on the Workspaces page.
-                </p>
               </div>
             ) : null}
 

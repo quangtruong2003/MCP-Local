@@ -73,6 +73,7 @@ export const api = {
   // Workspaces & audit
   addWorkspace: (rootPath: string, name?: string) =>
     invoke<Workspace>("add_workspace", { rootPath, name: name ?? null }),
+  listDrives: () => invoke<string[]>("list_drives"),
   listWorkspaces: () => invoke<Workspace[]>("list_workspaces"),
   setCapabilities: (id: string, canRead: boolean, canWrite: boolean) =>
     invoke<void>("set_capabilities", { id, canRead, canWrite }),

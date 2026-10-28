@@ -131,6 +131,25 @@ pub fn update_execution_access(
     Ok(())
 }
 
+/// Grants read, write, execute and Full PowerShell in one update. Used by the
+/// UI when a folder or drive is added so new workspaces start with full access.
+pub fn grant_full_access(db: &Database, id: &str) -> Result<(), CoreError> {
+    let n = db.with_conn(|c| {
+        c.execute(
+            "UPDATE workspaces SET can_read = 1, can_write = 1, can_execute = 1,
+             execution_mode = 'full_powershell', updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now_iso(), id],
+        )
+    })?;
+    if n == 0 {
+        return Err(CoreError::new(
+            ErrorCode::WorkspaceNotFound,
+            format!("workspace {id} not found"),
+        ));
+    }
+    Ok(())
+}
+
 /// Deletes a workspace. Its audit trail is untouched; the session grant
 /// cascades away with it.
 pub fn delete_workspace(db: &Database, id: &str) -> Result<(), CoreError> {
@@ -205,6 +224,17 @@ mod tests {
         let all = list_workspaces(&db).unwrap();
         assert_eq!(all.len(), 1);
         assert!(all[0].can_write);
+    }
+
+    #[test]
+    fn grant_full_access_enables_all_capabilities() {
+        let (db, _dir) = setup();
+        let ws = insert_workspace(&db, "A", r"C:\a").unwrap();
+        assert!(!ws.can_write && !ws.can_execute);
+        grant_full_access(&db, &ws.id).unwrap();
+        let got = get_workspace(&db, &ws.id).unwrap();
+        assert!(got.can_read && got.can_write && got.can_execute);
+        assert_eq!(got.execution_mode, ExecutionMode::FullPowerShell);
     }
 
     #[test]

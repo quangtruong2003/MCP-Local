@@ -10,8 +10,8 @@ export function UnrestrictedBanner({ active }: { active: boolean }) {
     >
       <ShieldAlert aria-hidden="true" className="size-4 shrink-0" />
       <span>
-        Unrestricted access is ON — capability gates, the sensitive-file deny list, the
-        approved-command list, the Full-PowerShell gate and execution bounds are bypassed. Pause
+        Unrestricted access is ON — capability gates, sensitive-file filtering, approved-command
+        checks and the Full-PowerShell gate are bypassed. Execution limits are raised. Pause
         remains the kill switch.
       </span>
     </div>

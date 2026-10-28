@@ -194,6 +194,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::add_workspace,
+            commands::list_drives,
             commands::list_workspaces,
             commands::set_capabilities,
             commands::set_execution_access,
